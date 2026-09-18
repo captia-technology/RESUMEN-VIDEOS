@@ -70,13 +70,25 @@ class HuellaTest(unittest.TestCase):
     def test_files_below_eight_mib_are_hashed_through_the_middle(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             medium = Path(temporary) / "medio.bin"
-            medium.write_bytes(b"A" * (6 * 1024 * 1024))
-            original = common.fingerprint(medium)["sha256"]
+            data = b"A" * (6 * 1024 * 1024)
+            medium.write_bytes(data)
+            # Hash must be exactly the complete file, not just the ends.
+            expected = hashlib.sha256(data).hexdigest()
+            self.assertEqual(common.fingerprint(medium)["sha256"], expected)
+            # Byte 5 MiB: past the first 4 MiB, so only reading a 6 MiB file whole notices it.
             with medium.open("r+b") as stream:
-                # Byte 5 MiB: past the first 4 MiB, so only reading a 6 MiB file whole notices it.
                 stream.seek(5 * 1024 * 1024)
                 stream.write(b"QQQQ")
-            self.assertNotEqual(common.fingerprint(medium)["sha256"], original)
+            self.assertNotEqual(common.fingerprint(medium)["sha256"], expected)
+
+    def test_large_files_use_only_ends(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            large = Path(temporary) / "grande.bin"
+            data = b"A" * (12 * 1024 * 1024)
+            large.write_bytes(data)
+            # Hash must be exactly the first 4 MiB + last 4 MiB.
+            expected = hashlib.sha256(data[:common.CHUNK] + data[-common.CHUNK:]).hexdigest()
+            self.assertEqual(common.fingerprint(large)["sha256"], expected)
 
 
 if __name__ == "__main__":
