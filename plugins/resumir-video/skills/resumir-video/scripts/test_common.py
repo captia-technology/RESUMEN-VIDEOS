@@ -186,5 +186,43 @@ class EnergiaTest(unittest.TestCase):
                 common.energy(path)
 
 
+class IslasTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        path = Path(self.temporary.name) / "tono.wav"
+        tone_wav(path)
+        self.levels = common.energy(path)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_grid_rounds_to_the_nearest_frame(self):
+        self.assertAlmostEqual(common.snap(1.234, 0.04, 0.0), 1.24)
+        self.assertAlmostEqual(common.snap(1.219, 0.04, 0.0), 1.2)
+        self.assertAlmostEqual(common.snap(1.2, 0.04, 0.032), 1.192)
+        self.assertAlmostEqual(common.snap(1.0, 1001 / 30000, 0.0), 1.001)
+        self.assertAlmostEqual(common.snap(2.0, 1001 / 30000, 0.0), 2.002)
+
+    def test_pauses_leave_islands_on_the_grid(self):
+        self.assertEqual(common.islands(self.levels, 0.5, 4.0, interval=0.04, origin=0.0),
+                         [[0.52, 1.08], [1.44, 3.08], [3.52, 4.0]])
+        self.assertEqual(common.islands(self.levels, 0.5, 4.0, interval=0.04, origin=0.0,
+                                        remove_pauses=False), [[0.52, 4.0]])
+        self.assertEqual(common.islands(self.levels, 0.5, 2.0, interval=0.04, origin=0.032),
+                         [[0.512, 1.072], [1.432, 1.992]])
+
+    def test_a_cut_inside_a_pause_keeps_nothing(self):
+        self.assertEqual(common.islands(self.levels, 1.1, 1.4, interval=0.04, origin=0.0), [])
+
+    def test_short_and_edge_spans_are_dropped(self):
+        self.assertEqual(common.islands(self.levels, 0.95, 3.7, interval=0.04, origin=0.0),
+                         [[1.44, 3.08]])
+
+    def test_a_visual_cut_keeps_its_short_span(self):
+        # §7.4: keeping the pauses means keeping the span too, even below MIN_EDGE_ISLAND.
+        self.assertEqual(common.islands(self.levels, 1.1, 1.2, interval=0.04, origin=0.0,
+                                        remove_pauses=False), [[1.12, 1.2]])
+
+
 if __name__ == "__main__":
     unittest.main()

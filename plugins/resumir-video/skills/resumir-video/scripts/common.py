@@ -29,6 +29,9 @@ MIN_SILENCE = 0.30
 ENERGY_STEP = 0.01
 ENERGY_FLOOR = -120.0
 ENERGY_BLOCK = 600
+PAUSE_MARGIN = 0.08
+MIN_ISLAND = 0.12
+MIN_EDGE_ISLAND = 0.20
 FULL_SCALE = 32768.0 * 32768.0
 SQUARES = []
 
@@ -418,3 +421,43 @@ def voiced(levels, a, b, threshold=SILENCE_DB):
     """True when any 10 ms window of [a, b) reaches `threshold`."""
     first, last = bounds(levels, a, b)
     return any(levels[index] >= threshold for index in range(first, last))
+
+
+def snap(t, interval, origin):
+    """Nearest instant of the frame grid; ties go up so the same value always lands the same way."""
+    steps = math.floor((t - origin) / interval + 0.5)
+    return round(origin + steps * interval, 6)
+
+
+def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SILENCE_DB,
+            min_silence=MIN_SILENCE, margin=PAUSE_MARGIN):
+    """Spans of [a, b) that survive removing pauses, snapped to the frame grid."""
+    if remove_pauses:
+        spans, cursor = [], a
+        for start, end in silences(levels, a, b, threshold, min_silence):
+            gap = (start + margin, end - margin)
+            if gap[1] - gap[0] <= 0:
+                continue
+            if gap[0] > cursor:
+                spans.append([cursor, gap[0]])
+            cursor = max(cursor, gap[1])
+        if b > cursor:
+            spans.append([cursor, b])
+        spans = [span for span in spans if span[1] - span[0] >= MIN_ISLAND - 1e-9]
+        while spans and spans[0][1] - spans[0][0] < MIN_EDGE_ISLAND - 1e-9:
+            spans.pop(0)
+        while spans and spans[-1][1] - spans[-1][0] < MIN_EDGE_ISLAND - 1e-9:
+            spans.pop()
+    else:
+        # §7.4: a visual_only cut keeps its pauses, so nothing is dropped for being short here.
+        spans = [[a, b]]
+    grid = []
+    for start, end in spans:
+        low, high = snap(start, interval, origin), snap(end, interval, origin)
+        if high - low < interval - 1e-9:
+            continue
+        if grid and low - grid[-1][1] < interval - 1e-9:
+            grid[-1][1] = high
+        else:
+            grid.append([low, high])
+    return grid
