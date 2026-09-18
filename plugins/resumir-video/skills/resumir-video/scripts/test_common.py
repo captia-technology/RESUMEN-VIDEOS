@@ -43,5 +43,41 @@ class ObjetivoTest(unittest.TestCase):
         self.assertAlmostEqual(common.parse_target("179.99s", 180.0), 179.99)
 
 
+class HuellaTest(unittest.TestCase):
+    def test_survives_a_move_and_notices_both_ends(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            big = root / "grande.bin"
+            big.write_bytes(b"A" * (9 * 1024 * 1024) + b"Z" * 16)
+            original = common.fingerprint(big)
+            moved = root / "otro nombre.bin"
+            big.replace(moved)
+            self.assertEqual(common.fingerprint(moved)["sha256"], original["sha256"])
+            self.assertEqual(set(original), {"size", "mtime_ns", "sha256"})
+            with moved.open("r+b") as stream:
+                stream.seek(-4, os.SEEK_END)
+                stream.write(b"QQQQ")
+            self.assertNotEqual(common.fingerprint(moved)["sha256"], original["sha256"])
+
+    def test_small_files_are_hashed_whole_and_only_once(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            small = Path(temporary) / "corto.bin"
+            small.write_bytes(b"hola")
+            self.assertEqual(common.fingerprint(small)["size"], 4)
+            self.assertEqual(common.fingerprint(small)["sha256"],
+                             hashlib.sha256(b"hola").hexdigest())
+
+    def test_files_below_eight_mib_are_hashed_through_the_middle(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            medium = Path(temporary) / "medio.bin"
+            medium.write_bytes(b"A" * (6 * 1024 * 1024))
+            original = common.fingerprint(medium)["sha256"]
+            with medium.open("r+b") as stream:
+                # Byte 5 MiB: past the first 4 MiB, so only reading a 6 MiB file whole notices it.
+                stream.seek(5 * 1024 * 1024)
+                stream.write(b"QQQQ")
+            self.assertNotEqual(common.fingerprint(medium)["sha256"], original)
+
+
 if __name__ == "__main__":
     unittest.main()

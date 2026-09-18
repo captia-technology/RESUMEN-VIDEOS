@@ -1,6 +1,7 @@
 """Shared core: FFmpeg execution, atomic publishing, identity, timeline, energy and warnings."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -20,6 +21,7 @@ FORWARD_MARGIN = 10.0
 DEFAULT_THREADS = min(4, os.cpu_count() or 1)
 TOLERANCE_RATIO = 0.05
 TOLERANCE_FLOOR = 10.0
+CHUNK = 4 * 1024 * 1024
 
 TARGET = re.compile(r"^(?:(?P<pct>\d+(?:[.,]\d+)?)\s*(?:%|por\s?ciento)"
                     r"|(?P<num>\d+(?:[.,]\d+)?)\s*(?P<unit>s|seg|segundos?|m|min|minutos?|h|horas?)"
@@ -297,3 +299,23 @@ def parse_target(text, total):
 def tolerance(target):
     """Half-width of the acceptance band around a target, never narrower than ten seconds."""
     return max(TOLERANCE_RATIO * target, TOLERANCE_FLOOR)
+
+
+def fingerprint(path):
+    """Identity that survives a move: size, mtime and a hash of the first and last 4 MiB."""
+    path = Path(path).resolve(strict=True)
+    info = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        if info.st_size <= 2 * CHUNK:
+            # Read whole below 8 MiB: hashing only the ends would skip the middle of these files.
+            while True:
+                block = stream.read(CHUNK)
+                if not block:
+                    break
+                digest.update(block)
+        else:
+            digest.update(stream.read(CHUNK))
+            stream.seek(-CHUNK, os.SEEK_END)
+            digest.update(stream.read(CHUNK))
+    return {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "sha256": digest.hexdigest()}
