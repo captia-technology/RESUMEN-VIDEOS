@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import common
 import video
 
 
@@ -42,13 +43,6 @@ def gray_signature(path):
                            "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
 
 
-def plan_for(metadata, cuts):
-    return {"source": metadata["source"], "audio_stream": metadata["audio_stream"],
-            "segments": [{"start": start, "end": end, "title": "Prueba",
-                          "reason": "Corte de integración", "audio_evidence": "Tono sintético",
-                          "visual_evidence": "Patrón sintético"} for start, end in cuts]}
-
-
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
 class VideoTest(unittest.TestCase):
     def test_extract_edit_and_protect_source(self):
@@ -60,44 +54,21 @@ class VideoTest(unittest.TestCase):
 
             invoke(self, "prepare", source, "--work", root / "evidencia")
             metadata = json.loads((root / "evidencia/metadata.json").read_text(encoding="utf-8"))
+            sound = [s for s in metadata["streams"] if s["codec_type"] == "audio"][0]
+            self.assertEqual(metadata["audio_stream"], sound["index"])
+            self.assertEqual(metadata["source"]["size"], source.stat().st_size)
             self.assertEqual((root / "evidencia/.gitignore").read_text(encoding="utf-8"), "*\n")
-            self.assertAlmostEqual(video.duration(video.probe(root / "evidencia/audio.wav")), 6, delta=.1)
+            self.assertAlmostEqual(video.duration(video.probe(root / "evidencia/audio.wav")), 6,
+                                   delta=.1)
+            self.assertAlmostEqual(decoded_audio_seconds(root / "evidencia/audio.wav"), 6, delta=.1)
             invoke(self, "frames", source, "--out", root / "imagenes", "--step", "2")
             index = json.loads((root / "imagenes/index.json").read_text(encoding="utf-8"))
             self.assertEqual([f["time"] for f in index["frames"]], [0, 2, 4])
-            self.assertTrue(all((root / "imagenes" / f["file"]).stat().st_size > 0 for f in index["frames"]))
+            self.assertTrue(all((root / "imagenes" / f["file"]).stat().st_size > 0
+                                for f in index["frames"]))
             invoke(self, "frames", source, "--out", root / "imagenes", ok=False)
-            plan_path = root / "seleccion.json"
-            video.save(plan_path, plan_for(metadata, [(0.4, 1.8), (3.2, 5.4)]))
-            invoke(self, "render", source, "--plan", plan_path, "--out", root / "final")
-            output = root / "final/resumen.mp4"
-            self.assertAlmostEqual(video.duration(video.probe(output)), 3.6, delta=.2)
-            self.assertAlmostEqual(decoded_audio_seconds(output), 3.6, delta=.2)
-            report = (root / "final/resumen.md").read_text(encoding="utf-8")
-            self.assertIn(source.name, report)
-            self.assertNotIn(str(root), report)
-            before = output.read_bytes()
-            invoke(self, "render", source, "--plan", plan_path, "--out", root / "final", ok=False)
-            self.assertEqual(output.read_bytes(), before)
+            # Neither prepare nor frames may touch the original: the skill only reads it.
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), original_hash)
-            self.assertFalse(list((root / "final").glob("cortes-*")))
-
-    def test_many_joins_keep_audio_in_sync(self):
-        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
-            root = Path(temporary)
-            source = root / "fuente.mp4"
-            synthetic(source, 12)
-            invoke(self, "prepare", source, "--work", root / "trabajo")
-            metadata = json.loads((root / "trabajo/metadata.json").read_text(encoding="utf-8"))
-            cuts = [(0.1 + 0.55 * i, 0.1 + 0.55 * i + 0.33) for i in range(20)]
-            video.save(root / "plan.json", plan_for(metadata, cuts))
-            invoke(self, "render", source, "--plan", root / "plan.json", "--out", root / "final")
-            output = video.probe(root / "final/resumen.mp4")
-            picture, sound = video.streams(output)
-            picture_seconds = video.stream_duration(output, picture)
-            self.assertAlmostEqual(picture_seconds, video.stream_duration(output, sound), delta=.05)
-            self.assertAlmostEqual(decoded_audio_seconds(root / "final/resumen.mp4"), picture_seconds, delta=.05)
-            self.assertAlmostEqual(picture_seconds, 20 * 0.33, delta=.25)
 
     def test_unicode_output_and_edge_times(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -112,10 +83,6 @@ class VideoTest(unittest.TestCase):
             index = json.loads((root / "final-video/index.json").read_text(encoding="utf-8"))
             self.assertEqual(len(index["frames"]), 2)
             self.assertAlmostEqual(index["frames"][-1]["time"], 5.96, delta=1e-6)
-            metadata = json.loads((root / "trabajo ✓/metadata.json").read_text(encoding="utf-8"))
-            video.save(root / "plan.json", plan_for(metadata, [(1e-05, 1.0)]))
-            invoke(self, "render", source, "--plan", root / "plan.json", "--out", root / "final #1")
-            self.assertTrue((root / "final #1/resumen.mp4").exists())
             error = invoke(self, "prepare", source, "--work", root / "trabajo ✓", ok=False).stderr
             self.assertIn("ya existe", error)
 
@@ -131,40 +98,14 @@ class VideoTest(unittest.TestCase):
             invoke(self, "frames", source, "--out", root / "imagenes", "--start", "2", "--end", "9",
                    "--step", "3", "--width", "0")
             index = json.loads((root / "imagenes/index.json").read_text(encoding="utf-8"))
-            held, inside, after = (gray_signature(root / "imagenes" / f["file"]) for f in index["frames"])
+            held, inside, after = (gray_signature(root / "imagenes" / f["file"])
+                                   for f in index["frames"])
             self.assertEqual(held, inside)
             self.assertNotEqual(held, after)
+            # prepare must still get the whole soundtrack out of a variable-rate recording.
             invoke(self, "prepare", source, "--work", root / "trabajo")
-            metadata = json.loads((root / "trabajo/metadata.json").read_text(encoding="utf-8"))
-            video.save(root / "plan.json", plan_for(metadata, [(3.0, 5.0), (8.2, 9.0)]))
-            invoke(self, "render", source, "--plan", root / "plan.json", "--out", root / "final")
-            output = video.probe(root / "final/resumen.mp4")
-            picture, sound = video.streams(output)
-            self.assertAlmostEqual(video.stream_duration(output, picture), 2.8, delta=.1)
-            self.assertAlmostEqual(video.stream_duration(output, picture),
-                                   video.stream_duration(output, sound), delta=.05)
-
-    def test_short_cuts_are_not_truncated_by_the_concatenation(self):
-        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
-            root = Path(temporary)
-            source = root / "fuente.mp4"
-            synthetic(source, 8)
-            invoke(self, "prepare", source, "--work", root / "trabajo")
-            metadata = json.loads((root / "trabajo/metadata.json").read_text(encoding="utf-8"))
-            # One-frame and sub-frame cuts next to longer ones: the clips must keep a monotonic
-            # timeline, or the muxer squashes samples and the video ends before the audio.
-            video.save(root / "plan.json", plan_for(metadata, [(0.1, 0.14), (1.0, 1.6),
-                                                               (2.0, 2.04), (3.0, 3.4)]))
-            invoke(self, "render", source, "--plan", root / "plan.json", "--out", root / "final")
-            output = root / "final/resumen.mp4"
-            data = video.probe(output)
-            picture, sound = video.streams(data)
-            self.assertAlmostEqual(video.stream_duration(data, picture),
-                                   video.stream_duration(data, sound), delta=.02)
-            packets = json.loads(video.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                                            "-show_packets", "-show_entries", "packet=duration_time",
-                                            "-of", "json", str(output)]))["packets"]
-            self.assertFalse([p for p in packets if float(p["duration_time"]) < 0.001])
+            self.assertAlmostEqual(video.duration(video.probe(root / "trabajo/audio.wav")), 10,
+                                   delta=.1)
 
     def test_forward_only_containers(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -175,39 +116,23 @@ class VideoTest(unittest.TestCase):
                          "-c:v", "libx264", "-preset", "ultrafast", "-g", "50", "-c:a", "aac",
                          "-f", "mpegts", source)
             data = video.probe(source)
-            self.assertEqual(video.seek_margin(data), video.FORWARD_MARGIN)
+            # FORWARD_MARGIN is no longer re-exported by video.py: it is reached through common.
+            self.assertEqual(video.seek_margin(data), common.FORWARD_MARGIN)
             invoke(self, "frames", source, "--out", root / "imagenes", "--start", "1", "--end", "7",
                    "--step", "2", "--width", "0")
             images = sorted((root / "imagenes").glob("*.jpg"))
             self.assertEqual(len(images), 3)
             self.assertEqual(len({gray_signature(image) for image in images}), 3)
             invoke(self, "prepare", source, "--work", root / "trabajo")
-            metadata = json.loads((root / "trabajo/metadata.json").read_text(encoding="utf-8"))
-            video.save(root / "plan.json", plan_for(metadata, [(2.5, 3.5), (5.0, 5.8)]))
-            invoke(self, "render", source, "--plan", root / "plan.json", "--out", root / "final")
-            data = video.probe(root / "final/resumen.mp4")
-            picture, sound = video.streams(data)
-            self.assertAlmostEqual(video.stream_duration(data, picture), 1.8, delta=.1)
-            self.assertAlmostEqual(video.stream_duration(data, picture),
-                                   video.stream_duration(data, sound), delta=.05)
-
-    def test_matroska_track_length_limits_cuts(self):
-        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
-            root = Path(temporary)
-            source = root / "corta.mkv"
+            self.assertAlmostEqual(video.duration(video.probe(root / "trabajo/audio.wav")), 8,
+                                   delta=.2)
+            matroska = root / "corta.mkv"
             video.ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=5",
                          "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
-                         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", source)
-            data = video.probe(source)
-            picture, sound = video.streams(data)
-            self.assertAlmostEqual(video.stream_end(data, picture), 5, delta=.1)
-            plan = {"source": data["source"], "audio_stream": sound["index"],
-                    "segments": plan_for({"source": None, "audio_stream": None}, [(4.0, 7.0)])["segments"]}
-            video.save(root / "plan.json", plan)
-            error = invoke(self, "render", source, "--plan", root / "plan.json", "--out", root / "final",
-                           ok=False).stderr
-            self.assertIn("fuera de la pista de vídeo", error)
-            self.assertFalse((root / "final").exists())
+                         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", matroska)
+            tagged = video.probe(matroska)
+            # The only check of stream_end against a real Matroska: the track length tag, not a guess.
+            self.assertAlmostEqual(video.stream_end(tagged, video.streams(tagged)[0]), 5, delta=.1)
 
     def test_check_reports_environment(self):
         result = subprocess.run([sys.executable, "-B", str(Path(video.__file__)), "check"],
@@ -221,23 +146,8 @@ class VideoTest(unittest.TestCase):
 
 
 class PlanTest(unittest.TestCase):
-    def test_plan_rejects_invalid_or_unsubstantiated_cuts(self):
-        source = {"path": "test", "size": 1, "mtime_ns": 1}
-        good = {"start": 1, "end": 2, "title": "Tema", "reason": "Motivo",
-                "audio_evidence": "Voz", "visual_evidence": "Tabla"}
-        for changes in ({"start": -1}, {"end": 20}, {"end": 1}, {"start": float("nan")},
-                        {"start": True}, {"visual_evidence": ""}, {"audio_evidence": ""}):
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                video.validate_plan({"source": source, "segments": [{**good, **changes}]}, source, 10)
-        with self.assertRaises(ValueError):
-            video.validate_plan({"source": source, "segments": [good, good]}, source, 10)
-        with self.assertRaises(ValueError):
-            video.validate_plan({"source": {**source, "size": 2}, "segments": [good]}, source, 10)
-        self.assertEqual(len(video.validate_plan(
-            {"source": source, "segments": [good, {**good, "start": 2, "end": 3}]}, source, 10)), 2)
-
     def test_missing_encoders_are_reported_before_rendering(self):
-        with mock.patch.object(video, "encoders", return_value={"aac"}):
+        with mock.patch.object(common, "encoders", return_value={"aac"}):
             with self.assertRaisesRegex(ValueError, "libx264"):
                 video.require_encoders("libx264", "aac")
 
@@ -282,6 +192,15 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(video.stream_duration(data, {}), 10.0)
         with self.assertRaises(ValueError):
             video.duration({"format": {}})
+
+    def test_every_subcommand_is_wired_to_its_function(self):
+        parser = video.build_parser()
+        self.assertIs(parser.parse_args(["check"]).run, video.check)
+        self.assertIs(parser.parse_args(["probe", "v.mp4"]).run, video.show)
+        self.assertIs(parser.parse_args(["prepare", "v.mp4", "--work", "t"]).run, video.prepare)
+        self.assertIs(parser.parse_args(["frames", "v.mp4", "--out", "o"]).run, video.frames)
+        self.assertIs(parser.parse_args(["transcribe", "a.wav", "--out", "o.json"]).run,
+                      video.transcribe)
 
 
 if __name__ == "__main__":
