@@ -186,7 +186,7 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **92** al terminar el plan (31 en `test_common.py`, 12 en
+  skill **crece**: de las 15 de hoy se pasa a **93** al terminar el plan (32 en `test_common.py`, 12 en
   `test_video.py` y 49 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
@@ -574,6 +574,13 @@ class ObjetivoTest(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 common.parse_target(text, 3600)
 
+    def test_rounding_never_returns_the_whole_recording(self):
+        # Section 4 talks about the target the caller receives, not about an unrounded intermediate.
+        for text in ("179.9999s", "179.9996s", "2:59.9999"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                common.parse_target(text, 180.0)
+        self.assertAlmostEqual(common.parse_target("179.99s", 180.0), 179.99)
+
     def test_band_never_falls_below_ten_seconds(self):
         self.assertAlmostEqual(common.tolerance(720), 36.0)
         self.assertAlmostEqual(common.tolerance(200), 10.0)
@@ -591,7 +598,7 @@ if __name__ == "__main__":
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: 3 errores `AttributeError: module 'common' has no attribute 'parse_target'`.
+Esperado: 4 errores `AttributeError: module 'common' has no attribute 'parse_target'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -635,11 +642,13 @@ def parse_target(text, total):
         value = 0.0
         for part in match["clock"].replace(",", ".").split(":"):
             value = value * 60 + float(part)
+    # Section 4 guarantees the returned target, so round before checking its range.
+    value = round(value, 3)
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"Objetivo no válido: «{text}».")
     if value >= total:
         raise ValueError(f"El objetivo ({value:.1f} s) no es menor que el original ({total:.1f} s).")
-    return round(value, 3)
+    return value
 
 
 def tolerance(target):
@@ -653,7 +662,7 @@ def tolerance(target):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 3 tests … OK`.
+Esperado: `Ran 4 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -760,7 +769,7 @@ def fingerprint(path):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 6 tests … OK`.
+Esperado: `Ran 7 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -990,7 +999,7 @@ def voiced(levels, a, b, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 9 tests … OK`.
+Esperado: `Ran 10 tests … OK`.
 
 - [ ] **Paso 5: medir el presupuesto real de esta máquina**
 
@@ -1139,7 +1148,7 @@ def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SIL
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 14 tests … OK`.
+Esperado: `Ran 15 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1260,7 +1269,7 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 19 tests … OK`.
+Esperado: `Ran 20 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1402,7 +1411,7 @@ y así el mismo valor da el mismo texto en la propuesta, en el diff de cambios y
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 24 tests … OK`.
+Esperado: `Ran 25 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1632,7 +1641,7 @@ En `energy`, sustituye la línea `os.rename(staged, cache_path)` por `publish(st
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 41 tests … OK` (29 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 42 tests … OK` (30 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 6: commit**
 
@@ -1749,7 +1758,7 @@ def timeline(data):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 43 tests … OK` (31 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 44 tests … OK` (32 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 5: commit**
 
@@ -3587,7 +3596,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 89 tests … OK` (31 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 90 tests … OK` (32 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -3804,7 +3813,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 92 tests … OK` (31 + 12 + 49), en menos de dos minutos.
+Esperado: `Ran 93 tests … OK` (32 + 12 + 49), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -3867,7 +3876,7 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 31 en `test_common.py`, 12 en `test_video.py` y 49 en
+  subcomandos); al terminar el plan hay 32 en `test_common.py`, 12 en `test_video.py` y 49 en
   `test_plan.py`: **92** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
