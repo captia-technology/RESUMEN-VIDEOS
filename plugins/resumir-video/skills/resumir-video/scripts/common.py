@@ -32,6 +32,10 @@ ENERGY_BLOCK = 600
 PAUSE_MARGIN = 0.08
 MIN_ISLAND = 0.12
 MIN_EDGE_ISLAND = 0.20
+EDGE_LOOK = 0.08
+EDGE_WINDOW = 0.60
+EDGE_SILENCE = 0.10
+WORD_MARGIN = 0.02
 FULL_SCALE = 32768.0 * 32768.0
 SQUARES = []
 
@@ -461,3 +465,33 @@ def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SIL
         else:
             grid.append([low, high])
     return grid
+
+
+def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
+    """Move both edges out of speech; returns the pair and `borde_en_voz` when no silence is near."""
+    note, start, end = None, a, b
+    if voiced(levels, max(0.0, a - EDGE_LOOK), a, threshold):
+        # The search window grows by EDGE_SILENCE so a pause that starts before it still shows 0,1 s.
+        limit = max((word["end"] for word in words if word["end"] <= a), default=None)
+        for gap in reversed(silences(levels, max(0.0, a - EDGE_WINDOW - EDGE_SILENCE), a,
+                                     threshold, EDGE_SILENCE)):
+            if gap[1] < a - EDGE_WINDOW:
+                continue
+            candidate = gap[1] if limit is None else max(gap[1], limit + WORD_MARGIN)
+            if candidate < a:
+                start = round(candidate, 6)
+                break
+        else:
+            note = "borde_en_voz"
+    if voiced(levels, b, b + EDGE_LOOK, threshold):
+        limit = min((word["start"] for word in words if word["start"] >= b), default=None)
+        for gap in silences(levels, b, b + EDGE_WINDOW + EDGE_SILENCE, threshold, EDGE_SILENCE):
+            if gap[0] > b + EDGE_WINDOW:
+                continue
+            candidate = gap[0] if limit is None else min(gap[0], limit - WORD_MARGIN)
+            if candidate > b:
+                end = round(candidate, 6)
+                break
+        else:
+            note = "borde_en_voz"
+    return start, end, note

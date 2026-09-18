@@ -260,5 +260,38 @@ class IslasTest(unittest.TestCase):
         self.assertEqual(islands_separate, [[0.0, 1.0], [1.52, 3.0], [3.6, 6.0]])
 
 
+class BordesTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        path = Path(self.temporary.name) / "tono.wav"
+        tone_wav(path)
+        self.levels = common.energy(path)
+        self.words = [{"start": 0.0, "end": 1.0}, {"start": 1.5, "end": 3.0},
+                      {"start": 3.65, "end": 5.9}]
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_both_edges_move_to_the_nearest_silence(self):
+        self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, self.words), (1.5, 3.0, None))
+
+    def test_clean_edges_are_left_alone(self):
+        self.assertEqual(common.adjust_edges(1.2, 1.3, self.levels, self.words), (1.2, 1.3, None))
+
+    def test_without_a_nearby_silence_it_warns(self):
+        start, end, note = common.adjust_edges(4.0, 4.5, self.levels, self.words)
+        self.assertEqual((start, end), (3.6, 4.5))
+        self.assertEqual(note, "borde_en_voz")
+
+    def test_it_never_invades_the_neighbouring_word(self):
+        words = [{"start": 0.0, "end": 1.0}, {"start": 1.48, "end": 2.9}, {"start": 2.95, "end": 5.9}]
+        start, end, _ = common.adjust_edges(2.0, 2.5, self.levels, words)
+        self.assertAlmostEqual(start, 1.5)
+        self.assertAlmostEqual(end, 2.93)
+
+    def test_it_works_without_word_marks(self):
+        self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, []), (1.5, 3.0, None))
+
+
 if __name__ == "__main__":
     unittest.main()
