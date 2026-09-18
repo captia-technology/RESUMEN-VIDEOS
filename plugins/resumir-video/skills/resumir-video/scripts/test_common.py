@@ -7,8 +7,10 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
+import unittest.mock
 import wave
 
 import common
@@ -156,7 +158,10 @@ class EnergiaTest(unittest.TestCase):
             root = Path(temporary)
             tone_wav(root / "tono.wav")
             cache = root / "energia.f32"
-            common.energy(root / "tono.wav", cache)
+            with unittest.mock.patch.object(os, "replace", wraps=os.replace) as replace:
+                common.energy(root / "tono.wav", cache)
+            staged = replace.call_args[0][0]
+            self.assertEqual(staged.name, f"energia.f32.{os.getpid()}.parcial")
             self.assertEqual(cache.stat().st_size, 600 * 4)
             # Levels no recording gives: reading the cache and recomputing it are told apart.
             marked = array.array("f", [-7.5] * 600)
@@ -358,6 +363,82 @@ class ExactitudTest(unittest.TestCase):
         self.assertEqual(common.clock(24.36), "0:24")
         self.assertEqual(common.clock(1005), "16:45")
         self.assertEqual(common.clock(3727), "1:02:07")
+
+
+class PublicacionTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_publishing_never_replaces(self):
+        (self.work / "a.txt").write_text("uno", encoding="utf-8")
+        common.publish(self.work / "a.txt", self.work / "b.txt")
+        self.assertEqual((self.work / "b.txt").read_text(encoding="utf-8"), "uno")
+        self.assertFalse((self.work / "a.txt").exists())
+        (self.work / "a.txt").write_text("dos", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "no se sobrescribe"):
+            common.publish(self.work / "a.txt", self.work / "b.txt")
+        self.assertEqual((self.work / "b.txt").read_text(encoding="utf-8"), "uno")
+
+    def test_the_lock_is_exclusive_and_is_released(self):
+        marker = self.work / "montaje.lock"
+        with common.lock(marker):
+            self.assertTrue(marker.is_file())
+            with self.assertRaisesRegex(ValueError, "Otro proceso"):
+                with common.lock(marker):
+                    pass
+        self.assertFalse(marker.exists())
+
+    def test_history_trims_at_every_depth_and_never_raises(self):
+        common.history(self.work, "init", {"version": 1, "segments": 12})
+        common.history(self.work, "edit", {"version": 2, "peticion": "x" * 500,
+                                           "detalle": {"cambios": ["y" * 500]}})
+        # A record that no trimming can shrink must not abort the work it was only logging.
+        common.history(self.work, "render", {str(n): "z" * 200 for n in range(30)})
+        common.history(Path(self.work) / "no-existe", "verify", {"version": 1})
+        # A payload that is not a mapping writes nothing and, above all, raises nothing.
+        common.history(self.work, "edit", ["ni", "siquiera", "un", "mapeo"])
+        lines = (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line)["evento"] for line in lines],
+                         ["init", "edit", "render"])
+        self.assertEqual(len(json.loads(lines[1])["peticion"]), common.HISTORY_TEXT)
+        self.assertEqual(len(json.loads(lines[1])["detalle"]["cambios"][0]), common.HISTORY_TEXT)
+        self.assertEqual(json.loads(lines[2])["nota"], "registro recortado por exceder 4 KiB")
+        self.assertTrue(all(len(line.encode("utf-8")) < common.HISTORY_LIMIT for line in lines))
+
+    def test_versions_are_reserved_exclusively(self):
+        first, first_path = common.reserve_version(self.work, "seleccion")
+        second, second_path = common.reserve_version(self.work, "seleccion")
+        self.assertEqual((first, second), (1, 2))
+        self.assertEqual(first_path.name, "seleccion-v1.json")
+        self.assertEqual(first_path.stat().st_size, 0)
+        common.write_reserved(second_path, '{"version": 2}\n')
+        self.assertEqual(second_path.read_text(encoding="utf-8"), '{"version": 2}\n')
+        self.assertFalse(list(self.work.glob("*.parcial")))
+        for number in (3, 4, 5):
+            (self.work / f"seleccion-v{number}.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(common.reserve_version(self.work, "seleccion")[0], 6)
+        self.assertEqual(common.reserve_version(self.work, "borrador")[0], 1)
+
+    def test_two_concurrent_reservations_never_share_a_version(self):
+        # Threads, not processes, but the guarantee is the same: O_EXCL is the file system's.
+        ready, taken = threading.Barrier(2), []
+
+        def reserve():
+            ready.wait()
+            taken.append(common.reserve_version(self.work, "seleccion"))
+
+        workers = [threading.Thread(target=reserve) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(sorted(number for number, _ in taken), [1, 2])
+        self.assertEqual(sorted(path.name for _, path in taken),
+                         ["seleccion-v1.json", "seleccion-v2.json"])
 
 
 if __name__ == "__main__":

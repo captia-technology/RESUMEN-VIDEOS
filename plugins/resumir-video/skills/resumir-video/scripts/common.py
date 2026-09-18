@@ -2,6 +2,8 @@
 
 import argparse
 import array
+import contextlib
+import datetime
 import hashlib
 import json
 import math
@@ -48,6 +50,9 @@ UNITS = {"s": 1, "seg": 1, "segundo": 1, "segundos": 1, "m": 60, "min": 60, "min
 MEMORY_PATTERNS = ("Cannot allocate memory", "Out of memory", "av_buffer_alloc() failed")
 BLOCKING = ("esenciales_superan_objetivo", "dependencia_excluida", "tema_sin_cubrir", "corte_vacio")
 MAX_SPANS = 40
+HISTORY_LIMIT = 4096
+HISTORY_TEXT = 300
+VERSION_ATTEMPTS = 3
 
 
 def tool(name):
@@ -261,6 +266,89 @@ def new_dir(path):
     return path
 
 
+def publish(staged, final):
+    """Atomic rename that never replaces: the destination must not exist."""
+    staged, final = Path(staged), Path(final)
+    if final.exists():
+        raise ValueError(f"Ya está publicado y no se sobrescribe: {final}")
+    # Windows refuses an existing destination by itself; the check above covers POSIX.
+    os.rename(staged, final)
+
+
+@contextlib.contextmanager
+def lock(path):
+    """Exclusive marker for one job folder: a second process fails instead of waiting."""
+    path = Path(path)
+    try:
+        handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise ValueError(f"Otro proceso está trabajando en esta carpeta ({path}); espera a que "
+                         "termine, o borra ese archivo si quedó de una interrupción.") from None
+    try:
+        os.write(handle, f"{os.getpid()}\n".encode("utf-8"))
+    finally:
+        # Closed before yielding: Windows cannot remove a file that is still open.
+        os.close(handle)
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def shorten(value):
+    """Copy of a record with every text trimmed, however deep it sits inside the payload."""
+    if isinstance(value, str):
+        return value[:HISTORY_TEXT - 1] + "…" if len(value) > HISTORY_TEXT else value
+    if isinstance(value, dict):
+        return {key: shorten(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [shorten(item) for item in value]
+    return value
+
+
+def history(work, event, payload):
+    """One append-only line per call; a diary never undoes the work it was only writing down."""
+    moment = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    try:
+        record = shorten({"cuando": moment, "evento": event, **payload})
+        line = json.dumps(record, ensure_ascii=False, allow_nan=False, sort_keys=True)
+        if len(line.encode("utf-8")) >= HISTORY_LIMIT:
+            line = json.dumps({"cuando": moment, "evento": event,
+                               "nota": "registro recortado por exceder 4 KiB"},
+                              ensure_ascii=False, sort_keys=True)
+        with (Path(work) / "historial.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+    except (OSError, TypeError, ValueError):
+        # Losing a line of the log never justifies losing a montage or a version already published.
+        pass
+
+
+def reserve_version(work, prefix):
+    """Reserve the next N by creating `<prefix>-vN.json` exclusively; three attempts."""
+    work = Path(work)
+    pattern = re.compile(rf"{re.escape(prefix)}-v(\d+)\.json")
+    used = [int(match.group(1)) for match in
+            (pattern.fullmatch(path.name) for path in work.glob(f"{prefix}-v*.json")) if match]
+    first = max(used, default=0) + 1
+    for number in range(first, first + VERSION_ATTEMPTS):
+        path = work / f"{prefix}-v{number}.json"
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            continue
+        return number, path
+    raise ValueError(f"No se pudo reservar una versión de {prefix} tras {VERSION_ATTEMPTS} "
+                     "intentos; otra sesión está escribiendo en la misma carpeta.")
+
+
+def write_reserved(path, text):
+    """Fill a version reserved by reserve_version: staged beside it and replaced atomically."""
+    path = Path(path)
+    staged = path.with_name(path.name + ".parcial")
+    staged.write_text(text, encoding="utf-8")
+    os.replace(staged, path)
+
+
 def frame_count(start, end, step):
     """Samples in the half-open range [start, end); rounding absorbs float noise such as 0.24 / 0.04."""
     return max(1, math.ceil(round((end - start) / step, 9)))
@@ -388,7 +476,7 @@ def energy(wav_path, cache_path=None):
     if cache is not None:
         # os.replace (not os.rename) also repairs a wrong-size cache: on Windows, rename
         # fails with FileExistsError when the destination is already there.
-        staged = cache.with_name(cache.name + ".parcial")
+        staged = cache.with_name(f"{cache.name}.{os.getpid()}.parcial")
         staged.write_bytes(levels.tobytes())
         os.replace(staged, cache)
     return levels
