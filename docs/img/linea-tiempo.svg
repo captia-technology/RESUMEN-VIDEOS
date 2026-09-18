@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-label="Fragmentos conservados sobre el vídeo original">
+<title>Fragmentos conservados sobre el vídeo original</title>
+<rect width="1200" height="340" fill="#0B1220"/>
+<rect x="20" y="20" width="1160" height="300" rx="14" fill="#0D1626" stroke="#1E293B" stroke-width="1"/>
+<text x="60" y="58" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" fill="#E2E8F0" font-weight="700" text-anchor="start">De dónde sale el resumen</text>
+<text x="60" y="82" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#94A3B8" font-weight="400" text-anchor="start">6 fragmentos conservados · 1:46,7 → 1:05,8 (−38 %)</text>
+<rect x="60" y="120" width="1080" height="44" rx="8" fill="#152238" stroke="#1E293B"/>
+<rect x="225.2" y="120" width="115.0" height="44" rx="7" fill="#FBBF24" opacity=".92"/>
+<text x="282.7221597300337" y="186" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#E2E8F0" font-weight="600" text-anchor="middle">Requisito y excepción</text>
+<text x="282.7221597300337" y="203" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="400" text-anchor="middle">0:16,3</text>
+<line x1="282.7" y1="164" x2="282.7" y2="174" stroke="#1E293B" stroke-width="1"/>
+<rect x="345.9" y="120" width="123.1" height="44" rx="7" fill="#FBBF24" opacity=".92"/>
+<text x="407.4465691788526" y="226" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#E2E8F0" font-weight="600" text-anchor="middle">Tabla de pares</text>
+<text x="407.4465691788526" y="243" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="400" text-anchor="middle">0:28,2</text>
+<line x1="407.4" y1="164" x2="407.4" y2="214" stroke="#1E293B" stroke-width="1"/>
+<rect x="543.5" y="120" width="86.3" height="44" rx="7" fill="#FBBF24" opacity=".92"/>
+<text x="586.6366704161978" y="186" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#E2E8F0" font-weight="600" text-anchor="middle">Demostración sin voz</text>
+<text x="586.6366704161978" y="203" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="400" text-anchor="middle">0:47,8</text>
+<line x1="586.6" y1="164" x2="586.6" y2="174" stroke="#1E293B" stroke-width="1"/>
+<rect x="629.8" y="120" width="160.4" height="44" rx="7" fill="#FBBF24" opacity=".92"/>
+<text x="709.9437570303712" y="226" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#E2E8F0" font-weight="600" text-anchor="middle">Procedimiento (5 pasos)</text>
+<text x="709.9437570303712" y="243" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="400" text-anchor="middle">0:56,3</text>
+<line x1="709.9" y1="164" x2="709.9" y2="214" stroke="#1E293B" stroke-width="1"/>
+<rect x="795.4" y="120" width="81.0" height="44" rx="7" fill="#FBBF24" opacity=".92"/>
+<text x="835.883014623172" y="186" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#E2E8F0" font-weight="600" text-anchor="middle">Advertencia</text>
+<text x="835.883014623172" y="203" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="400" text-anchor="middle">1:12,6</text>
+<line x1="835.9" y1="164" x2="835.9" y2="174" stroke="#1E293B" stroke-width="1"/>
+<rect x="882.0" y="120" width="100.8" height="44" rx="7" fill="#FBBF24" opacity=".92"/>
+<text x="932.4634420697413" y="226" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#E2E8F0" font-weight="600" text-anchor="middle">Corrección</text>
+<text x="932.4634420697413" y="243" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="400" text-anchor="middle">1:21,2</text>
+<line x1="932.5" y1="164" x2="932.5" y2="214" stroke="#1E293B" stroke-width="1"/>
+<text x="60" y="108" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="600" text-anchor="start">0:00</text>
+<text x="1140" y="108" font-family="Cascadia Mono, Consolas, monospace" font-size="11" fill="#475569" font-weight="600" text-anchor="end">1:46,7</text>
+<rect x="60" y="256" width="1080" height="10" rx="5" fill="#152238"/>
+<rect x="60" y="256" width="666.5" height="10" rx="5" fill="#34D399"/>
+<text x="60" y="292" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569" font-weight="400" text-anchor="start">Descartado: saludos, repeticiones, despedida y lecturas literales de diapositivas visibles</text>
+<text x="1140" y="292" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#FBBF24" font-weight="600" text-anchor="end">Conservado</text>
+</svg>

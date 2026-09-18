@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Instalación y solución de problemas
+    url: https://github.com/captia-technology/RESUMEN-VIDEOS/blob/main/docs/instalacion.md
+    about: Instalación, actualización y desinstalación por cliente, con la tabla de síntomas y soluciones.
+  - name: Capacidades y límites
+    url: https://github.com/captia-technology/RESUMEN-VIDEOS/blob/main/docs/capacidades.md
+    about: Qué hace la skill, qué garantiza, qué no hace y qué ampliaciones ya están previstas.
+  - name: Cómo contribuir
+    url: https://github.com/captia-technology/RESUMEN-VIDEOS/blob/main/CONTRIBUTING.md
+    about: Requisitos, pruebas, validadores, estilo de los commits y publicación de versiones.
+  - name: Informar de una vulnerabilidad
+    url: https://github.com/captia-technology/RESUMEN-VIDEOS/security/advisories/new
+    about: Aviso privado de GitHub. No publiques vulnerabilidades como incidencia.

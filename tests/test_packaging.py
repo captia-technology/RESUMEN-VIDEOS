@@ -138,6 +138,7 @@ class SkillTest(unittest.TestCase):
         # Drive letters, home folders and UNC shares (\\server\share).
         forbidden = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]|/Users/|/home/|\\\\[A-Za-z0-9]")
         documents = [ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "CHANGELOG.md",
+                     ROOT / "CONTRIBUTING.md", ROOT / "SECURITY.md",
                      *sorted((ROOT / "docs").glob("*.md"))]
         for path in documents:
             with self.subTest(path=path.relative_to(ROOT)):

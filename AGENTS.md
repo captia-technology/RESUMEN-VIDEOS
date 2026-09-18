@@ -42,6 +42,8 @@ PYTHONUTF8=1 python -B "${CODEX_HOME:-$HOME/.codex}/skills/.system/plugin-creato
 PYTHONUTF8=1 python -B "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" plugins/resumir-video/skills/resumir-video
 ```
 
+La integración continua ([`.github/workflows/pruebas.yml`](.github/workflows/pruebas.yml)) ejecuta las dos baterías en Ubuntu y Windows con Python 3.10 y 3.12, más una comprobación de los manifiestos. Los validadores de los clientes solo existen en local: pásalos antes de publicar ([CONTRIBUTING.md](CONTRIBUTING.md)).
+
 ## Versiones
 
 Al publicar, sigue [docs/instalacion.md](docs/instalacion.md#7-publicar-una-versión-nueva): el mismo número en `CHANGELOG.md`, los tres `plugin.json`, `.claude-plugin/marketplace.json` (`metadata.version` y `plugins[0].version`), `SKILL.md`, `video.py`, `README.md`, el primer párrafo de `docs/capacidades.md` y la línea «Estado» de `docs/instalacion.md`. `tests/test_packaging.py` falla si no coinciden.

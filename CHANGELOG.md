@@ -15,6 +15,8 @@ Primera versión. «Cambiado» y «Corregido» se refieren a las copias manuales
 - Ayuda de la CLI con descripciones y valores por defecto, y opción `--version`.
 - Licencia MIT a nombre de CAPTIA TECHNOLOGY S.L. (`LICENSE` en la raíz, copiada en el plugin y en la skill como `LICENSE.txt`).
 - Documentación de instalación y catálogo de capacidades; pruebas de empaquetado y del instalador.
+- Infraestructura de repositorio público: integración continua con las dos baterías en Ubuntu y Windows (Python 3.10 y 3.12), guía de contribución, política de seguridad, plantillas de incidencia y de pull request, e índice de documentación.
+- Gráficos del README generados a partir de datos medidos (`scripts/generar_graficos.py`).
 - Procedimientos en la referencia de operación: claves de `probe`, registro del análisis, sincronización de subtítulos y huecos sin escuchar, y revisión de uniones.
 
 ### Cambiado

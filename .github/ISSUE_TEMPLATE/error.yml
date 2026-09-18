@@ -1,0 +1,115 @@
+name: Error
+description: Informa de un fallo de la skill, del plugin o del instalador
+title: "error: "
+labels: ["error"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de abrir el informe, revisa la tabla de solución de problemas de la
+        [guía de instalación](https://github.com/captia-technology/RESUMEN-VIDEOS/blob/main/docs/instalacion.md#8-solución-de-problemas).
+
+        No adjuntes el vídeo, los fotogramas ni la transcripción: contienen material confidencial.
+        Si el fallo es una vulnerabilidad, no lo publiques aquí; sigue
+        [SECURITY.md](https://github.com/captia-technology/RESUMEN-VIDEOS/blob/main/SECURITY.md).
+
+  - type: dropdown
+    id: cliente
+    attributes:
+      label: Cliente
+      options:
+        - Claude Code
+        - GitHub Copilot CLI
+        - VS Code (Copilot Chat)
+        - Codex CLI
+        - Codex (app de escritorio)
+        - Codex (extensión de IDE)
+        - Otro
+    validations:
+      required: true
+
+  - type: input
+    id: version-cliente
+    attributes:
+      label: Versión del cliente
+      description: Número exacto (`claude --version`, `copilot --version`, `codex --version`) y, si elegiste «Otro», de qué cliente se trata.
+      placeholder: "Claude Code 2.1.274"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: canal
+    attributes:
+      label: Canal de instalación
+      options:
+        - Plugin desde el catálogo resumen-videos
+        - Skill independiente (scripts/install.py)
+        - Copia manual de la carpeta de la skill
+        - Instalador de terceros (Vercel skills, gh skill, $skill-installer)
+        - No lo sé
+    validations:
+      required: true
+
+  - type: input
+    id: sistema
+    attributes:
+      label: Sistema operativo y versión
+      placeholder: "Windows 11 26200 / Ubuntu 24.04 / macOS 15"
+    validations:
+      required: true
+
+  - type: textarea
+    id: descripcion
+    attributes:
+      label: Qué esperabas y qué ocurrió
+      description: Describe el fallo y en qué paso del flujo aparece.
+    validations:
+      required: true
+
+  - type: textarea
+    id: check
+    attributes:
+      label: Salida completa de `video.py check`
+      description: Pega el JSON entero, sin recortarlo. La ruta del script depende de la instalación; la indica la guía de instalación.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: orden
+    attributes:
+      label: Orden exacta y error literal
+      description: La orden que ejecutaste (o la invocación de la skill) y el mensaje de error completo, tal cual.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sintetico
+    attributes:
+      label: ¿Se reproduce con material sintético?
+      description: Por ejemplo, con un vídeo generado como los de las pruebas de la skill.
+      options:
+        - "Sí, se reproduce con material sintético"
+        - "No: solo ocurre con mi vídeo"
+        - No lo he comprobado
+    validations:
+      required: true
+
+  - type: textarea
+    id: fuente
+    attributes:
+      label: Características de la fuente (opcional)
+      description: Contenedor, duración, resolución, frecuencia de fotogramas variable, HDR, número de pistas. No incluyas la ruta ni el nombre del archivo si son confidenciales.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: He revisado la tabla de solución de problemas de la guía de instalación.
+          required: true
+        - label: El informe no contiene rutas locales completas, datos de clientes ni material confidencial.
+          required: true

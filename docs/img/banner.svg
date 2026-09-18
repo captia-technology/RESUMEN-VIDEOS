@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 352" width="1200" height="352" role="img" aria-label="resumir-video: la línea de tiempo original se condensa en el resumen">
+<title>resumir-video: la línea de tiempo original se condensa en el resumen</title>
+<rect width="1200" height="352" fill="#0B1220"/>
+<defs><linearGradient id="fondo" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0B1220"/><stop offset="55%" stop-color="#0F1E38"/><stop offset="100%" stop-color="#0B1220"/></linearGradient><linearGradient id="barra" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#38BDF8"/><stop offset="100%" stop-color="#34D399"/></linearGradient></defs>
+<rect width="1200" height="352" fill="url(#fondo)"/>
+<rect x="0" y="0" width="1200" height="3" fill="url(#barra)"/>
+<text x="80" y="96" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="52" fill="#E2E8F0" font-weight="700" text-anchor="start">resumir-video</text>
+<text x="432" y="96" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#FBBF24" font-weight="600" text-anchor="start">v0.1.0</text>
+<text x="80" y="130" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#94A3B8" font-weight="400" text-anchor="start">Resúmenes de vídeo técnico con fragmentos originales, para agentes de IA</text>
+<rect x="80" y="152" width="174" height="32" rx="16" fill="#0F1B2E" stroke="#1E293B" stroke-width="1"/>
+<text x="167" y="173" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#94A3B8" font-weight="600" text-anchor="middle">Claude Code</text>
+<rect x="270" y="152" width="174" height="32" rx="16" fill="#0F1B2E" stroke="#1E293B" stroke-width="1"/>
+<text x="357" y="173" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#94A3B8" font-weight="600" text-anchor="middle">GitHub Copilot</text>
+<rect x="460" y="152" width="174" height="32" rx="16" fill="#0F1B2E" stroke="#1E293B" stroke-width="1"/>
+<text x="547" y="173" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#94A3B8" font-weight="600" text-anchor="middle">OpenAI Codex</text>
+<text x="80" y="208" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="11" fill="#475569" font-weight="700" text-anchor="start" letter-spacing="2">ORIGINAL</text>
+<text x="1120" y="208" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="11" fill="#475569" font-weight="700" text-anchor="end">1:46,7</text>
+<rect x="80" y="222" width="1040" height="26" rx="6" fill="#152238" stroke="#1E293B"/>
+<rect x="239.1" y="222" width="110.7" height="26" rx="5" fill="#FBBF24" opacity=".92"><animate attributeName="y" values="222;222;284;284;222" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/><animate attributeName="x" values="239.1;239.1;80.0;80.0;239.1" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/></rect>
+<rect x="355.3" y="222" width="118.5" height="26" rx="5" fill="#FBBF24" opacity=".92"><animate attributeName="y" values="222;222;284;284;222" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/><animate attributeName="x" values="355.3;355.3;190.7;190.7;355.3" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/></rect>
+<rect x="545.6" y="222" width="83.1" height="26" rx="5" fill="#FBBF24" opacity=".92"><animate attributeName="y" values="222;222;284;284;222" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/><animate attributeName="x" values="545.6;545.6;309.3;309.3;545.6" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/></rect>
+<rect x="628.7" y="222" width="154.4" height="26" rx="5" fill="#FBBF24" opacity=".92"><animate attributeName="y" values="222;222;284;284;222" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/><animate attributeName="x" values="628.7;628.7;392.4;392.4;628.7" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/></rect>
+<rect x="788.2" y="222" width="78.0" height="26" rx="5" fill="#FBBF24" opacity=".92"><animate attributeName="y" values="222;222;284;284;222" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/><animate attributeName="x" values="788.2;788.2;546.8;546.8;788.2" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/></rect>
+<rect x="871.6" y="222" width="97.1" height="26" rx="5" fill="#FBBF24" opacity=".92"><animate attributeName="y" values="222;222;284;284;222" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/><animate attributeName="x" values="871.6;871.6;624.8;624.8;871.6" keyTimes="0;0.34;0.52;0.88;1" dur="9s" repeatCount="indefinite"/></rect>
+<text x="80" y="272" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="11" fill="#475569" font-weight="700" text-anchor="start" letter-spacing="2">RESUMEN</text>
+<text x="733.8597675290589" y="302" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="13" fill="#34D399" font-weight="700" text-anchor="start">1:05,8  ·  −38 %</text>
+<rect x="80" y="284" width="641.9" height="26" rx="6" fill="none" stroke="#34D399" stroke-width="1.5" stroke-dasharray="4 4" opacity=".55"/>
+</svg>

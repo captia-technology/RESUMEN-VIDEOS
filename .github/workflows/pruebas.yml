@@ -1,0 +1,91 @@
+# Pruebas automáticas del repositorio: las dos baterías de unittest y una comprobación
+# de los manifiestos que no necesita ningún cliente instalado.
+# Los validadores de los clientes (claude plugin validate --strict, validate_plugin.py y
+# quick_validate.py de Codex) no están disponibles en los runners: se ejecutan en local
+# antes de publicar, como indican CONTRIBUTING.md y AGENTS.md.
+name: Pruebas
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pruebas:
+    name: Pruebas (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    env:
+      # Solo afecta a la salida del propio unittest, que imprime mensajes con acentos.
+      # Las pruebas de la skill borran esta variable en los procesos que lanzan, para
+      # seguir comprobando la codificación por defecto de la salida redirigida.
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Instalar FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Instalar FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Comprobar el entorno
+        run: python -B plugins/resumir-video/skills/resumir-video/scripts/video.py check
+
+      - name: Pruebas de empaquetado e instalador
+        run: python -B -m unittest discover -s tests -v
+
+      - name: Pruebas de la skill
+        run: python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py" -v
+
+  manifiestos:
+    name: Manifiestos y frontmatter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Leer los manifiestos y los catálogos
+        run: |
+          python -B - <<'PY'
+          import json
+          from pathlib import Path
+
+          rutas = ("plugins/resumir-video/plugin.json",
+                   "plugins/resumir-video/.claude-plugin/plugin.json",
+                   "plugins/resumir-video/.codex-plugin/plugin.json",
+                   ".claude-plugin/marketplace.json",
+                   ".agents/plugins/marketplace.json")
+          for ruta in rutas:
+              json.loads(Path(ruta).read_text(encoding="utf-8"))
+              print(f"JSON válido: {ruta}")
+          PY
+
+      - name: Coherencia de manifiestos y frontmatter portable
+        run: python -B -m unittest -v tests.test_packaging.ManifestTest tests.test_packaging.SkillTest

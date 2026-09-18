@@ -1,0 +1,78 @@
+name: Propuesta
+description: Propón una mejora de la skill, del asistente o de la documentación
+title: "propuesta: "
+labels: ["propuesta"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Revisa antes qué hace y qué no hace la skill en
+        [capacidades](https://github.com/captia-technology/RESUMEN-VIDEOS/blob/main/docs/capacidades.md)
+        (incluidos sus límites y las ampliaciones ya previstas) y los acuerdos ya tomados en
+        [decisiones](https://github.com/captia-technology/RESUMEN-VIDEOS/blob/main/docs/decisiones.md).
+
+        Las propuestas se valoran a partir de un caso de uso real, no de una suposición.
+
+  - type: textarea
+    id: problema
+    attributes:
+      label: Problema o necesidad
+      description: Qué intentabas hacer, con qué material y por qué lo actual no basta.
+    validations:
+      required: true
+
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: Comportamiento propuesto
+      description: Qué debería ocurrir, con el mayor detalle posible (órdenes, opciones, salidas o texto afectado).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área afectada
+      options:
+        - Instrucciones de la skill (SKILL.md o referencia de operación)
+        - Asistente video.py
+        - Empaquetado, catálogos o instalador
+        - Documentación
+        - No lo sé
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Alternativas consideradas (opcional)
+      description: Qué otras formas has probado o descartado, y por qué.
+    validations:
+      required: false
+
+  - type: textarea
+    id: verificacion
+    attributes:
+      label: Cómo se comprobaría (opcional)
+      description: Qué prueba o evidencia demostraría que la propuesta funciona; si es posible, con material sintético.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: contribucion
+    attributes:
+      label: ¿Te ofreces a implementarla?
+      options:
+        - "Sí, puedo abrir un pull request"
+        - Puedo probarla y aportar evidencia
+        - "No, solo propongo la idea"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: La propuesta no contiene rutas locales, datos de clientes ni material confidencial.
+          required: true

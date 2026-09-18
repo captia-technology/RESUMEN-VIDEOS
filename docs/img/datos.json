@@ -1,0 +1,59 @@
+{
+  "version": "0.1.0",
+  "demo": "Vídeo de formación sintético generado con FFmpeg y voz de síntesis; contenido ficticio.",
+  "original_segundos": 106.68,
+  "resumen_segundos": 65.84,
+  "reduccion_porcentaje": 38.3,
+  "cortes": [
+    {
+      "start": 16.32,
+      "end": 27.68,
+      "titulo": "Requisito y excepción",
+      "tema": "Requisito de holgura axial y su excepción"
+    },
+    {
+      "start": 28.24,
+      "end": 40.4,
+      "titulo": "Tabla de pares",
+      "tema": "Tabla de pares de apriete por tamaño de tornillo"
+    },
+    {
+      "start": 47.76,
+      "end": 56.28,
+      "titulo": "Demostración sin voz",
+      "tema": "Demostración visual del recorrido del fluido (sin narración)"
+    },
+    {
+      "start": 56.28,
+      "end": 72.12,
+      "titulo": "Procedimiento (5 pasos)",
+      "tema": "Procedimiento de sustitución del cierre mecánico (5 pasos)"
+    },
+    {
+      "start": 72.64,
+      "end": 80.64,
+      "titulo": "Advertencia",
+      "tema": "Advertencia: no arrancar la bomba en seco"
+    },
+    {
+      "start": 81.2,
+      "end": 91.16,
+      "titulo": "Corrección",
+      "tema": "Corrección del valor de holgura axial: 0,20 mm"
+    }
+  ],
+  "sincronia": [
+    {
+      "etapa": "Primera versión",
+      "ms": 93
+    },
+    {
+      "etapa": "Audio codificado una vez",
+      "ms": 5
+    },
+    {
+      "etapa": "Versión final",
+      "ms": 0
+    }
+  ]
+}
