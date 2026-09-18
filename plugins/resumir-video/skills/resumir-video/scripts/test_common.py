@@ -133,12 +133,6 @@ class EnergiaTest(unittest.TestCase):
             self.assertIsInstance(wide[0][1], float)
             self.assertTrue(common.voiced(levels, 0.5, 0.58))
             self.assertFalse(common.voiced(levels, 1.1, 1.18))
-            # The squares table is built once and reused: same object, and i*i in its lower half.
-            table = common.squares()
-            self.assertEqual(len(table), 65536)
-            for index in (0, 1, 100, 32767):
-                self.assertEqual(table[index], index * index)
-            self.assertIs(common.squares(), table)
             long_path = Path(temporary) / "largo.wav"
             tone_wav(long_path, seconds=120.0, pauses=())
             started = time.perf_counter()
@@ -146,8 +140,16 @@ class EnergiaTest(unittest.TestCase):
             spent = time.perf_counter() - started
             # Catastrophe alarm only (6x the 30 s/2h budget, scaled to 120 s): sensitive to
             # machine load and unable to tell implementations apart; the deterministic check
-            # is the squares-table identity above, not this wall-clock measurement.
+            # is test_the_table_of_squares_is_built_once, not this wall-clock measurement.
             self.assertLess(spent, 3.0)
+
+    def test_the_table_of_squares_is_built_once(self):
+        # The squares table is built once and reused: same object, and i*i in its lower half.
+        table = common.squares()
+        self.assertEqual(len(table), 65536)
+        for index in (0, 1, 100, 32767):
+            self.assertEqual(table[index], index * index)
+        self.assertIs(common.squares(), table)
 
     def test_cache_is_written_once_and_reread(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
