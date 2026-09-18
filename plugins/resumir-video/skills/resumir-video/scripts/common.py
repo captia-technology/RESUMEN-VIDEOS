@@ -361,22 +361,25 @@ def levels_of(sound, window):
 
 def energy(wav_path, cache_path=None):
     """RMS level in dBFS every 10 ms; cached, and never loading the whole recording."""
+    cache = Path(cache_path) if cache_path is not None else None
     with wave.open(str(wav_path), "rb") as sound:
         if sound.getsampwidth() != 2 or sound.getnchannels() != 1:
             raise ValueError("La energía se calcula sobre el audio de análisis mono PCM de 16 bits "
                              "que crea prepare.")
         window = max(1, round(sound.getframerate() * ENERGY_STEP))
         expected = sound.getnframes() // window
-        if cache_path is not None and Path(cache_path).is_file():
-            cached, data = array.array("f"), Path(cache_path).read_bytes()
+        if cache is not None and cache.is_file():
+            cached, data = array.array("f"), cache.read_bytes()
             if len(data) == expected * cached.itemsize:
                 cached.frombytes(data)
                 return cached
         levels = levels_of(sound, window)
-    if cache_path is not None and not Path(cache_path).exists():
-        staged = Path(cache_path).with_name(Path(cache_path).name + ".parcial")
+    if cache is not None:
+        # os.replace (not os.rename) also repairs a wrong-size cache: on Windows, rename
+        # fails with FileExistsError when the destination is already there.
+        staged = cache.with_name(cache.name + ".parcial")
         staged.write_bytes(levels.tobytes())
-        os.rename(staged, cache_path)
+        os.replace(staged, cache)
     return levels
 
 
@@ -405,7 +408,9 @@ def silences(levels, a, b, threshold=SILENCE_DB, min_silence=MIN_SILENCE):
     for x, y in runs:
         low, high = max(a, x * ENERGY_STEP), min(b, y * ENERGY_STEP)
         if high - low >= min_silence - 1e-9:
-            found.append((round(low, 6), round(high, 6)))
+            # max/min return the int operand unchanged on a tie with a/b; force float,
+            # since the declared contract is list[tuple[float, float]] and this reaches JSON.
+            found.append((round(float(low), 6), round(float(high), 6)))
     return found
 
 
