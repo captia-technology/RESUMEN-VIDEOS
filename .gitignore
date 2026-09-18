@@ -18,3 +18,5 @@ __pycache__/
 input/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+.claude/worktrees/
+.superpowers/
