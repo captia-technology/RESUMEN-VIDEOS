@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 import wave
 
 MIN_PYTHON = (3, 10)
@@ -44,6 +45,9 @@ TARGET = re.compile(r"^(?:(?P<pct>\d+(?:[.,]\d+)?)\s*(?:%|por\s?ciento)"
                     r"|(?P<clock>\d{1,2}(?::\d{2}){1,2}(?:[.,]\d+)?))$")
 UNITS = {"s": 1, "seg": 1, "segundo": 1, "segundos": 1, "m": 60, "min": 60, "minuto": 60,
          "minutos": 60, "h": 3600, "hora": 3600, "horas": 3600}
+MEMORY_PATTERNS = ("Cannot allocate memory", "Out of memory", "av_buffer_alloc() failed")
+BLOCKING = ("esenciales_superan_objetivo", "dependencia_excluida", "tema_sin_cubrir", "corte_vacio")
+MAX_SPANS = 40
 
 
 def tool(name):
@@ -518,3 +522,41 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
         else:
             end = candidate
     return start, end, note
+
+
+def frames_for(length, rate, speed):
+    """N = round(L * F / v); ties go up, so the same length always yields the same count."""
+    return max(0, math.floor(length * rate / speed + 0.5))
+
+
+def samples_for(n_frames, rate, sample_rate):
+    """M = round(N / F * SR): the audio that exactly covers N frames."""
+    return max(0, math.floor(n_frames / rate * sample_rate + 0.5))
+
+
+def plan_sha256(plan):
+    """Canonical digest of a plan: the same content always yields the same value."""
+    body = {key: value for key, value in plan.items() if key != "sha256"}
+    text = json.dumps(body, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                      separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def warning(code, message, *, cut=None):
+    """One entry of the warnings list; `bloquea` comes from BLOCKING, never from the caller."""
+    return {"codigo": code, "mensaje": message, "corte": cut, "bloquea": code in BLOCKING}
+
+
+def strip_accents(text):
+    """Accent-free copy for searching; ñ is a letter of its own in Spanish and survives."""
+    guarded = unicodedata.normalize("NFC", text).replace("ñ", "\x00").replace("Ñ", "\x01")
+    plain = "".join(ch for ch in unicodedata.normalize("NFD", guarded)
+                    if not unicodedata.combining(ch))
+    return plain.replace("\x00", "ñ").replace("\x01", "Ñ")
+
+
+def clock(value):
+    """Reading stamp, truncated to the second: 752.3 -> 12:32, 3725 -> 1:02:05."""
+    hours, rest = divmod(int(value), 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"

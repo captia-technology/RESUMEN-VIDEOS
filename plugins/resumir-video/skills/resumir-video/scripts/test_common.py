@@ -322,5 +322,43 @@ class BordesTest(unittest.TestCase):
             self.assertIsNone(note)
 
 
+class ExactitudTest(unittest.TestCase):
+    def test_frames_and_samples_match_the_rendered_cut(self):
+        self.assertEqual(common.frames_for(7.16, 25, 1.25), 143)
+        self.assertEqual(common.samples_for(143, 25, 48000), 274560)
+        self.assertEqual(common.frames_for(10, 25, 1.0), 250)
+        self.assertEqual(common.frames_for(0.5, 25, 1.0), 13)
+        self.assertEqual(common.frames_for(0.0, 25, 1.25), 0)
+        self.assertEqual(common.samples_for(200, 30000 / 1001, 48000), 320320)
+
+    def test_the_digest_ignores_key_order_and_its_own_field(self):
+        one = {"b": 2, "a": [1, {"y": 1, "x": 2}], "sha256": "lo que sea"}
+        other = {"a": [1, {"x": 2, "y": 1}], "b": 2}
+        self.assertEqual(common.plan_sha256(one), common.plan_sha256(other))
+        self.assertNotEqual(common.plan_sha256(one), common.plan_sha256({"a": [1], "b": 2}))
+
+    def test_warnings_carry_their_own_blocking_flag(self):
+        self.assertEqual(common.warning("corte_vacio", "sin tramos", cut=7),
+                         {"codigo": "corte_vacio", "mensaje": "sin tramos", "corte": 7,
+                          "bloquea": True})
+        self.assertEqual(common.warning("corte_breve", "muy corto")["bloquea"], False)
+        self.assertEqual(common.BLOCKING, ("esenciales_superan_objetivo", "dependencia_excluida",
+                                           "tema_sin_cubrir", "corte_vacio"))
+        self.assertIn("av_buffer_alloc() failed", common.MEMORY_PATTERNS)
+        self.assertEqual(common.MAX_SPANS, 40)
+
+    def test_searching_ignores_accents_but_not_the_spanish_n(self):
+        self.assertEqual(common.strip_accents("Año ATEX: ¿Qué diseñó Muñoz?"),
+                         "Año ATEX: ¿Que diseño Muñoz?")
+        self.assertEqual(common.strip_accents("ÑANDÚ ÜÖ"), "ÑANDU UO")
+
+    def test_the_reading_clock_truncates_to_the_second(self):
+        self.assertEqual(common.clock(0), "0:00")
+        self.assertEqual(common.clock(5.72), "0:05")
+        self.assertEqual(common.clock(24.36), "0:24")
+        self.assertEqual(common.clock(1005), "16:45")
+        self.assertEqual(common.clock(3727), "1:02:07")
+
+
 if __name__ == "__main__":
     unittest.main()
