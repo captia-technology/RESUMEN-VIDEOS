@@ -1,6 +1,7 @@
 """Shared core: FFmpeg execution, atomic publishing, identity, timeline, energy and warnings."""
 
 import argparse
+import array
 import hashlib
 import json
 import math
@@ -10,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import wave
 
 MIN_PYTHON = (3, 10)
 MAX_FRAMES = 600
@@ -22,6 +24,13 @@ DEFAULT_THREADS = min(4, os.cpu_count() or 1)
 TOLERANCE_RATIO = 0.05
 TOLERANCE_FLOOR = 10.0
 CHUNK = 4 * 1024 * 1024
+SILENCE_DB = -50.0
+MIN_SILENCE = 0.30
+ENERGY_STEP = 0.01
+ENERGY_FLOOR = -120.0
+ENERGY_BLOCK = 600
+FULL_SCALE = 32768.0 * 32768.0
+SQUARES = []
 
 TARGET = re.compile(r"^(?:(?P<pct>\d+(?:[.,]\d+)?)\s*(?:%|por\s?ciento)"
                     r"|(?P<num>\d+(?:[.,]\d+)?)\s*(?P<unit>s|seg|segundos?|m|min|minutos?|h|horas?)"
@@ -319,3 +328,88 @@ def fingerprint(path):
             stream.seek(-CHUNK, os.SEEK_END)
             digest.update(stream.read(CHUNK))
     return {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "sha256": digest.hexdigest()}
+
+
+def squares():
+    """Square of every 16-bit sample read as unsigned, so the RMS loop stays inside C calls."""
+    if not SQUARES:
+        SQUARES.extend(value * value for value in range(32768))
+        SQUARES.extend((value - 65536) * (value - 65536) for value in range(32768, 65536))
+    return SQUARES
+
+
+def levels_of(sound, window):
+    """dBFS of every `window` frames of an open mono 16-bit wave, read block by block."""
+    table, levels, pending = squares().__getitem__, array.array("f"), b""
+    while True:
+        raw = sound.readframes(window * ENERGY_BLOCK)
+        if not raw:
+            return levels
+        pending += raw
+        # Whole windows only: the remainder is carried over so the grid never drifts.
+        usable = len(pending) - len(pending) % (2 * window)
+        block = array.array("H")
+        block.frombytes(pending[:usable])
+        if sys.byteorder == "big":
+            block.byteswap()
+        pending = pending[usable:]
+        for start in range(0, len(block), window):
+            mean = sum(map(table, block[start:start + window])) / window
+            levels.append(ENERGY_FLOOR if mean <= 0
+                          else max(ENERGY_FLOOR, 10 * math.log10(mean / FULL_SCALE)))
+
+
+def energy(wav_path, cache_path=None):
+    """RMS level in dBFS every 10 ms; cached, and never loading the whole recording."""
+    with wave.open(str(wav_path), "rb") as sound:
+        if sound.getsampwidth() != 2 or sound.getnchannels() != 1:
+            raise ValueError("La energía se calcula sobre el audio de análisis mono PCM de 16 bits "
+                             "que crea prepare.")
+        window = max(1, round(sound.getframerate() * ENERGY_STEP))
+        expected = sound.getnframes() // window
+        if cache_path is not None and Path(cache_path).is_file():
+            cached, data = array.array("f"), Path(cache_path).read_bytes()
+            if len(data) == expected * cached.itemsize:
+                cached.frombytes(data)
+                return cached
+        levels = levels_of(sound, window)
+    if cache_path is not None and not Path(cache_path).exists():
+        staged = Path(cache_path).with_name(Path(cache_path).name + ".parcial")
+        staged.write_bytes(levels.tobytes())
+        os.rename(staged, cache_path)
+    return levels
+
+
+def bounds(levels, a, b):
+    """[a, b) seconds as indices of the 10 ms grid, clipped to what `levels` actually covers."""
+    # The epsilons keep 1.16 s (115.999… steps) from opening a window one index too early or wide.
+    first = max(0, int(a / ENERGY_STEP + 1e-9))
+    last = min(len(levels), math.ceil(b / ENERGY_STEP - 1e-9))
+    return first, last
+
+
+def silences(levels, a, b, threshold=SILENCE_DB, min_silence=MIN_SILENCE):
+    """Stretches of [a, b) whose level never reaches `threshold` and last at least `min_silence`."""
+    first, last = bounds(levels, a, b)
+    runs, start = [], None
+    for index in range(first, last):
+        if levels[index] < threshold:
+            if start is None:
+                start = index
+        elif start is not None:
+            runs.append((start, index))
+            start = None
+    if start is not None:
+        runs.append((start, last))
+    found = []
+    for x, y in runs:
+        low, high = max(a, x * ENERGY_STEP), min(b, y * ENERGY_STEP)
+        if high - low >= min_silence - 1e-9:
+            found.append((round(low, 6), round(high, 6)))
+    return found
+
+
+def voiced(levels, a, b, threshold=SILENCE_DB):
+    """True when any 10 ms window of [a, b) reaches `threshold`."""
+    first, last = bounds(levels, a, b)
+    return any(levels[index] >= threshold for index in range(first, last))

@@ -13,6 +13,25 @@ import wave
 
 import common
 
+SAMPLES = {}
+
+
+def tone_wav(path, seconds=6.0, rate=16000, pauses=((1.0, 1.5), (3.0, 3.6))):
+    """16 kHz mono PCM with a 440 Hz tone and exact silences; no FFmpeg needed."""
+    key = (seconds, rate, pauses)
+    if key not in SAMPLES:
+        samples = array.array("h")
+        for index in range(int(seconds * rate)):
+            moment = index / rate
+            quiet = any(a <= moment < b for a, b in pauses)
+            samples.append(0 if quiet else int(8000 * math.sin(2 * math.pi * 440 * moment)))
+        SAMPLES[key] = samples.tobytes()
+    with wave.open(str(path), "wb") as sound:
+        sound.setnchannels(1)
+        sound.setsampwidth(2)
+        sound.setframerate(rate)
+        sound.writeframes(SAMPLES[key])
+
 
 class ObjetivoTest(unittest.TestCase):
     def test_reads_percentages_durations_and_clocks(self):
@@ -89,6 +108,60 @@ class HuellaTest(unittest.TestCase):
             # Hash must be exactly the first 4 MiB + last 4 MiB.
             expected = hashlib.sha256(data[:common.CHUNK] + data[-common.CHUNK:]).hexdigest()
             self.assertEqual(common.fingerprint(large)["sha256"], expected)
+
+
+class EnergiaTest(unittest.TestCase):
+    def test_levels_silences_and_budget(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "tono.wav"
+            tone_wav(path)
+            levels = common.energy(path)
+            self.assertEqual(len(levels), 600)
+            self.assertAlmostEqual(levels[50], -15.19, delta=0.1)
+            self.assertEqual(levels[120], common.ENERGY_FLOOR)
+            # 1.16 s is 115.999… steps of 10 ms: the window opens at 116, never at 115.
+            self.assertEqual(common.bounds(levels, 1.16, 2.32), (116, 232))
+            self.assertEqual(common.silences(levels, 0, 6), [(1.0, 1.5), (3.0, 3.6)])
+            self.assertEqual(common.silences(levels, 0, 6, min_silence=0.55), [(3.0, 3.6)])
+            self.assertEqual(common.silences(levels, 1.2, 2.0), [(1.2, 1.5)])
+            self.assertEqual(common.silences(levels, 1.25, 2.0), [])
+            self.assertTrue(common.voiced(levels, 0.5, 0.58))
+            self.assertFalse(common.voiced(levels, 1.1, 1.18))
+            long_path = Path(temporary) / "largo.wav"
+            tone_wav(long_path, seconds=120.0, pauses=())
+            started = time.perf_counter()
+            common.energy(long_path)
+            spent = time.perf_counter() - started
+            # Budget alarm, not a comparison of implementations: 30 s per 2 h, scaled to 120 s.
+            self.assertLess(spent, 0.5)
+
+    def test_cache_is_written_once_and_reread(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            tone_wav(root / "tono.wav")
+            cache = root / "energia.f32"
+            common.energy(root / "tono.wav", cache)
+            self.assertEqual(cache.stat().st_size, 600 * 4)
+            # Levels no recording gives: reading the cache and recomputing it are told apart.
+            marked = array.array("f", [-7.5] * 600)
+            cache.write_bytes(marked.tobytes())
+            self.assertEqual(list(common.energy(root / "tono.wav", cache)), list(marked))
+            self.assertFalse(list(root.glob("*.parcial")))
+            cache.write_bytes(b"\x00" * 8)
+            recomputed = common.energy(root / "tono.wav", cache)
+            self.assertEqual(len(recomputed), 600)
+            self.assertEqual(recomputed[120], common.ENERGY_FLOOR)
+
+    def test_only_the_analysis_format_is_accepted(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "estereo.wav"
+            with wave.open(str(path), "wb") as sound:
+                sound.setnchannels(2)
+                sound.setsampwidth(2)
+                sound.setframerate(16000)
+                sound.writeframes(b"\x00" * 640)
+            with self.assertRaisesRegex(ValueError, "mono PCM de 16 bits"):
+                common.energy(path)
 
 
 if __name__ == "__main__":
