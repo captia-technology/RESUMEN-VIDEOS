@@ -232,10 +232,8 @@ class IslasTest(unittest.TestCase):
             tone_wav(path, seconds=6.0, pauses=((1.0, 1.4), (1.5, 1.9), (4.0, 4.5)))
             levels = common.energy(path)
             islands = common.islands(levels, 0, 6.0, interval=0.01, origin=0.0, margin=0.0)
-            # The [1.4,1.5] span (0.1s < MIN_ISLAND) should not appear.
-            self.assertFalse(any(1.4 <= span[0] < 1.5 for span in islands))
-            # But longer spans should survive: [0,1.0], [1.9,4.0], [4.5,6.0].
-            self.assertGreaterEqual(len(islands), 2)
+            # The [1.4,1.5] span (0.1s < MIN_ISLAND) disappears; three spans survive.
+            self.assertEqual(islands, [[0.0, 1.0], [1.9, 4.0], [4.5, 6.0]])
 
         # Same setup but with a 0.12s interior gap (exactly MIN_ISLAND): [1.4, 1.52].
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -243,8 +241,8 @@ class IslasTest(unittest.TestCase):
             tone_wav(path, seconds=6.0, pauses=((1.0, 1.4), (1.52, 1.9), (4.0, 4.5)))
             levels = common.energy(path)
             islands = common.islands(levels, 0, 6.0, interval=0.01, origin=0.0, margin=0.0)
-            # The [1.4, 1.52] span (0.12s == MIN_ISLAND) should appear (it's interior, not an edge).
-            self.assertTrue(any(1.4 <= span[0] < 1.52 for span in islands))
+            # The [1.4, 1.52] span (0.12s == MIN_ISLAND) survives as an interior span.
+            self.assertEqual(islands, [[0.0, 1.0], [1.4, 1.52], [1.9, 4.0], [4.5, 6.0]])
 
     def test_neighbours_closer_than_a_frame_are_fused(self):
         # With a large frame interval, snapped boundaries can be closer than one frame apart,
@@ -253,15 +251,13 @@ class IslasTest(unittest.TestCase):
         # With interval=1.5, snap([0,1.0]) = [0, 1.5], snap([1.5,3.0]) = [1.5, 3.0],
         # snap([3.6,6.0]) = [3.0, 6.0], and gaps become 0.0 and 0.0, triggering fusion.
         islands_fused = common.islands(self.levels, 0, 6, interval=1.5, origin=0.0, margin=0.0)
-        # All three spans should fuse into one large span covering [0, 6].
-        self.assertEqual(len(islands_fused), 1)
-        self.assertEqual(islands_fused[0][0], 0.0)
-        self.assertEqual(islands_fused[0][1], 6.0)
+        # All three spans fuse into one large span covering [0, 6].
+        self.assertEqual(islands_fused, [[0.0, 6.0]])
 
         # With the normal interval, spans stay separate.
         islands_separate = common.islands(self.levels, 0, 6, interval=0.04, origin=0.0, margin=0.0)
-        # Standard pauses leave three spans; with margin=0.0 and 10ms grid, all three survive.
-        self.assertGreaterEqual(len(islands_separate), 3)
+        # Three spans survive without fusion.
+        self.assertEqual(islands_separate, [[0.0, 1.0], [1.52, 3.0], [3.6, 6.0]])
 
 
 if __name__ == "__main__":
