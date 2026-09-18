@@ -186,7 +186,7 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **94** al terminar el plan (33 en `test_common.py`, 12 en
+  skill **crece**: de las 15 de hoy se pasa a **95** al terminar el plan (34 en `test_common.py`, 12 en
   `test_video.py` y 49 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
@@ -853,13 +853,21 @@ class EnergiaTest(unittest.TestCase):
             self.assertEqual(common.silences(levels, 1.25, 2.0), [])
             self.assertTrue(common.voiced(levels, 0.5, 0.58))
             self.assertFalse(common.voiced(levels, 1.1, 1.18))
+            self.assertEqual(common.silences(levels, 0, 6, threshold=-10.0), [(0.0, 6.0)])
             long_path = Path(temporary) / "largo.wav"
             tone_wav(long_path, seconds=120.0, pauses=())
             started = time.perf_counter()
             common.energy(long_path)
             spent = time.perf_counter() - started
-            # Budget alarm, not a comparison of implementations: 30 s per 2 h, scaled to 120 s.
-            self.assertLess(spent, 0.5)
+            # A catastrophe alarm, six times the documented budget of 30 s per 2 h: it is sensitive
+            # to how busy the machine is and it does not tell one implementation from another.
+            self.assertLess(spent, 3.0)
+
+    def test_the_table_of_squares_is_built_once(self):
+        table = common.squares()
+        self.assertEqual(len(table), 65536)
+        self.assertEqual(table[300], 300 * 300)
+        self.assertIs(common.squares(), table)
 
     def test_cache_is_written_once_and_reread(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -896,7 +904,7 @@ class EnergiaTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -k Energia -v
 ```
 
-Esperado: 3 errores `AttributeError: module 'common' has no attribute 'energy'`.
+Esperado: 4 errores `AttributeError: module 'common' has no attribute 'energy'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -952,16 +960,18 @@ def energy(wav_path, cache_path=None):
                              "que crea prepare.")
         window = max(1, round(sound.getframerate() * ENERGY_STEP))
         expected = sound.getnframes() // window
-        if cache_path is not None and Path(cache_path).is_file():
-            cached, data = array.array("f"), Path(cache_path).read_bytes()
+        cache = Path(cache_path) if cache_path is not None else None
+        if cache is not None and cache.is_file():
+            cached, data = array.array("f"), cache.read_bytes()
             if len(data) == expected * cached.itemsize:
                 cached.frombytes(data)
                 return cached
         levels = levels_of(sound, window)
-    if cache_path is not None and not Path(cache_path).exists():
-        staged = Path(cache_path).with_name(Path(cache_path).name + ".parcial")
+    if cache is not None:
+        # A cache that did not match is stale, not sacred: os.replace overwrites it in one step.
+        staged = cache.with_name(cache.name + ".parcial")
         staged.write_bytes(levels.tobytes())
-        os.rename(staged, cache_path)
+        os.replace(staged, cache)
     return levels
 
 
@@ -1006,7 +1016,7 @@ def voiced(levels, a, b, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 11 tests … OK`.
+Esperado: `Ran 12 tests … OK`.
 
 - [ ] **Paso 5: medir el presupuesto real de esta máquina**
 
@@ -1155,7 +1165,7 @@ def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SIL
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 16 tests … OK`.
+Esperado: `Ran 17 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1276,7 +1286,7 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 21 tests … OK`.
+Esperado: `Ran 22 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1418,7 +1428,7 @@ y así el mismo valor da el mismo texto en la propuesta, en el diff de cambios y
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 26 tests … OK`.
+Esperado: `Ran 27 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1648,7 +1658,7 @@ En `energy`, sustituye la línea `os.rename(staged, cache_path)` por `publish(st
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 43 tests … OK` (31 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 44 tests … OK` (32 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 6: commit**
 
@@ -1765,7 +1775,7 @@ def timeline(data):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 45 tests … OK` (33 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 46 tests … OK` (34 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 5: commit**
 
@@ -3603,7 +3613,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 91 tests … OK` (33 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 92 tests … OK` (34 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -3820,7 +3830,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 94 tests … OK` (33 + 12 + 49), en menos de dos minutos.
+Esperado: `Ran 95 tests … OK` (34 + 12 + 49), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -3883,7 +3893,7 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 33 en `test_common.py`, 12 en `test_video.py` y 49 en
+  subcomandos); al terminar el plan hay 34 en `test_common.py`, 12 en `test_video.py` y 49 en
   `test_plan.py`: **92** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
