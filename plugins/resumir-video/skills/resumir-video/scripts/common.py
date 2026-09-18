@@ -467,31 +467,54 @@ def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SIL
     return grid
 
 
+def nearest_silence(levels, edge, direction, limit, threshold):
+    """Closest edge of a silence within EDGE_WINDOW of `edge`, or None when nothing qualifies.
+
+    `direction` is -1 to search backward from `edge` (adjusting a cut's start) or +1 to search
+    forward (adjusting its end). `limit`, when not None, is the neighbouring word's edge on that
+    side: the result never lands closer to `edge` than `limit` plus WORD_MARGIN would allow.
+    """
+    # The search window grows by EDGE_SILENCE so a pause that starts before it still shows 0.1 s.
+    if direction < 0:
+        gaps = reversed(silences(levels, max(0.0, edge - EDGE_WINDOW - EDGE_SILENCE), edge,
+                                 threshold, EDGE_SILENCE))
+    else:
+        gaps = silences(levels, edge, edge + EDGE_WINDOW + EDGE_SILENCE, threshold, EDGE_SILENCE)
+    for gap in gaps:
+        near = gap[1] if direction < 0 else gap[0]
+        if direction < 0 and near < edge - EDGE_WINDOW:
+            continue
+        if direction > 0 and near > edge + EDGE_WINDOW:
+            continue
+        if limit is None:
+            candidate = near
+        elif direction < 0:
+            candidate = max(near, limit + WORD_MARGIN)
+        else:
+            candidate = min(near, limit - WORD_MARGIN)
+        if direction < 0 and candidate < edge:
+            return round(candidate, 6)
+        if direction > 0 and candidate > edge:
+            return round(candidate, 6)
+    return None
+
+
 def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
     """Move both edges out of speech; returns the pair and `borde_en_voz` when no silence is near."""
+    words = words or []
     note, start, end = None, a, b
     if voiced(levels, max(0.0, a - EDGE_LOOK), a, threshold):
-        # The search window grows by EDGE_SILENCE so a pause that starts before it still shows 0,1 s.
         limit = max((word["end"] for word in words if word["end"] <= a), default=None)
-        for gap in reversed(silences(levels, max(0.0, a - EDGE_WINDOW - EDGE_SILENCE), a,
-                                     threshold, EDGE_SILENCE)):
-            if gap[1] < a - EDGE_WINDOW:
-                continue
-            candidate = gap[1] if limit is None else max(gap[1], limit + WORD_MARGIN)
-            if candidate < a:
-                start = round(candidate, 6)
-                break
-        else:
+        candidate = nearest_silence(levels, a, -1, limit, threshold)
+        if candidate is None:
             note = "borde_en_voz"
+        else:
+            start = candidate
     if voiced(levels, b, b + EDGE_LOOK, threshold):
         limit = min((word["start"] for word in words if word["start"] >= b), default=None)
-        for gap in silences(levels, b, b + EDGE_WINDOW + EDGE_SILENCE, threshold, EDGE_SILENCE):
-            if gap[0] > b + EDGE_WINDOW:
-                continue
-            candidate = gap[0] if limit is None else min(gap[0], limit - WORD_MARGIN)
-            if candidate > b:
-                end = round(candidate, 6)
-                break
-        else:
+        candidate = nearest_silence(levels, b, 1, limit, threshold)
+        if candidate is None:
             note = "borde_en_voz"
+        else:
+            end = candidate
     return start, end, note

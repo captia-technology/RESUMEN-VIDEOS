@@ -288,9 +288,38 @@ class BordesTest(unittest.TestCase):
         start, end, _ = common.adjust_edges(2.0, 2.5, self.levels, words)
         self.assertAlmostEqual(start, 1.5)
         self.assertAlmostEqual(end, 2.93)
+        # Mirror on the start side: the previous word's end (1.49) sits inside the preceding
+        # silence (1.0, 1.5), 0.01 s short of its far edge, so the raw candidate (1.5) would leave
+        # less than WORD_MARGIN after the word; the start is pushed to 1.49 + 0.02 = 1.51 instead.
+        mirrored = [{"start": 0.0, "end": 1.49}, {"start": 1.5, "end": 3.0}, {"start": 3.65, "end": 5.9}]
+        start, end, _ = common.adjust_edges(2.0, 2.5, self.levels, mirrored)
+        self.assertAlmostEqual(start, 1.51)
+        self.assertAlmostEqual(end, 3.0)
 
     def test_it_works_without_word_marks(self):
         self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, []), (1.5, 3.0, None))
+        self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, None), (1.5, 3.0, None))
+
+    def test_silence_beyond_the_window_is_ignored(self):
+        # Cut end at b=1.0; the leading pause (0.0, 0.2) keeps the start side untouched (voiced
+        # lookback [0.02, 0.1) is silent), isolating the check to EDGE_WINDOW on the end side.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "justo_fuera.wav"
+            # Pause starts at b + 0.61 s: only 0.7 - 0.61 = 0.09 s show inside the widened search
+            # window, below EDGE_SILENCE (0.10 s), so no candidate qualifies.
+            tone_wav(path, seconds=3.0, pauses=((0.0, 0.2), (1.61, 3.0)))
+            levels = common.energy(path)
+            start, end, note = common.adjust_edges(0.1, 1.0, levels, [])
+            self.assertEqual((start, end), (0.1, 1.0))
+            self.assertEqual(note, "borde_en_voz")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "justo_dentro.wav"
+            # Pause starts at b + 0.60 s exactly: 0.7 - 0.60 = 0.10 s show, meeting EDGE_SILENCE.
+            tone_wav(path, seconds=3.0, pauses=((0.0, 0.2), (1.60, 3.0)))
+            levels = common.energy(path)
+            start, end, note = common.adjust_edges(0.1, 1.0, levels, [])
+            self.assertEqual((start, end), (0.1, 1.6))
+            self.assertIsNone(note)
 
 
 if __name__ == "__main__":
