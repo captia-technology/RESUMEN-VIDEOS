@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,14 @@ SEEK_MARGIN = 3.0
 FORWARD_SEEK = ("mpegts", "mpegtsraw", "mpeg", "m2ts", "mts")
 FORWARD_MARGIN = 10.0
 DEFAULT_THREADS = min(4, os.cpu_count() or 1)
+TOLERANCE_RATIO = 0.05
+TOLERANCE_FLOOR = 10.0
+
+TARGET = re.compile(r"^(?:(?P<pct>\d+(?:[.,]\d+)?)\s*(?:%|por\s?ciento)"
+                    r"|(?P<num>\d+(?:[.,]\d+)?)\s*(?P<unit>s|seg|segundos?|m|min|minutos?|h|horas?)"
+                    r"|(?P<clock>\d{1,2}(?::\d{2}){1,2}(?:[.,]\d+)?))$")
+UNITS = {"s": 1, "seg": 1, "segundo": 1, "segundos": 1, "m": 60, "min": 60, "minuto": 60,
+         "minutos": 60, "h": 3600, "hora": 3600, "horas": 3600}
 
 
 def tool(name):
@@ -252,3 +261,38 @@ def positive(value):
     if number < 1:
         raise argparse.ArgumentTypeError("debe ser un entero positivo")
     return number
+
+
+def parse_target(text, total):
+    """Target output length in seconds from '10%', '720s', '12min' or '0:12:00'; None when absent."""
+    if text is None:
+        return None
+    clean = " ".join(str(text).split()).lower()
+    if not clean or clean in ("ninguno", "sin objetivo"):
+        return None
+    match = TARGET.match(clean)
+    if not match:
+        raise ValueError(f"Objetivo ambiguo: «{text}». Indica un porcentaje (10%), una duración "
+                         "(720s, 12min) o un tiempo (0:12:00).")
+    if match["pct"] is not None:
+        percent = float(match["pct"].replace(",", "."))
+        if not 0 < percent < 100:
+            raise ValueError("El porcentaje del objetivo debe estar entre 0 y 100 "
+                             f"(recibido {percent:g}).")
+        value = total * percent / 100
+    elif match["num"] is not None:
+        value = float(match["num"].replace(",", ".")) * UNITS[match["unit"]]
+    else:
+        value = 0.0
+        for part in match["clock"].replace(",", ".").split(":"):
+            value = value * 60 + float(part)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"Objetivo no válido: «{text}».")
+    if value >= total:
+        raise ValueError(f"El objetivo ({value:.1f} s) no es menor que el original ({total:.1f} s).")
+    return round(value, 3)
+
+
+def tolerance(target):
+    """Half-width of the acceptance band around a target, never narrower than ten seconds."""
+    return max(TOLERANCE_RATIO * target, TOLERANCE_FLOOR)
