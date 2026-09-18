@@ -1822,6 +1822,15 @@ class LineaTest(unittest.TestCase):
         self.assertEqual(grid["sample_rate"], 48000)
         self.assertAlmostEqual(common.timeline(probe_like(rate="30000/1001"))["fps"], 30000 / 1001)
         self.assertAlmostEqual(common.timeline(probe_like(start="0.000000"))["origin"], 0.0)
+        # offset >= interval: modulo distinguishes from simple subtraction (0.1 mod 0.04 = 0.02)
+        self.assertAlmostEqual(common.timeline(probe_like(start="0.1"))["origin"], 0.02, places=9)
+        # Origin measured from container start, not zero (format.start_time = 1.0, video.start_time = 1.032)
+        offset_from_container = common.timeline(
+            {"format": {"duration": "60.0", "start_time": "1.0"},
+             "streams": [{"index": 0, "codec_type": "video", "r_frame_rate": "25/1",
+                          "avg_frame_rate": "25/1", "start_time": "1.032"},
+                         {"index": 1, "codec_type": "audio", "sample_rate": "48000"}]})
+        self.assertAlmostEqual(offset_from_container["origin"], 0.032, places=9)
         with self.assertRaisesRegex(ValueError, "pista de audio"):
             common.timeline({"format": {"duration": "60.0", "start_time": "0.0"},
                              "streams": [probe_like()["streams"][0]]})
