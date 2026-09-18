@@ -186,7 +186,7 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **97** al terminar el plan (36 en `test_common.py`, 12 en
+  skill **crece**: de las 15 de hoy se pasa a **98** al terminar el plan (37 en `test_common.py`, 12 en
   `test_video.py` y 49 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
@@ -1222,10 +1222,14 @@ git commit -m "feat(common): rejilla de fotogramas e islas tras quitar pausas" \
 
 **Interfaces:**
 - Consumes: `silences`, `voiced`, `SILENCE_DB` de la tarea 4.
-- Produces: `adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB) -> (float, float, str | None)`.
-  `words` es la lista plana de palabras de la transcripción, cada una `{"start", "end"}`; con la lista
-  vacía (subtítulos sin palabras) el ajuste sigue funcionando y solo pierde la protección de palabra. El
-  tercer valor es `"borde_en_voz"` o `None`. Constantes añadidas `EDGE_LOOK = 0.08`,
+- Produces: `nearest_silence(levels, edge, direction, limit, threshold) -> float | None`, el ayudante
+  que hace la búsqueda de un solo lado: con `direction = -1` busca hacia atrás desde `edge` (ajustando
+  el inicio de un corte) y con `direction = +1` hacia delante desde `edge` (ajustando su fin);
+  `adjust_edges` lo llama una vez por lado. También `adjust_edges(a, b, levels, words, *,
+  threshold=SILENCE_DB) -> (float, float, str | None)`. `words` es la lista plana de palabras de la
+  transcripción, cada una `{"start", "end"}`; admite `None` como equivalente a la lista vacía, y con la
+  lista vacía (subtítulos sin palabras) el ajuste sigue funcionando y solo pierde la protección de
+  palabra. El tercer valor es `"borde_en_voz"` o `None`. Constantes añadidas `EDGE_LOOK = 0.08`,
   `EDGE_WINDOW = 0.60`, `EDGE_SILENCE = 0.10`, `WORD_MARGIN = 0.02`.
 
 - [ ] **Paso 1: escribir la prueba que falla**
@@ -1259,9 +1263,38 @@ class BordesTest(unittest.TestCase):
         start, end, _ = common.adjust_edges(2.0, 2.5, self.levels, words)
         self.assertAlmostEqual(start, 1.5)
         self.assertAlmostEqual(end, 2.93)
+        # Mirror on the start side: the previous word's end (1.49) sits inside the preceding
+        # silence (1.0, 1.5), 0.01 s short of its far edge, so the raw candidate (1.5) would leave
+        # less than WORD_MARGIN after the word; the start is pushed to 1.49 + 0.02 = 1.51 instead.
+        mirrored = [{"start": 0.0, "end": 1.49}, {"start": 1.5, "end": 3.0}, {"start": 3.65, "end": 5.9}]
+        start, end, _ = common.adjust_edges(2.0, 2.5, self.levels, mirrored)
+        self.assertAlmostEqual(start, 1.51)
+        self.assertAlmostEqual(end, 3.0)
 
     def test_it_works_without_word_marks(self):
         self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, []), (1.5, 3.0, None))
+        self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, None), (1.5, 3.0, None))
+
+    def test_silence_beyond_the_window_is_ignored(self):
+        # Cut end at b=1.0; the leading pause (0.0, 0.2) keeps the start side untouched (voiced
+        # lookback [0.02, 0.1) is silent), isolating the check to EDGE_WINDOW on the end side.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "justo_fuera.wav"
+            # Pause starts at b + 0.61 s: only 0.7 - 0.61 = 0.09 s show inside the widened search
+            # window, below EDGE_SILENCE (0.10 s), so no candidate qualifies.
+            tone_wav(path, seconds=3.0, pauses=((0.0, 0.2), (1.61, 3.0)))
+            levels = common.energy(path)
+            start, end, note = common.adjust_edges(0.1, 1.0, levels, [])
+            self.assertEqual((start, end), (0.1, 1.0))
+            self.assertEqual(note, "borde_en_voz")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "justo_dentro.wav"
+            # Pause starts at b + 0.60 s exactly: 0.7 - 0.60 = 0.10 s show, meeting EDGE_SILENCE.
+            tone_wav(path, seconds=3.0, pauses=((0.0, 0.2), (1.60, 3.0)))
+            levels = common.energy(path)
+            start, end, note = common.adjust_edges(0.1, 1.0, levels, [])
+            self.assertEqual((start, end), (0.1, 1.6))
+            self.assertIsNone(note)
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -1270,7 +1303,7 @@ class BordesTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -k Bordes -v
 ```
 
-Esperado: 5 errores `AttributeError: module 'common' has no attribute 'adjust_edges'`.
+Esperado: 6 errores `AttributeError: module 'common' has no attribute 'adjust_edges'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -1283,36 +1316,59 @@ EDGE_SILENCE = 0.10
 WORD_MARGIN = 0.02
 ```
 
-y la función:
+y las funciones:
 
 ```python
+def nearest_silence(levels, edge, direction, limit, threshold):
+    """Closest edge of a silence within EDGE_WINDOW of `edge`, or None when nothing qualifies.
+
+    `direction` is -1 to search backward from `edge` (adjusting a cut's start) or +1 to search
+    forward (adjusting its end). `limit`, when not None, is the neighbouring word's edge on that
+    side: the result never lands closer to `edge` than `limit` plus WORD_MARGIN would allow.
+    """
+    # The search window grows by EDGE_SILENCE so a pause that starts before it still shows 0.1 s.
+    if direction < 0:
+        gaps = reversed(silences(levels, max(0.0, edge - EDGE_WINDOW - EDGE_SILENCE), edge,
+                                 threshold, EDGE_SILENCE))
+    else:
+        gaps = silences(levels, edge, edge + EDGE_WINDOW + EDGE_SILENCE, threshold, EDGE_SILENCE)
+    for gap in gaps:
+        near = gap[1] if direction < 0 else gap[0]
+        if direction < 0 and near < edge - EDGE_WINDOW:
+            continue
+        if direction > 0 and near > edge + EDGE_WINDOW:
+            continue
+        if limit is None:
+            candidate = near
+        elif direction < 0:
+            candidate = max(near, limit + WORD_MARGIN)
+        else:
+            candidate = min(near, limit - WORD_MARGIN)
+        if direction < 0 and candidate < edge:
+            return round(candidate, 6)
+        if direction > 0 and candidate > edge:
+            return round(candidate, 6)
+    return None
+
+
 def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
     """Move both edges out of speech; returns the pair and `borde_en_voz` when no silence is near."""
+    words = words or []
     note, start, end = None, a, b
     if voiced(levels, max(0.0, a - EDGE_LOOK), a, threshold):
-        # The search window grows by EDGE_SILENCE so a pause that starts before it still shows 0,1 s.
         limit = max((word["end"] for word in words if word["end"] <= a), default=None)
-        for gap in reversed(silences(levels, max(0.0, a - EDGE_WINDOW - EDGE_SILENCE), a,
-                                     threshold, EDGE_SILENCE)):
-            if gap[1] < a - EDGE_WINDOW:
-                continue
-            candidate = gap[1] if limit is None else max(gap[1], limit + WORD_MARGIN)
-            if candidate < a:
-                start = round(candidate, 6)
-                break
-        else:
+        candidate = nearest_silence(levels, a, -1, limit, threshold)
+        if candidate is None:
             note = "borde_en_voz"
+        else:
+            start = candidate
     if voiced(levels, b, b + EDGE_LOOK, threshold):
         limit = min((word["start"] for word in words if word["start"] >= b), default=None)
-        for gap in silences(levels, b, b + EDGE_WINDOW + EDGE_SILENCE, threshold, EDGE_SILENCE):
-            if gap[0] > b + EDGE_WINDOW:
-                continue
-            candidate = gap[0] if limit is None else min(gap[0], limit - WORD_MARGIN)
-            if candidate > b:
-                end = round(candidate, 6)
-                break
-        else:
+        candidate = nearest_silence(levels, b, 1, limit, threshold)
+        if candidate is None:
             note = "borde_en_voz"
+        else:
+            end = candidate
     return start, end, note
 ```
 
@@ -1322,7 +1378,7 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 24 tests … OK`.
+Esperado: `Ran 25 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1464,7 +1520,7 @@ y así el mismo valor da el mismo texto en la propuesta, en el diff de cambios y
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 29 tests … OK`.
+Esperado: `Ran 30 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1708,7 +1764,7 @@ argumentos y afirma que `staged.name == f"energia.f32.{os.getpid()}.parcial"`.
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 46 tests … OK` (34 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 47 tests … OK` (35 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 6: commit**
 
@@ -1825,7 +1881,7 @@ def timeline(data):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 48 tests … OK` (36 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 49 tests … OK` (37 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 5: commit**
 
@@ -3663,7 +3719,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 94 tests … OK` (36 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 95 tests … OK` (37 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -3880,7 +3936,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 97 tests … OK` (36 + 12 + 49), en menos de dos minutos.
+Esperado: `Ran 98 tests … OK` (37 + 12 + 49), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -3943,8 +3999,8 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 36 en `test_common.py`, 12 en `test_video.py` y 49 en
-  `test_plan.py`: **92** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
+  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 49 en
+  `test_plan.py`: **98** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
   de §12 que le corresponden: borrador ausente, borrador rechazado y plan publicado con aviso
