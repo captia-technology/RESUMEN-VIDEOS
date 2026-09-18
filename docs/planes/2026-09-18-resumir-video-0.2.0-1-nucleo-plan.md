@@ -186,7 +186,7 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **93** al terminar el plan (32 en `test_common.py`, 12 en
+  skill **crece**: de las 15 de hoy se pasa a **94** al terminar el plan (33 en `test_common.py`, 12 en
   `test_video.py` y 49 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
@@ -719,15 +719,22 @@ class HuellaTest(unittest.TestCase):
                              hashlib.sha256(b"hola").hexdigest())
 
     def test_files_below_eight_mib_are_hashed_through_the_middle(self):
+        # Pinning the value, not just its sensitivity: with a lower threshold the head and the tail
+        # of a 6 MiB file overlap, the middle is hashed twice and the digest stops matching.
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             medium = Path(temporary) / "medio.bin"
-            medium.write_bytes(b"A" * (6 * 1024 * 1024))
-            original = common.fingerprint(medium)["sha256"]
-            with medium.open("r+b") as stream:
-                # Byte 5 MiB: past the first 4 MiB, so only reading a 6 MiB file whole notices it.
-                stream.seek(5 * 1024 * 1024)
-                stream.write(b"QQQQ")
-            self.assertNotEqual(common.fingerprint(medium)["sha256"], original)
+            body = bytes(range(256)) * (6 * 1024 * 4)
+            medium.write_bytes(body)
+            self.assertEqual(common.fingerprint(medium)["sha256"],
+                             hashlib.sha256(body).hexdigest())
+
+    def test_files_above_eight_mib_hash_both_ends_and_skip_the_middle(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            long = Path(temporary) / "largo.bin"
+            body = bytes(range(256)) * (12 * 1024 * 4)
+            long.write_bytes(body)
+            ends = body[:common.CHUNK] + body[-common.CHUNK:]
+            self.assertEqual(common.fingerprint(long)["sha256"], hashlib.sha256(ends).hexdigest())
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -736,7 +743,7 @@ class HuellaTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -k Huella -v
 ```
 
-Esperado: 3 errores `AttributeError: module 'common' has no attribute 'fingerprint'`.
+Esperado: 4 errores `AttributeError: module 'common' has no attribute 'fingerprint'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -769,7 +776,7 @@ def fingerprint(path):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 7 tests … OK`.
+Esperado: `Ran 8 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -999,7 +1006,7 @@ def voiced(levels, a, b, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 10 tests … OK`.
+Esperado: `Ran 11 tests … OK`.
 
 - [ ] **Paso 5: medir el presupuesto real de esta máquina**
 
@@ -1148,7 +1155,7 @@ def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SIL
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 15 tests … OK`.
+Esperado: `Ran 16 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1269,7 +1276,7 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 20 tests … OK`.
+Esperado: `Ran 21 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1411,7 +1418,7 @@ y así el mismo valor da el mismo texto en la propuesta, en el diff de cambios y
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 25 tests … OK`.
+Esperado: `Ran 26 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1641,7 +1648,7 @@ En `energy`, sustituye la línea `os.rename(staged, cache_path)` por `publish(st
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 42 tests … OK` (30 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 43 tests … OK` (31 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 6: commit**
 
@@ -1758,7 +1765,7 @@ def timeline(data):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 44 tests … OK` (32 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 45 tests … OK` (33 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 5: commit**
 
@@ -3596,7 +3603,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 90 tests … OK` (32 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 91 tests … OK` (33 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -3813,7 +3820,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 93 tests … OK` (32 + 12 + 49), en menos de dos minutos.
+Esperado: `Ran 94 tests … OK` (33 + 12 + 49), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -3876,7 +3883,7 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 32 en `test_common.py`, 12 en `test_video.py` y 49 en
+  subcomandos); al terminar el plan hay 33 en `test_common.py`, 12 en `test_video.py` y 49 en
   `test_plan.py`: **92** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
