@@ -1456,8 +1456,12 @@ git commit -m "feat(common): N y M exactos, sha256 canonico, avisos, reloj y tex
   **a cualquier profundidad**, `reserve_version(work, prefix) -> (int, Path)` (crea en exclusiva
   `<prefix>-vN.json`, tres intentos) y el añadido declarado `write_reserved(path, text) -> None`, que
   llena una versión ya reservada con `os.replace`. Constantes `HISTORY_LIMIT = 4096`,
-  `HISTORY_TEXT = 300`, `VERSION_ATTEMPTS = 3`. Sustituye además el `os.rename` provisional de `energy`
-  por `publish`.
+  `HISTORY_TEXT = 300`, `VERSION_ATTEMPTS = 3`. **No toca `energy`:** la caché de energía no es un
+  artefacto publicado sino un derivado reconstruible que se repara sobrescribiéndose con `os.replace`,
+  así que `publish` —que nunca sobrescribe— no le sirve. Lo único que esta tarea cambia en `energy` es
+  el nombre del archivo intermedio, que pasa a llevar el pid (`energia.f32.<pid>.parcial`) para que
+  dos procesos que escriban la misma caché a la vez no compartan el mismo `.parcial` (en Windows, con
+  cuatro hilos sobre la misma ruta, el nombre fijo daba `PermissionError` en 3 de 5 rondas).
 - `history` **nunca levanta**: si el registro sigue pasando de 4 KiB escribe una línea mínima con una
   nota, y si el archivo no se deja abrir —o el `payload` ni siquiera es un mapeo— se calla. Por eso el
   armado del registro (`shorten`) va **dentro** del bloque protegido, no antes. El historial es un
@@ -1648,9 +1652,19 @@ def write_reserved(path, text):
     os.replace(staged, path)
 ```
 
-- [ ] **Paso 4: usar `publish` también en la caché de energía**
+- [ ] **Paso 4: un archivo intermedio por proceso en la caché de energía**
 
-En `energy`, sustituye la línea `os.rename(staged, cache_path)` por `publish(staged, cache_path)`.
+En `energy`, la caché sigue publicándose con `os.replace` (debe poder sobrescribir una caché corrupta;
+`publish` no sobrescribe por contrato). Cambia solo el nombre del archivo intermedio para que cada
+proceso escriba el suyo:
+
+```python
+        staged = cache.with_name(f"{cache.name}.{os.getpid()}.parcial")
+```
+
+Añade a `EnergiaTest.test_cache_is_written_once_and_reread` la comprobación de que el nombre
+intermedio lleva el pid: parchea `os.replace` con `unittest.mock.patch.object` para capturar sus
+argumentos y afirma que `staged.name == f"energia.f32.{os.getpid()}.parcial"`.
 
 - [ ] **Paso 5: ejecutar la batería completa**
 
