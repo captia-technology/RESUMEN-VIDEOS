@@ -186,7 +186,7 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **95** al terminar el plan (34 en `test_common.py`, 12 en
+  skill **crece**: de las 15 de hoy se pasa a **97** al terminar el plan (36 en `test_common.py`, 12 en
   `test_video.py` y 49 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
@@ -1096,6 +1096,42 @@ class IslasTest(unittest.TestCase):
         # §7.4: keeping the pauses means keeping the span too, even below MIN_EDGE_ISLAND.
         self.assertEqual(common.islands(self.levels, 1.1, 1.2, interval=0.04, origin=0.0,
                                         remove_pauses=False), [[1.12, 1.2]])
+
+    def test_interior_spans_shorter_than_min_island_are_dropped(self):
+        # Three pauses: the middle one creates a short interior span between longer voiced sections.
+        # Pauses at (1.0, 1.4), (1.5, 1.9), and (4.0, 4.5) leave spans: [0,1.0], [1.4,1.5] (0.1s),
+        # [1.9,4.0], and [4.5,6.0]. The interior span [1.4,1.5] is < MIN_ISLAND and should disappear.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "interior_short.wav"
+            tone_wav(path, seconds=6.0, pauses=((1.0, 1.4), (1.5, 1.9), (4.0, 4.5)))
+            levels = common.energy(path)
+            islands = common.islands(levels, 0, 6.0, interval=0.01, origin=0.0, margin=0.0)
+            # The [1.4,1.5] span (0.1s < MIN_ISLAND) disappears; three spans survive.
+            self.assertEqual(islands, [[0.0, 1.0], [1.9, 4.0], [4.5, 6.0]])
+
+        # Same setup but with a 0.12s interior gap (exactly MIN_ISLAND): [1.4, 1.52].
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "interior_exact.wav"
+            tone_wav(path, seconds=6.0, pauses=((1.0, 1.4), (1.52, 1.9), (4.0, 4.5)))
+            levels = common.energy(path)
+            islands = common.islands(levels, 0, 6.0, interval=0.01, origin=0.0, margin=0.0)
+            # The [1.4, 1.52] span (0.12s == MIN_ISLAND) survives as an interior span.
+            self.assertEqual(islands, [[0.0, 1.0], [1.4, 1.52], [1.9, 4.0], [4.5, 6.0]])
+
+    def test_neighbours_closer_than_a_frame_are_fused(self):
+        # With a large frame interval, snapped boundaries can be closer than one frame apart,
+        # triggering fusion of adjacent island groups. Standard pauses leave three voiced spans;
+        # with interval=1.5, they all fuse into one; with interval=0.04, they stay separate.
+        # With interval=1.5, snap([0,1.0]) = [0, 1.5], snap([1.5,3.0]) = [1.5, 3.0],
+        # snap([3.6,6.0]) = [3.0, 6.0], and gaps become 0.0 and 0.0, triggering fusion.
+        islands_fused = common.islands(self.levels, 0, 6, interval=1.5, origin=0.0, margin=0.0)
+        # All three spans fuse into one large span covering [0, 6].
+        self.assertEqual(islands_fused, [[0.0, 6.0]])
+
+        # With the normal interval, spans stay separate.
+        islands_separate = common.islands(self.levels, 0, 6, interval=0.04, origin=0.0, margin=0.0)
+        # Three spans survive without fusion.
+        self.assertEqual(islands_separate, [[0.0, 1.0], [1.52, 3.0], [3.6, 6.0]])
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -1104,7 +1140,7 @@ class IslasTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -k Islas -v
 ```
 
-Esperado: 5 errores `AttributeError: module 'common' has no attribute 'snap'`.
+Esperado: 7 errores `AttributeError: module 'common' has no attribute 'snap'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -1165,7 +1201,7 @@ def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SIL
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 17 tests … OK`.
+Esperado: `Ran 19 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1286,7 +1322,7 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 22 tests … OK`.
+Esperado: `Ran 24 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1428,7 +1464,7 @@ y así el mismo valor da el mismo texto en la propuesta, en el diff de cambios y
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 27 tests … OK`.
+Esperado: `Ran 29 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1672,7 +1708,7 @@ argumentos y afirma que `staged.name == f"energia.f32.{os.getpid()}.parcial"`.
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 44 tests … OK` (32 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 46 tests … OK` (34 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 6: commit**
 
@@ -1789,7 +1825,7 @@ def timeline(data):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 46 tests … OK` (34 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 48 tests … OK` (36 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 5: commit**
 
@@ -3627,7 +3663,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 92 tests … OK` (34 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 94 tests … OK` (36 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -3844,7 +3880,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 95 tests … OK` (34 + 12 + 49), en menos de dos minutos.
+Esperado: `Ran 97 tests … OK` (36 + 12 + 49), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -3907,7 +3943,7 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 34 en `test_common.py`, 12 en `test_video.py` y 49 en
+  subcomandos); al terminar el plan hay 36 en `test_common.py`, 12 en `test_video.py` y 49 en
   `test_plan.py`: **92** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
