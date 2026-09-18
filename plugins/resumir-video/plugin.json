@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "resumir-video",
+  "version": "0.1.0",
+  "description": "Resume vídeos técnicos locales en un MP4 con fragmentos originales, analizando voz y pantalla (Python 3.10+ y FFmpeg).",
+  "author": {
+    "name": "CAPTIA TECHNOLOGY S.L."
+  },
+  "homepage": "https://github.com/captia-technology/RESUMEN-VIDEOS",
+  "repository": "https://github.com/captia-technology/RESUMEN-VIDEOS",
+  "license": "MIT",
+  "keywords": ["video", "resumen", "ffmpeg", "transcripcion", "formacion", "ingenieria"]
+}

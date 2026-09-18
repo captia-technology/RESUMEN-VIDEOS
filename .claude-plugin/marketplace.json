@@ -1,0 +1,26 @@
+{
+  "name": "resumen-videos",
+  "owner": {
+    "name": "CAPTIA TECHNOLOGY S.L."
+  },
+  "metadata": {
+    "description": "Skills de CAPTIA TECHNOLOGY para resumir vídeos técnicos con agentes de IA.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "resumir-video",
+      "source": "./plugins/resumir-video",
+      "description": "Resume vídeos técnicos locales en un MP4 con fragmentos originales, analizando voz y pantalla (Python 3.10+ y FFmpeg).",
+      "version": "0.1.0",
+      "author": {
+        "name": "CAPTIA TECHNOLOGY S.L."
+      },
+      "homepage": "https://github.com/captia-technology/RESUMEN-VIDEOS",
+      "repository": "https://github.com/captia-technology/RESUMEN-VIDEOS",
+      "license": "MIT",
+      "keywords": ["video", "resumen", "ffmpeg", "transcripcion", "formacion", "ingenieria"],
+      "category": "productivity"
+    }
+  ]
+}

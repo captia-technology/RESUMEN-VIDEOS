@@ -1,0 +1,20 @@
+# Credenciales y configuración privada local
+.env
+.env.*
+!.env.example
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Material de trabajo de la skill
+resumenes/
+__pycache__/
+*.pyc
+.venv/
+
+# Vídeos de entrada y estado local de los agentes
+input/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resumir vídeo"
+  short_description: "Resume vídeos técnicos conservando audio e imagen"
+  default_prompt: "Usa $resumir-video con la ruta indicada para crear un vídeo resumen técnico a partir de los fragmentos originales."

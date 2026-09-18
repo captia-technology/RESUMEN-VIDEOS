@@ -1,0 +1,25 @@
+{
+  "name": "resumir-video",
+  "version": "0.1.0",
+  "description": "Resume vídeos técnicos locales en un MP4 con fragmentos originales, analizando voz y pantalla (Python 3.10+ y FFmpeg).",
+  "author": {
+    "name": "CAPTIA TECHNOLOGY S.L."
+  },
+  "homepage": "https://github.com/captia-technology/RESUMEN-VIDEOS",
+  "repository": "https://github.com/captia-technology/RESUMEN-VIDEOS",
+  "license": "MIT",
+  "keywords": ["video", "resumen", "ffmpeg", "transcripcion", "formacion", "ingenieria"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Resumir vídeo",
+    "shortDescription": "Resume vídeos técnicos conservando audio e imagen",
+    "longDescription": "Analiza la voz y la pantalla de un vídeo local de ingeniería, formación o presentación, selecciona unidades de conocimiento completas y monta un MP4 con los fragmentos originales, su plan de cortes reproducible y un informe. Trabaja en local con Python y FFmpeg; la transcripción con faster-whisper es opcional.",
+    "developerName": "CAPTIA TECHNOLOGY S.L.",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://github.com/captia-technology/RESUMEN-VIDEOS",
+    "defaultPrompt": [
+      "Usa $resumir-video:resumir-video con la ruta del vídeo local que quiero resumir."
+    ]
+  }
+}
