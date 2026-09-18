@@ -23,8 +23,7 @@
 
 ## Pendiente
 
-- Crear y publicar el repositorio `captia-technology/RESUMEN-VIDEOS` (y decidir si es público o privado, lo que afecta a la autenticación de los usuarios).
-- Comprobar, una vez publicado, la instalación desde GitHub en cada cliente, el flujo de VS Code y la invocación dentro de una sesión; lo verificado hasta ahora está en el [plan](plan.md#validación-2026-09-17).
+- Comprobar el flujo de instalación desde la interfaz de VS Code y la invocación dentro de una sesión; la instalación desde GitHub ya está verificada en los tres clientes ([plan](plan.md#validación-2026-09-17)).
 - Precisión de transcripción de terminología y lectura de tablas en más grabaciones del usuario.
 - Calidad editorial, legibilidad, reducción alcanzable y consumo en vídeos largos con la versión empaquetada.
 - Prioridad de las posibles ampliaciones de [capacidades](capacidades.md#posibles-ampliaciones).

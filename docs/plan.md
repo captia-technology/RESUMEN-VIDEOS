@@ -2,6 +2,8 @@
 
 ## Completado
 
+- Publicación en `captia-technology/RESUMEN-VIDEOS` (público, MIT) el 2026-09-18: versión 0.1.0 etiquetada, integración continua en verde, guía de contribución, política de seguridad y README con demostración y gráficos.
+
 - Inicialización del repositorio independiente y documentación mínima.
 - Skill portable con selección audiovisual, guía operativa y asistente local de extracción y montaje.
 - Ejecución real sobre una grabación de dos horas en 4K (material excluido del repositorio). Sus lecciones se documentan como límites y posibles ampliaciones en [capacidades](capacidades.md).
@@ -42,8 +44,8 @@ No verificado (pendiente de evidencia):
 
 ## Siguiente paso
 
-- Crear el repositorio `captia-technology/RESUMEN-VIDEOS`, publicar la versión 0.1.0 y repetir la instalación desde GitHub en cada cliente, incluido VS Code.
-- Probar la invocación dentro de una sesión en Claude Code, Copilot y Codex.
+- Comprobar el flujo de instalación desde la interfaz de VS Code y la invocación dentro de una sesión en Claude Code, Copilot y Codex.
+- Comprobar macOS: `video.py check`, las pruebas automáticas y las órdenes de `brew` de la guía.
 - Evaluar la versión empaquetada con nuevos vídeos técnicos: cobertura, precisión, legibilidad, uniones y consumo.
 
 No hay desarrollo de una aplicación en curso.
