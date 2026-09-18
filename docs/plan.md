@@ -29,6 +29,7 @@ Entorno: Windows 11, Python 3.11.9 y FFmpeg 8.0.1 (compilación completa con lib
 
 - Sincronía (20 uniones, vídeo sintético de 12 s): con el montaje de la primera versión, 7,16 s de vídeo frente a 7,25 s de audio decodificado; con el audio codificado una vez, 6,80 s frente a 6,81 s; con la versión final (frecuencia constante), 6,40 s frente a 6,40 s. La prueba automática admite 50 ms.
 - Instalación desde GitHub (2026-09-18, repositorio ya publicado): `marketplace add captia-technology/RESUMEN-VIDEOS` e instalación del plugin correctas en Claude Code 2.1.274, Copilot CLI 1.0.85 y Codex 0.154.0, con las carpetas de configuración redirigidas a carpetas temporales.
+- Integración continua (2026-09-18): el flujo `Pruebas` ejecuta las dos baterías en `ubuntu-latest` y `windows-latest` con Python 3.10 y 3.12, más la comprobación de manifiestos; todas las combinaciones correctas. Es la primera ejecución verificada en Linux.
 - Pruebas automáticas (Windows 11, FFmpeg 8.0.1): las 23 de `tests/` y las 15 de la skill pasan con Python 3.10.18 y 3.11.9; también pasan `claude plugin validate --strict` (plugin y catálogo), `validate_plugin.py` y `quick_validate.py`.
 - Segunda ronda sobre la versión corregida: las instalaciones y el uso de extremo a extremo se repitieron con éxito, y una revisión adversarial del montaje (fuentes marcadas fotograma a fotograma a 25, 29,97 y 5 fps, de frecuencia variable y MPEG-TS) encontró tres fallos que se corrigen en esta entrega: truncamiento de cortes cortos al concatenar, imagen congelada en contenedores sin índice y una tolerancia mal calculada. Tras el arreglo, el audio de cada unión cae a menos de 1 ms de su sitio y no acumula desfase.
 
@@ -37,7 +38,7 @@ No verificado (pendiente de evidencia):
 - Invocación dentro de una sesión (`/resumir-video`, `$resumir-video`, `$resumir-video:resumir-video`, `/skills`, `/plugin`, `/plugins`), aviso de carpetas de confianza y propuesta del bloque de equipo: requieren iniciar sesión y llamar a modelos.
 - Flujo de instalación de VS Code (**Chat: Install Plugin from Source**) y agente en la nube de Copilot.
 - Instaladores de terceros contra GitHub.
-- macOS: no se ha ejecutado `video.py` ni las pruebas automáticas, ni se han comprobado las órdenes de `brew` de la [guía de instalación](instalacion.md#1-requisitos-previos).
+- macOS: no se ha ejecutado `video.py` ni las pruebas automáticas, ni se han comprobado las órdenes de `brew` de la [guía de instalación](instalacion.md#1-requisitos-previos). Linux sí queda cubierto por la integración continua.
 
 ## Siguiente paso
 

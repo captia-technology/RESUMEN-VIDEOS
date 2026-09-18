@@ -66,7 +66,7 @@ El asistente no decide qué conocimiento importa y el agente no manipula el víd
 
 `SKILL.md` usa solo los campos portables del estándar [Agent Skills](https://agentskills.io/specification) (`name`, `description`, `license`, `metadata`). La interfaz de Codex está en `agents/openai.yaml` y `.codex-plugin/plugin.json`; los demás clientes la ignoran. Las versiones y órdenes comprobadas, y lo que falta por comprobar (entre otras cosas, el agente en la nube y la invocación dentro de una sesión), figuran en el [plan](plan.md#validación-2026-09-17).
 
-Plataformas: Windows, macOS y Linux con Python 3.10+ y FFmpeg (libx264 y AAC); comprobado en Windows 11 y en macOS pendiente de evidencia ([plan](plan.md#validación-2026-09-17)). No requiere GPU, servidor ni API de pago; la transcripción puede usar CUDA si está disponible.
+Plataformas: Windows, macOS y Linux con Python 3.10+ y FFmpeg (libx264 y AAC); comprobado en Windows 11 y en Ubuntu (integración continua); en macOS, pendiente de evidencia ([plan](plan.md#validación-2026-09-17)). No requiere GPU, servidor ni API de pago; la transcripción puede usar CUDA si está disponible.
 
 ## Entradas
 
