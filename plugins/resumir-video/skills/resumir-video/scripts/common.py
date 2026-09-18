@@ -286,11 +286,12 @@ def parse_target(text, total):
         value = 0.0
         for part in match["clock"].replace(",", ".").split(":"):
             value = value * 60 + float(part)
+    value = round(value, 3)
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"Objetivo no válido: «{text}».")
     if value >= total:
         raise ValueError(f"El objetivo ({value:.1f} s) no es menor que el original ({total:.1f} s).")
-    return round(value, 3)
+    return value
 
 
 def tolerance(target):

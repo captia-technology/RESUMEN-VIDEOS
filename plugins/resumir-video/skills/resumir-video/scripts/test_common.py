@@ -36,6 +36,12 @@ class ObjetivoTest(unittest.TestCase):
         self.assertAlmostEqual(common.tolerance(100), 10.0)
         self.assertAlmostEqual(common.tolerance(240), 12.0)
 
+    def test_rounding_to_the_returned_precision_cannot_reach_the_original(self):
+        for text in ("179.9999s", "179.9996s", "2:59.9999"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                common.parse_target(text, 180.0)
+        self.assertAlmostEqual(common.parse_target("179.99s", 180.0), 179.99)
+
 
 if __name__ == "__main__":
     unittest.main()
