@@ -648,3 +648,29 @@ def clock(value):
     hours, rest = divmod(int(value), 3600)
     minutes, secs = divmod(rest, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def timeline(data):
+    """Container start, grid, cadence and sample rate that the whole job shares (sections 3, 5)."""
+    sounds = [stream for stream in data["streams"] if stream["codec_type"] == "audio"]
+    if not sounds:
+        raise ValueError("El medio no tiene pista de audio: no se puede analizar al ponente.")
+    chosen = next((s for s in sounds if s["index"] == data.get("audio_stream")), sounds[0])
+    line = {"start": timeline_start(data), "origin": 0.0, "rate": None, "fps": None,
+            "interval": None, "sample_rate": int(chosen.get("sample_rate") or 0)}
+    # Audio-only media keep the same six keys with no grid to fill; cover art is not footage.
+    if not any(stream["codec_type"] == "video"
+               and not stream.get("disposition", {}).get("attached_pic")
+               for stream in data["streams"]):
+        return line
+    video = video_stream(data)
+    rate = output_rate(video)
+    interval = output_interval(rate)
+    try:
+        offset = float(video.get("start_time") or 0) - timeline_start(data)
+    except (TypeError, ValueError):
+        offset = 0.0
+    if not math.isfinite(offset) or offset < 0:
+        offset = 0.0
+    return {**line, "origin": round(math.fmod(offset, interval), 9), "rate": rate,
+            "fps": round(1 / interval, 9), "interval": interval}

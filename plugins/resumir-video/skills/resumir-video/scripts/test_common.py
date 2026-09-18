@@ -441,5 +441,39 @@ class PublicacionTest(unittest.TestCase):
                          ["seleccion-v1.json", "seleccion-v2.json"])
 
 
+def probe_like(rate="25/1", start="0.032000", sample_rate="48000"):
+    return {"format": {"duration": "60.000000", "start_time": "0.000000"},
+            "streams": [{"index": 0, "codec_type": "video", "r_frame_rate": rate,
+                         "avg_frame_rate": rate, "start_time": start},
+                        {"index": 1, "codec_type": "audio", "sample_rate": sample_rate}]}
+
+
+class LineaTest(unittest.TestCase):
+    def test_the_grid_starts_at_the_video_offset(self):
+        grid = common.timeline(probe_like())
+        self.assertEqual(set(grid), {"start", "origin", "rate", "fps", "interval", "sample_rate"})
+        self.assertEqual(grid["rate"], "25/1")
+        self.assertAlmostEqual(grid["interval"], 0.04)
+        self.assertAlmostEqual(grid["fps"], 25.0)
+        self.assertAlmostEqual(grid["origin"], 0.032)
+        self.assertEqual(grid["sample_rate"], 48000)
+        self.assertAlmostEqual(common.timeline(probe_like(rate="30000/1001"))["fps"], 30000 / 1001)
+        self.assertAlmostEqual(common.timeline(probe_like(start="0.000000"))["origin"], 0.0)
+        with self.assertRaisesRegex(ValueError, "pista de audio"):
+            common.timeline({"format": {"duration": "60.0", "start_time": "0.0"},
+                             "streams": [probe_like()["streams"][0]]})
+
+    def test_audio_only_media_keep_the_same_six_keys(self):
+        picture, sound = probe_like()["streams"]
+        only_sound = {"format": {"duration": "60.0", "start_time": "0.0"}, "streams": [sound]}
+        line = common.timeline(only_sound)
+        self.assertEqual(set(line), {"start", "origin", "rate", "fps", "interval", "sample_rate"})
+        self.assertEqual((line["rate"], line["fps"], line["interval"]), (None, None, None))
+        self.assertEqual((line["start"], line["origin"], line["sample_rate"]), (0.0, 0.0, 48000))
+        # Cover art is metadata, not footage: a tagged m4a is still an audio-only medium.
+        cover = dict(picture, index=2, disposition={"attached_pic": 1})
+        self.assertEqual(common.timeline({**only_sound, "streams": [sound, cover]}), line)
+
+
 if __name__ == "__main__":
     unittest.main()
