@@ -728,7 +728,7 @@ class HuellaTest(unittest.TestCase):
             self.assertEqual(common.fingerprint(medium)["sha256"],
                              hashlib.sha256(body).hexdigest())
 
-    def test_files_above_eight_mib_hash_both_ends_and_skip_the_middle(self):
+    def test_large_files_use_only_ends(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             long = Path(temporary) / "largo.bin"
             body = bytes(range(256)) * (12 * 1024 * 4)
