@@ -22,8 +22,13 @@ GRID = {"start": 0.0, "origin": 0.0, "rate": "25/1", "fps": 25.0, "interval": 0.
         "sample_rate": 48000}
 
 
-def work_folder(root, seconds=60.0, pauses=PAUSES, rate="25/1", start="0.000000", videos=1):
-    """A job folder like the one prepare leaves behind, without touching FFmpeg."""
+def work_folder(root, seconds=60.0, pauses=PAUSES, rate="25/1", start="0.000000", videos=1,
+                legacy=False):
+    """A job folder like the one prepare leaves behind, without touching FFmpeg.
+
+    `legacy` writes the metadata.json of prepare 0.1.0 instead: no timeline, kind or avisos, and
+    a source that carries no sha256. The plan must still run on it.
+    """
     work = Path(root)
     tone_wav(work / "audio.wav", seconds=seconds, pauses=pauses)
     streams = [{"index": 0, "codec_type": "video", "r_frame_rate": rate, "avg_frame_rate": rate,
@@ -42,6 +47,10 @@ def work_folder(root, seconds=60.0, pauses=PAUSES, rate="25/1", start="0.000000"
     # prepare always writes the timeline, also in audio mode, where the grid keys are null.
     data["timeline"] = common.timeline(data)
     data["avisos"] = []
+    if legacy:
+        for key in ("timeline", "kind", "avisos"):
+            del data[key]
+        del data["source"]["sha256"]
     (work / "metadata.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return data
 
@@ -201,6 +210,23 @@ class PalabrasTest(unittest.TestCase):
         self.assertEqual(plan.words_of(None), [])
 
 
+# 41 spans at 30000/1001 fps found with random.Random(3) (4-60 frames each, 3-40 frames apart):
+# split in groups of 40 and 1, the groups measured one by one add up to 1180 frames, not 1181.
+SPANS_41 = [[0.233567, 1.6016], [2.836167, 3.236567], [4.1041, 5.5055], [6.6066, 8.074733],
+            [9.4094, 9.676333], [9.776433, 11.678333], [12.779433, 13.446767], [14.7147, 15.3153],
+            [15.8158, 17.450767], [18.551867, 19.8198], [21.087733, 22.2222],
+            [23.156467, 24.6246], [25.025, 25.6256], [26.026, 27.994633], [29.195833, 30.1301],
+            [30.2302, 31.765067], [31.998633, 32.465767], [33.800433, 34.000633],
+            [34.7347, 36.503133], [36.6366, 38.505133], [39.172467, 40.306933],
+            [41.207833, 42.8428], [43.8438, 44.811433], [46.112733, 47.180467],
+            [47.5475, 49.5495], [50.417033, 50.7507], [50.917533, 51.317933], [52.4524, 53.019633],
+            [53.6536, 55.221833], [56.222833, 57.991267], [58.725333, 59.726333],
+            [60.894167, 62.796067], [63.696967, 65.031633], [65.8658, 67.133733],
+            [68.4684, 69.4694], [70.804067, 71.404667], [72.205467, 73.7737],
+            [73.907167, 75.842433], [76.509767, 77.911167], [78.344933, 79.946533],
+            [80.713967, 81.9819]]
+
+
 class TramosTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
@@ -308,6 +334,24 @@ class TramosTest(unittest.TestCase):
                              rows[0]["samples"])
 
 
+    def test_n_belongs_to_the_whole_cut_and_the_last_subcut_takes_what_is_left(self):
+        odd = dict(self.grid, rate="30000/1001", fps=30000 / 1001, interval=1001 / 30000,
+                   sample_rate=44100)
+        row = {"segment": cut(1, 0.2, 82.0, 1), "a": 0.2, "b": 82.0, "note": None}
+        # The spans are fixed here, so the numbers below do not move with the audio fixture.
+        with unittest.mock.patch.object(plan, "spans_of", return_value=SPANS_41):
+            row = plan.measure([row], self.levels, odd, self.settings)[0]
+        groups = [SPANS_41[:40], SPANS_41[40:]]
+        # Measured group by group, the counts would add up to one frame less than the cut's N.
+        naive = sum(common.frames_for(sum(end - start for start, end in group), odd["fps"], 1.25)
+                    for group in groups)
+        self.assertEqual((row["frames"], naive), (1181, 1180))
+        self.assertEqual([len(part["spans"]) for part in row["subcuts"]], [40, 1])
+        self.assertEqual(sum(part["frames"] for part in row["subcuts"]), row["frames"])
+        self.assertEqual([part["frames"] for part in row["subcuts"]], [1150, 31])
+        self.assertEqual(sum(part["samples"] for part in row["subcuts"]), row["samples"])
+
+
 def prepared(segments, levels, grid, target=None, speed=1.25, pauses=True, silence_db=-50.0):
     """Measured rows, included ids, settings and estimate: the start of every check below."""
     settings = {"target": target, "objetivo": common.parse_target(target, 60.0), "speed": speed,
@@ -374,6 +418,24 @@ class EstimacionTest(unittest.TestCase):
         self.assertAlmostEqual(self.report("40%", segments)["retencion"], 0.920051, places=6)
         # A global remove_pauses=False keeps every candidate whole: ratio is exactly one.
         self.assertEqual(self.report("40%", segments, pauses=False)["retencion"], 1.0)
+
+    def test_retention_never_exceeds_one_and_is_exactly_one_when_pauses_stay(self):
+        def measured(segments, pauses):
+            rows, _, settings, report = prepared(segments, self.levels, self.grid, pauses=pauses)
+            raw = (sum(row["source"] if plan.untouched(row) else row["length"] for row in rows)
+                   / sum(row["source"] for row in rows))
+            return raw, plan.retention(rows, settings), report["retencion"]
+
+        # 2,013 snaps out to 2,0 and the end moves to the pause at 5,0: 3,0 s kept out of 2,987 s
+        # of source, a raw quotient of 1,004352. Frame alignment cannot keep more than there was.
+        raw, share, reported = measured([cut(1, 2.013, 4.987, 1)], pauses=True)
+        self.assertAlmostEqual(raw, 1.004352, places=6)
+        self.assertEqual((share, reported), (1.0, 1.0))
+        # With pauses kept globally nothing is removed, whatever the alignment did: 2,021 snaps
+        # in to 2,04, so the raw quotient (0,993622) is below one and only the shortcut gives 1,0.
+        raw, share, reported = measured([cut(1, 2.021, 4.979, 1)], pauses=False)
+        self.assertAlmostEqual(raw, 0.993622, places=6)
+        self.assertEqual((share, reported), (1.0, 1.0))
 
     def test_keeping_pauses_and_speed_change_the_output(self):
         self.assertEqual(self.report("40%", pauses=False)["salida"], 28.0)
@@ -828,6 +890,34 @@ class VersionesTest(unittest.TestCase):
         self.assertEqual(len((self.work / "historial.jsonl").read_text(
             encoding="utf-8").splitlines()), 2)
 
+    def published(self, work):
+        return json.loads((work / "seleccion-v1.json").read_text(encoding="utf-8"))
+
+    def test_a_metadata_json_of_prepare_zero_one_zero_plans_with_its_fallbacks(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            legacy = Path(temporary)
+            data = work_folder(legacy, legacy=True)
+            # What prepare 0.1.0 leaves behind, and the only thing plan finds in production.
+            self.assertFalse({"timeline", "kind", "avisos"} & set(data))
+            self.assertEqual(set(data["source"]), {"path", "size", "mtime_ns"})
+            draft(legacy, BASE)
+            self.assertEqual(call(legacy)[0], 0)
+            body = self.published(legacy)
+            self.assertEqual(body["version"], 1)
+            self.assertEqual(body["kind"], "video")
+            self.assertEqual(body["timeline"], common.timeline(data))
+            self.assertEqual(body["source"], {"path": data["source"]["path"],
+                                              **common.fingerprint(data["source"]["path"])})
+            self.assertNotIn("avisos", body)
+            self.assertTrue((legacy / "propuesta-v1.md").is_file())
+        # Nothing but the four fallbacks differs from a folder that already carries everything.
+        draft(self.work, BASE)
+        self.assertEqual(call(self.work)[0], 0)
+        current = self.published(self.work)
+        for key in ("segments", "reserves", "settings", "timeline", "estimate", "warnings"):
+            with self.subTest(key=key):
+                self.assertEqual(body[key], current[key])
+
     def test_a_blocking_warning_publishes_and_returns_two(self):
         draft(self.work, [cut(1, 2.0, 10.0, 1, depends_on=[2]),
                           cut(2, 19.0, 26.0, 3, included=False)])
@@ -887,22 +977,27 @@ class VersionesTest(unittest.TestCase):
         return sorted(path.name for path in self.work.iterdir())
 
     def test_a_draft_that_would_break_the_proposal_is_refused_before_writing(self):
+        draft(self.work, BASE)
+        self.assertEqual(call(self.work)[0], 0)
+        before = self.names()
         # A list of strings passed the old validation, published the plan and then died writing
         # the proposal: it is an invalid argument, and nothing is published.
         draft(self.work, BASE, excluded=["Saludos"])
         code, message = refused(self.work)
         self.assertEqual(code, 2)
         self.assertIn("exclu", message)
-        # `parent: 99` used to publish a plan whose changes read "propuesta inicial" as an edit.
+        # `parent: 99` used to publish a plan whose changes read "propuesta inicial" as an edit;
+        # "1" would name a real version were it not for the type.
         for parent in (99, 0, -1, "1", 1.0, True):
             with self.subTest(parent=parent):
                 draft(self.work, BASE, parent=parent)
                 code, message = refused(self.work)
                 self.assertEqual(code, 2)
                 self.assertIn("parent", message)
-        self.assertFalse(list(self.work.glob("seleccion-v*.json")))
-        self.assertFalse(list(self.work.glob("propuesta-v*.md")))
-        self.assertFalse((self.work / "historial.jsonl").exists())
+        self.assertEqual([name for name in self.names() if name != "borrador.json"],
+                         [name for name in before if name != "borrador.json"])
+        self.assertEqual(len((self.work / "historial.jsonl").read_text(
+            encoding="utf-8").splitlines()), 1)
 
     def test_parent_may_be_null_or_a_published_version(self):
         draft(self.work, BASE, parent=None)
@@ -922,16 +1017,29 @@ class VersionesTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             plan.publish_version(self.work, "seleccion", {"segments": []}, cannot)
         self.assertEqual(self.names(), before)
-        # The number was not burned either: the next attempt starts again at 1.
+        # The number was not burned either: the next attempt starts again at 1, and the proposal
+        # is drafted while the reserve is still the empty file that reserved it.
+        sizes = []
+
+        def draft_proposal():
+            sizes.append((self.work / "seleccion-v1.json").stat().st_size)
+            return "# Propuesta v1\n"
+
         self.assertEqual(plan.publish_version(self.work, "seleccion", {"segments": []},
-                                              lambda: "# Propuesta v1\n")[0], 1)
+                                              draft_proposal)[0], 1)
+        self.assertEqual(sizes, [0])
+        self.assertGreater((self.work / "seleccion-v1.json").stat().st_size, 0)
+        self.assertEqual((self.work / "propuesta-v1.md").read_text(encoding="utf-8"),
+                         "# Propuesta v1\n")
 
     def test_a_proposal_that_already_exists_is_never_replaced(self):
         (self.work / "propuesta-v1.md").write_text("mía", encoding="utf-8")
-        before = self.names()
+        before, drafted = self.names(), []
         with self.assertRaisesRegex(ValueError, "no se sobrescribe"):
             plan.publish_version(self.work, "seleccion", {"segments": []},
-                                 lambda: "# Propuesta v1\n")
+                                 lambda: drafted.append(1) or "# Propuesta v1\n")
+        # Refused up front: the proposal was not even drafted.
+        self.assertEqual(drafted, [])
         self.assertEqual(self.names(), before)
         self.assertEqual((self.work / "propuesta-v1.md").read_text(encoding="utf-8"), "mía")
 

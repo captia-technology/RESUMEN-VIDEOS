@@ -327,6 +327,35 @@ class BordesTest(unittest.TestCase):
             self.assertIsNone(note)
 
 
+    def test_a_voice_within_eighty_milliseconds_of_an_edge_counts_as_speech(self):
+        def edges(pauses, a, b):
+            with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+                path = Path(temporary) / "borde.wav"
+                tone_wav(path, seconds=4.0, pauses=pauses)
+                return common.adjust_edges(a, b, common.energy(path), [])
+
+        # End edge at 2,0 (the start sits inside a leading pause, so it never speaks). Voice back
+        # at 2,05 is inside the 80 ms that §7.3 looks ahead, but the 50 ms of silence before it is
+        # shorter than EDGE_SILENCE: no pause to move to, so the edge is reported.
+        self.assertEqual(edges(((0.0, 0.2), (1.5, 2.05)), 0.1, 2.0), (0.1, 2.0, "borde_en_voz"))
+        # At 2,09 the voice is beyond those 80 ms: the edge is clean and nothing is said.
+        self.assertEqual(edges(((0.0, 0.2), (1.5, 2.09)), 0.1, 2.0), (0.1, 2.0, None))
+        # The same on the start edge at 2,0: the voice ended 50 ms before it, or 90 ms.
+        self.assertEqual(edges(((1.95, 4.0),), 2.0, 3.0), (2.0, 3.0, "borde_en_voz"))
+        self.assertEqual(edges(((1.91, 4.0),), 2.0, 3.0), (2.0, 3.0, None))
+
+    def test_the_upper_bound_of_a_window_never_opens_one_index_too_wide(self):
+        levels = array.array("f", [0.0] * 700)
+        # 0.07 / 0.01 is 7.000000000000001: without the epsilon its ceiling is 8, one window more.
+        self.assertEqual(common.bounds(levels, 0.0, 0.07), (0, 7))
+        # 18 of the first 600 multiples of 10 ms carry that noise upward; every one must close
+        # exactly where it says.
+        noisy = [k for k in range(1, 601) if math.ceil(k / 100 / common.ENERGY_STEP) > k]
+        self.assertEqual(len(noisy), 18)
+        self.assertEqual([k for k in range(1, 601)
+                          if common.bounds(levels, 0.0, k / 100) != (0, k)], [])
+
+
 class ExactitudTest(unittest.TestCase):
     def test_frames_and_samples_match_the_rendered_cut(self):
         self.assertEqual(common.frames_for(7.16, 25, 1.25), 143)
@@ -335,6 +364,14 @@ class ExactitudTest(unittest.TestCase):
         self.assertEqual(common.frames_for(0.5, 25, 1.0), 13)
         self.assertEqual(common.frames_for(0.0, 25, 1.25), 0)
         self.assertEqual(common.samples_for(200, 30000 / 1001, 48000), 320320)
+
+    def test_samples_round_half_up_instead_of_truncating(self):
+        rate = 30000 / 1001
+        # 1 / rate * 48000 is 1601,6: int() would give 1601, the rounding of section 7.5 gives 1602.
+        # 2 frames are 3203,2 (rounds down) and 3 frames 4804,8 (up): both sides of the half.
+        for frames, expected in ((1, 1602), (2, 3203), (3, 4805)):
+            with self.subTest(frames=frames):
+                self.assertEqual(common.samples_for(frames, rate, 48000), expected)
 
     def test_the_digest_ignores_key_order_and_its_own_field(self):
         one = {"b": 2, "a": [1, {"y": 1, "x": 2}], "sha256": "lo que sea"}
