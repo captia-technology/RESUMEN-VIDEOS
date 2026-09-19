@@ -359,5 +359,94 @@ class EstimacionTest(unittest.TestCase):
         self.assertEqual(self.report("40%", speed=1.0)["salida"], 30.48)
 
 
+class AvisosTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        self.data = work_folder(self.work)
+        self.grid = self.data["timeline"]
+        self.levels = common.energy(self.work / "audio.wav")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def codes(self, segments, target="40%", speed=1.25, has_words=True, data=None,
+              silence_db=-50.0, **head):
+        rows, included, settings, report = prepared(segments, self.levels, self.grid, target=target,
+                                                    speed=speed, silence_db=silence_db)
+        found = plan.global_warnings(report, settings, 60.0, has_words)
+        found += plan.dependency_warnings(rows, included) + plan.topic_warnings(head, included)
+        for row in rows:
+            if row["segment"].get("included", False) and (row["segment"]["id"] in included
+                                                          or row["empty"]):
+                found += plan.cut_warnings(row, self.levels, settings)
+        # Same tail as `video_plan`: what prepare left in `metadata.json` travels unchanged.
+        found += [common.warning(item["codigo"], item["mensaje"], cut=item.get("corte"))
+                  for item in (data or self.data).get("avisos", [])]
+        return [(item["codigo"], item["corte"], item["bloquea"]) for item in found]
+
+    def test_an_empty_cut_blocks_and_hides_the_other_warnings(self):
+        self.assertIn(("corte_vacio", 2, True),
+                      self.codes([cut(1, 2.0, 10.0, 1), cut(2, 20.1, 21.4, 2)]))
+
+    def test_dependencies_and_topics_block(self):
+        found = self.codes([cut(1, 2.0, 10.0, 1, depends_on=[2]),
+                            cut(2, 19.0, 26.0, 3, included=False)])
+        self.assertIn(("dependencia_excluida", 1, True), found)
+        found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 19.0, 26.0, 3, included=False)],
+                           topics=[{"nombre": "Normativa", "cortes": [2], "imprescindible": True}])
+        self.assertIn(("tema_sin_cubrir", None, True), found)
+
+    def test_short_visual_and_fast_warnings(self):
+        found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 19.0, 21.0, 2, visual_only=True),
+                            cut(3, 40.0, 47.0, 2, remove_pauses=False)], speed=1.75)
+        self.assertIn(("velocidad_alta", None, False), found)
+        self.assertIn(("visual_breve", 2, False), found)
+        self.assertIn(("corte_breve", 1, False), self.codes([cut(1, 11.5, 13.5, 2),
+                                                             cut(2, 40.0, 47.0, 1)]))
+
+    def test_pauses_and_background_warnings(self):
+        found = self.codes([cut(1, 11.8, 13.0, 2), cut(2, 40.0, 47.0, 1)])
+        self.assertIn(("pausas_excesivas", 1, False), found)
+        self.assertIn(("sin_pausas_detectadas", 1, False),
+                      self.codes([cut(1, 2.0, 5.0, 1), cut(2, 40.0, 47.0, 1)]))
+
+    def test_the_quiet_floor_follows_the_silence_setting(self):
+        rows, _, settings, _ = prepared([cut(1, 2.0, 5.0, 1), cut(2, 40.0, 47.0, 1)], self.levels,
+                                        self.grid, target="40%", silence_db=-45.0)
+        found = plan.cut_warnings(rows[0], self.levels, settings)
+        message = next(item["mensaje"] for item in found
+                       if item["codigo"] == "sin_pausas_detectadas")
+        # With --silence-db -45 the quiet floor is −48 dBFS, not the −53 of the default −50.
+        self.assertIn("−48 dBFS", message)
+        # A job that keeps its pauses removes none: neither pause warning has anything to measure.
+        kept = dict(settings, remove_pauses=False)
+        codes = [item["codigo"] for item in plan.cut_warnings(rows[0], self.levels, kept)]
+        self.assertNotIn("sin_pausas_detectadas", codes)
+        self.assertNotIn("pausas_excesivas", codes)
+
+    def test_target_speed_and_propagated_warnings(self):
+        self.assertIn(("objetivo_muy_bajo", None, False),
+                      self.codes([cut(1, 2.0, 10.0, 1), cut(2, 40.0, 47.0, 2)], target="2s"))
+        self.assertIn(("esenciales_superan_objetivo", None, True), self.codes(BASE, target="1%"))
+        self.assertIn(("objetivo_muy_alto", None, False), self.codes(BASE, target="55s"))
+        self.assertIn(("sin_marcas_por_palabra", None, False),
+                      self.codes(BASE, has_words=False))
+        # `fuente_vfr` is prepare's: plan neither measures the cadence nor re-reads the streams,
+        # it only copies what `metadata.json` already carries in `avisos`.
+        carried = json.loads(json.dumps(self.data))
+        carried["avisos"] = [common.warning("fuente_vfr", "La fuente declara cadencia variable "
+                                            "(25/1 frente a 24000/1001).")]
+        self.assertIn(("fuente_vfr", None, False), self.codes(BASE, data=carried))
+
+    def test_edges_inside_speech_are_reported(self):
+        self.assertIn(("borde_en_voz", 1, False), self.codes([cut(1, 4.0, 4.5, 1),
+                                                              cut(2, 40.0, 47.0, 1)]))
+
+    def test_the_tenth_percentile_of_a_quiet_cut(self):
+        self.assertEqual(plan.percentile(self.levels, 20.0, 21.5), common.ENERGY_FLOOR)
+        self.assertGreater(plan.percentile(self.levels, 2.0, 5.0), -50.0 - plan.QUIET_MARGIN)
+
+
 if __name__ == "__main__":
     unittest.main()

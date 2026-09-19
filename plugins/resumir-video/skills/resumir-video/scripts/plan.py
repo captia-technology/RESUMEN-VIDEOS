@@ -320,3 +320,91 @@ def estimate_of(rows, included, settings, total, grid):
               "minimo": round(100 * essentials / total, 2), "maximo": round(top, 3)}
     report["estado"] = state_of(output, essentials, target, top)
     return report
+
+
+def percentile(levels, a, b, share=0.10):
+    """Level below which `share` of the cut sits; the tenth percentile spots a noisy floor."""
+    first, last = common.bounds(levels, a, b)
+    window = sorted(levels[first:last])
+    if not window:
+        return common.ENERGY_FLOOR
+    return window[min(len(window) - 1, int(share * len(window)))]
+
+
+def cut_warnings(row, levels, settings):
+    """Warnings that belong to one cut."""
+    found, segment = [], row["segment"]
+    key = segment["id"]
+    if row["empty"]:
+        found.append(common.warning("corte_vacio", f"El corte {key} se queda sin tramos tras "
+                                    "quitar pausas; vuelve a las reservas.", cut=key))
+        return found
+    if row["note"]:
+        found.append(common.warning("borde_en_voz", f"El corte {key} no encuentra silencio en los "
+                                    "0,6 s del borde: la unión puede partir una palabra.", cut=key))
+    if segment.get("visual_only") and row["output"] < SHORT_VISUAL:
+        found.append(common.warning("visual_breve", f"El corte visual {key} dura "
+                                    f"{row['output']:.1f} s de salida; cuesta leerlo.", cut=key))
+    elif not segment.get("visual_only") and row["output"] < SHORT_CUT:
+        found.append(common.warning("corte_breve", f"El corte {key} dura {row['output']:.1f} s de "
+                                    "salida; puede quedar descontextualizado.", cut=key))
+    # Both pause warnings only make sense where pauses are actually removed: a cut that keeps them,
+    # by its own mark or by the job's, has nothing to measure.
+    if settings["remove_pauses"] and not untouched(row) and row["source"] > 0:
+        removed = 1 - row["length"] / row["source"]
+        if removed > PAUSE_SHARE:
+            found.append(common.warning("pausas_excesivas", f"En el corte {key} se elimina el "
+                                        f"{100 * removed:.0f} % por pausas.", cut=key))
+        # The quiet floor follows --silence-db: −53 dBFS with the default −50, as section 7.7 sets.
+        quiet = settings["silence_db"] - QUIET_MARGIN
+        if percentile(levels, row["a"], row["b"]) > quiet:
+            shown = f"{quiet:.0f}".replace("-", "−")
+            found.append(common.warning("sin_pausas_detectadas", f"El fondo del corte {key} supera "
+                                        f"{shown} dBFS: revisa el umbral de silencio.", cut=key))
+    return found
+
+
+def global_warnings(estimate, settings, total, has_words):
+    """Warnings about the job as a whole."""
+    found, target = [], settings["objetivo"]
+    if settings["speed"] > FAST_SPEED:
+        found.append(common.warning("velocidad_alta", f"Velocidad ×{settings['speed']:g}: por "
+                                    "encima de ×1,5 la voz técnica cuesta de seguir."))
+    if target is not None and target < LOW_TARGET * total:
+        found.append(common.warning("objetivo_muy_bajo", f"El objetivo ({target:.0f} s) es menor "
+                                    f"que el 5 % del original ({LOW_TARGET * total:.0f} s)."))
+    if estimate["estado"] == "inalcanzable":
+        found.append(common.warning("objetivo_muy_alto", "Ni conservando todo el material se llega "
+                                    f"a {target:.0f} s: el máximo es {estimate['maximo']:.0f} s."))
+    if estimate["estado"] == "inviable":
+        found.append(common.warning("esenciales_superan_objetivo", "Los cortes de prioridad 1 suman "
+                                    f"{estimate['esenciales']:.0f} s, por encima de la banda."))
+    if not has_words:
+        found.append(common.warning("sin_marcas_por_palabra", "La transcripción procede de "
+                                    "subtítulos sin palabras: los bordes usan límites de segmento."))
+    return found
+
+
+def dependency_warnings(rows, included):
+    """An included cut that leans on an excluded one blocks the render."""
+    found = []
+    for row in rows:
+        segment = row["segment"]
+        if segment["id"] not in included:
+            continue
+        for other in segment.get("depends_on", []):
+            if other not in included:
+                found.append(common.warning("dependencia_excluida", f"El corte {segment['id']} "
+                                            f"depende del {other}, que no está incluido.",
+                                            cut=segment["id"]))
+    return found
+
+
+def topic_warnings(draft, included):
+    """A topic the inventory marked essential must have at least one included cut."""
+    found = []
+    for topic in draft.get("topics", []):
+        if topic.get("imprescindible") and not set(topic.get("cortes", [])) & included:
+            found.append(common.warning("tema_sin_cubrir", f"El tema «{topic['nombre']}» se marcó "
+                                        "imprescindible y no tiene ningún corte incluido."))
+    return found
