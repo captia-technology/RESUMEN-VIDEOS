@@ -186,8 +186,8 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **100** al terminar el plan (37 en `test_common.py`, 12 en
-  `test_video.py` y 51 en `test_plan.py`). Las **23** de `tests/` no cambian.
+  skill **crece**: de las 15 de hoy se pasa a **103** al terminar el plan (37 en `test_common.py`, 12 en
+  `test_video.py` y 54 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
 
@@ -2969,10 +2969,10 @@ def cut_warnings(row, levels, settings):
                                     "0,6 s del borde: la unión puede partir una palabra.", cut=key))
     if segment.get("visual_only") and row["output"] < SHORT_VISUAL:
         found.append(common.warning("visual_breve", f"El corte visual {key} dura "
-                                    f"{row['output']:.1f} s de salida; cuesta leerlo.", cut=key))
+                                    f"{comma(row['output'])} s de salida; cuesta leerlo.", cut=key))
     elif not segment.get("visual_only") and row["output"] < SHORT_CUT:
-        found.append(common.warning("corte_breve", f"El corte {key} dura {row['output']:.1f} s de "
-                                    "salida; puede quedar descontextualizado.", cut=key))
+        found.append(common.warning("corte_breve", f"El corte {key} dura {comma(row['output'])} s "
+                                    "de salida; puede quedar descontextualizado.", cut=key))
     # Both pause warnings only make sense where pauses are actually removed: a cut that keeps them,
     # by its own mark or by the job's, has nothing to measure.
     # `source` is always positive here: `check_draft` requires start < end, and neither
@@ -2995,8 +2995,8 @@ def global_warnings(estimate, settings, total, has_words):
     """Warnings about the job as a whole."""
     found, target = [], settings["objetivo"]
     if settings["speed"] > FAST_SPEED:
-        found.append(common.warning("velocidad_alta", f"Velocidad ×{settings['speed']:g}: por "
-                                    "encima de ×1,5 la voz técnica cuesta de seguir."))
+        found.append(common.warning("velocidad_alta", f"Velocidad ×{comma(settings['speed'], 2)}: "
+                                    "por encima de ×1,5 la voz técnica cuesta de seguir."))
     if target is not None and target < LOW_TARGET * total:
         found.append(common.warning("objetivo_muy_bajo", f"El objetivo ({target:.0f} s) es menor "
                                     f"que el 5 % del original ({LOW_TARGET * total:.0f} s)."))
@@ -3375,6 +3375,8 @@ class PropuestaTest(unittest.TestCase):
 
     def test_a_cell_never_breaks_the_table(self):
         self.assertEqual(plan.cell("a | b\nc"), "a \\| b c")
+        # A lone CR (no accompanying \n) is just as able to break a Markdown row.
+        self.assertEqual(plan.cell("a\rb"), "a b")
 
     def test_the_published_row_of_a_cut(self):
         settings = {"target": "40%", "objetivo": 24.0, "speed": 1.25, "remove_pauses": True,
@@ -3383,6 +3385,12 @@ class PropuestaTest(unittest.TestCase):
                             self.grid["interval"])
         rows = plan.measure(rows, self.levels, self.grid, settings)
         row = plan.cut_row(rows[0], 1, 0.0, self.grid)
+        # Exactly the nineteen keys of the seleccion-vN.json schema, in that order: neither a
+        # missing one (visual_only, title) nor a stray internal one (absorbed) may slip through.
+        self.assertEqual(list(row), ["id", "numero", "title", "phrase", "reason",
+                                     "audio_evidence", "visual_evidence", "priority", "pinned",
+                                     "visual_only", "remove_pauses", "depends_on", "start", "end",
+                                     "spans", "frames", "samples", "salida", "subcuts"])
         self.assertEqual((row["numero"], row["id"], row["priority"]), (1, 1, 1))
         self.assertEqual((row["start"], row["end"]), (2.0, 10.0))
         self.assertEqual(row["spans"], [[2.0, 5.08], [5.92, 10.0]])
@@ -3391,6 +3399,8 @@ class PropuestaTest(unittest.TestCase):
         self.assertEqual(row["subcuts"], [{"spans": [[2.0, 5.08], [5.92, 10.0]],
                                            "frames": 143, "samples": 274560}])
         self.assertAlmostEqual(plan.length(row), 5.72)
+        # render/doc write this straight to JSON: every value must serialise with no default=.
+        json.dumps(row)
 
     def test_the_text_timeline_marks_what_is_kept(self):
         settings = {"target": None, "objetivo": None, "speed": 1.25, "remove_pauses": True,
@@ -3403,7 +3413,11 @@ class PropuestaTest(unittest.TestCase):
         self.assertEqual(len(plan.bar(rows, included, 60.0)), plan.BAR)
 
     def test_the_proposal_has_every_section_of_section_nine(self):
-        body = {"version": 1, "changes": ["propuesta inicial"], "warnings": [],
+        body = {"version": 1, "changes": ["propuesta inicial"],
+                "warnings": [common.warning("corte_vacio", "El corte 2 se queda sin tramos.",
+                                            cut=2),
+                            common.warning("borde_en_voz", "El corte 1 no encuentra silencio.",
+                                           cut=1)],
                 "settings": {"speed": 1.25}, "excluidos": [{"title": "Saludos",
                                                             "reason": "Sin contenido"}],
                 "estimate": {"cortes": 1, "origen": 8.0, "tras_pausas": 7.16, "salida": 5.72,
@@ -3429,8 +3443,59 @@ class PropuestaTest(unittest.TestCase):
         self.assertIn("| Saludos | Sin contenido |", text)
         self.assertIn("| ×1,00 | sí | 0:07 | 11,9 % | ok |", text)
         self.assertIn("- ninguna: el plan está dentro de la banda", text)
-        self.assertIn("- ninguno", text)
         self.assertIn("«quita el 7 y el 9»", text)
+        # A blocking warning carries the **bloquea** mark; a non-blocking one does not.
+        self.assertIn("- **bloquea** · `corte_vacio` · corte 2 · El corte 2 se queda sin "
+                      "tramos.", text)
+        self.assertIn("- `borde_en_voz` · corte 1 · El corte 1 no encuentra silencio.", text)
+
+    def test_the_suggestions_fallback_follows_the_state(self):
+        body = {"version": 1, "changes": [], "warnings": [], "settings": {"speed": 1.0},
+                "excluidos": [],
+                "estimate": {"cortes": 0, "origen": 0.0, "tras_pausas": 0.0, "salida": 0.0,
+                             "porcentaje": 0.0, "objetivo": None, "banda": None,
+                             "estado": "sin_objetivo"},
+                "segments": [], "alternativas": [], "sugerencias": [],
+                "recorrido": "·" * plan.BAR}
+        text = plan.proposal(body, [], 60.0, "medio.mp4")
+        self.assertIn("- ninguna aplicable: no hay ajuste disponible para el estado "
+                      "«sin_objetivo».", text)
+        self.assertNotIn("- ninguna: el plan está dentro de la banda", text)
+        # An empty `warnings` list still falls back to "- ninguno" in ## Avisos.
+        self.assertIn("- ninguno", text)
+
+    def test_the_timeline_line_never_rounds_to_zero_seconds(self):
+        body = {"version": 1, "changes": [], "warnings": [], "settings": {"speed": 1.0},
+                "excluidos": [],
+                "estimate": {"cortes": 0, "origen": 0.0, "tras_pausas": 0.0, "salida": 0.0,
+                             "porcentaje": 0.0, "objetivo": None, "banda": None,
+                             "estado": "sin_objetivo"},
+                "segments": [], "alternativas": [], "sugerencias": [],
+                "recorrido": "·" * plan.BAR}
+        text = plan.proposal(body, [], 5.0, "medio.mp4")
+        self.assertNotIn("cada carácter son 0 s", text)
+        self.assertIn(f"cada carácter son {plan.comma(5.0 / plan.BAR)} s", text)
+
+    def test_no_decimal_point_reaches_the_proposal(self):
+        # A short cut (below SHORT_CUT) at a speed above FAST_SPEED triggers both corte_breve
+        # and velocidad_alta, the two warnings section 7.7 formats with a raw float.
+        segments = [cut(1, 2.0, 3.5, 2)]
+        rows, included, settings, estimate = prepared(segments, self.levels, self.grid,
+                                                       target="40%", speed=1.75)
+        warnings = plan.global_warnings(estimate, settings, 60.0, True)
+        for row in rows:
+            if row["segment"]["id"] in included:
+                warnings += plan.cut_warnings(row, self.levels, settings)
+        codes = [item["codigo"] for item in warnings]
+        self.assertIn("corte_breve", codes)
+        self.assertIn("velocidad_alta", codes)
+        body = {"version": 1, "changes": [], "warnings": warnings, "settings": settings,
+                "excluidos": [], "estimate": estimate,
+                "segments": [plan.cut_row(row, 1, 0.0, self.grid) for row in rows
+                            if row["segment"]["id"] in included],
+                "alternativas": [], "sugerencias": [], "recorrido": "#" * plan.BAR}
+        text = plan.proposal(body, [], 60.0, "medio.mp4")
+        self.assertNotRegex(text, r"\d\.\d")
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -3439,14 +3504,14 @@ class PropuestaTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Propuesta -v
 ```
 
-Esperado: 4 errores `AttributeError: module 'plan' has no attribute 'cell'`.
+Esperado: 7 errores `AttributeError: module 'plan' has no attribute 'cell'`.
 
 - [ ] **Paso 3: implementación mínima**
 
 ```python
 def cell(text):
-    """One Markdown cell: a pipe or a newline would break the table."""
-    return str(text).replace("|", "\\|").replace("\n", " ")
+    """One Markdown cell: a pipe, a stray CR or a newline would break the table."""
+    return str(text).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
 def length(cut):
@@ -3523,9 +3588,12 @@ def proposal(plan, reserves, total, name):
         head.append(f"| ×{comma(item['velocidad'], 2)} | {'sí' if item['pausas'] else 'no'} | "
                     f"{clock(item['salida'])} | {comma(item['porcentaje'])} % | {item['estado']} |")
     head += ["", "## Sugerencias", ""] + ([f"- {hint['texto']}" for hint in plan["sugerencias"]]
-                                          or ["- ninguna: el plan está dentro de la banda"])
+                                          or [("- ninguna: el plan está dentro de la banda"
+                                               if report["estado"] == "ok" else
+                                               "- ninguna aplicable: no hay ajuste disponible "
+                                               f"para el estado «{report['estado']}».")])
     head += ["", "## Recorrido", "", f"`{plan['recorrido']}`", "",
-             f"0:00 ← cada carácter son {total / BAR:.0f} s → {clock(total)}", "",
+             f"0:00 ← cada carácter son {comma(total / BAR)} s → {clock(total)}", "",
              "## Cómo responder", "",
              "- «acepta» o «móntalo» para montar esta versión.",
              "- «quita el 7 y el 9», «añade el 6», «alarga el 3 diez segundos».",
@@ -3541,7 +3609,7 @@ def proposal(plan, reserves, total, name):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 40 tests … OK`.
+Esperado: `Ran 43 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3944,7 +4012,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 97 tests … OK` (37 + 12 + 48) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 100 tests … OK` (37 + 12 + 51) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -4161,7 +4229,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 100 tests … OK` (37 + 12 + 51), en menos de dos minutos.
+Esperado: `Ran 103 tests … OK` (37 + 12 + 54), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -4224,8 +4292,8 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 51 en
-  `test_plan.py`: **100** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
+  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 54 en
+  `test_plan.py`: **103** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
   de §12 que le corresponden: borrador ausente, borrador rechazado y plan publicado con aviso
