@@ -260,3 +260,53 @@ def measure(rows, levels, grid, settings):
         row["subcuts"] = split(row["spans"], row["frames"], row["samples"], grid, speed)
         row["source"] = round(row["b"] - row["a"], 6)
     return rows
+
+
+def retention(rows):
+    """Audio kept after removing pauses, over every candidate: included cuts and reserves."""
+    source = sum(row["source"] for row in rows)
+    kept = sum(row["source"] if untouched(row) else row["length"] for row in rows)
+    return 1.0 if source <= 0 else max(1e-6, round(kept / source, 6))
+
+
+def band(target):
+    """Acceptance band of the target and its half-width."""
+    margin = common.tolerance(target)
+    return [max(0.0, target - margin), target + margin], margin
+
+
+def state_of(estimate, essentials, target, top):
+    """One of the six states of section 7.6, in the order that makes them exclusive."""
+    if target is None:
+        return "sin_objetivo"
+    limits, margin = band(target)
+    if target > top + margin:
+        return "inalcanzable"
+    if essentials > limits[1]:
+        return "inviable"
+    if estimate > limits[1]:
+        return "por_encima"
+    if estimate < limits[0]:
+        return "por_debajo"
+    return "ok"
+
+
+def estimate_of(rows, included, settings, total, grid):
+    """Everything the proposal shows about length: budget, retention, band and state."""
+    kept = [row for row in rows if row["segment"]["id"] in included and not row["empty"]]
+    output = sum(row["frames"] for row in kept) / grid["fps"]
+    essentials = sum(row["frames"] for row in kept
+                     if row["segment"]["priority"] == 1) / grid["fps"]
+    share = retention(rows)
+    top = total * share / settings["speed"]
+    target = settings["objetivo"]
+    report = {"cortes": len(kept), "origen": round(sum(row["source"] for row in kept), 3),
+              "tras_pausas": round(sum(row["length"] for row in kept), 3),
+              "salida": round(output, 3), "margen": CODEC_MARGIN,
+              "porcentaje": round(100 * output / total, 2), "objetivo": target,
+              "banda": [round(value, 3) for value in band(target)[0]] if target else None,
+              "retencion": share, "esenciales": round(essentials, 3),
+              "presupuesto": round(target * settings["speed"] / share, 3) if target else None,
+              "minimo": round(100 * essentials / total, 2), "maximo": round(top, 3)}
+    report["estado"] = state_of(output, essentials, target, top)
+    return report

@@ -287,5 +287,62 @@ class TramosTest(unittest.TestCase):
                              rows[0]["samples"])
 
 
+def prepared(segments, levels, grid, target=None, speed=1.25, pauses=True, silence_db=-50.0):
+    """Measured rows, included ids, settings and estimate: the start of every check below."""
+    settings = {"target": target, "objetivo": common.parse_target(target, 60.0), "speed": speed,
+               "remove_pauses": pauses, "silence_db": silence_db}
+    rows, _ = plan.fuse(plan.adjusted(segments, levels, [], silence_db), grid["interval"])
+    rows = plan.measure(rows, levels, grid, settings)
+    included = {row["segment"]["id"] for row in rows
+               if row["segment"]["included"] and not row["empty"]}
+    return rows, included, settings, plan.estimate_of(rows, included, settings, 60.0, grid)
+
+
+class EstimacionTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        self.data = work_folder(self.work)
+        self.grid = self.data["timeline"]
+        self.levels = common.energy(self.work / "audio.wav")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def report(self, target, segments=None, speed=1.25, pauses=True):
+        segments = BASE if segments is None else segments
+        return prepared(segments, self.levels, self.grid, target=target, speed=speed,
+                        pauses=pauses)[3]
+
+    def test_the_whole_estimate_of_the_reference_draft(self):
+        self.assertEqual(self.report("40%"),
+                         {"cortes": 5, "origen": 35.0, "tras_pausas": 30.48, "salida": 24.36,
+                          "margen": 0.1, "porcentaje": 40.6, "objetivo": 24.0,
+                          "banda": [14.0, 34.0], "retencion": 0.878, "esenciales": 10.8,
+                          "presupuesto": 34.169, "minimo": 18.0, "maximo": 42.144,
+                          "estado": "ok"})
+
+    def test_the_six_states(self):
+        self.assertEqual(self.report(None)["estado"], "sin_objetivo")
+        self.assertEqual(self.report("40%")["estado"], "ok")
+        self.assertEqual(self.report("12s")["estado"], "por_encima")
+        self.assertEqual(self.report("40s")["estado"], "por_debajo")
+        self.assertEqual(self.report("1%")["estado"], "inviable")
+        self.assertEqual(self.report("55s")["estado"], "inalcanzable")
+
+    def test_the_band_of_a_short_target_is_the_ten_second_floor(self):
+        self.assertEqual(self.report("12s")["banda"], [2.0, 22.0])
+        self.assertEqual(self.report("40s")["banda"], [30.0, 50.0])
+
+    def test_retention_counts_every_candidate(self):
+        segments = [cut(1, 2.0, 10.0, 1), cut(2, 19.0, 21.0, 2, visual_only=True),
+                    cut(3, 40.0, 47.0, 2, remove_pauses=False)]
+        self.assertAlmostEqual(self.report("40%", segments)["retencion"], 0.950588, places=6)
+
+    def test_keeping_pauses_and_speed_change_the_output(self):
+        self.assertEqual(self.report("40%", pauses=False)["salida"], 28.0)
+        self.assertEqual(self.report("40%", speed=1.0)["salida"], 30.48)
+
+
 if __name__ == "__main__":
     unittest.main()
