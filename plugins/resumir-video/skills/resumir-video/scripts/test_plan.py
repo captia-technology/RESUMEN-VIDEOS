@@ -99,9 +99,13 @@ class BorradorTest(unittest.TestCase):
                  "dependencia inexistente": [cut(1, 2, 5, depends_on=[9])],
                  "dependencia de sí mismo": [cut(1, 2, 5, depends_on=[1])],
                  "prioridad inválida": [cut(1, 2, 5, priority=4)],
+                 "prioridad no entera": [cut(1, 2, 5, priority=2.0)],
+                 "prioridad booleana": [cut(1, 2, 5, priority=True)],
                  "identificador no entero": [cut("a", 2, 5)],
                  "tiempo no finito": [cut(1, 2, float("inf"))],
-                 "marca booleana": [cut(1, 2, 5, pinned="sí")]}
+                 "marca booleana": [cut(1, 2, 5, pinned="sí")],
+                 "dependencia duplicada": [cut(1, 2, 5), cut(2, 6, 8),
+                                          cut(3, 9, 11, depends_on=[1, 1])]}
         for label, segments in cases.items():
             with self.subTest(label=label), self.assertRaises(ValueError):
                 plan.check_draft({"segments": segments}, 60.0, "video")
@@ -120,6 +124,17 @@ class BorradorTest(unittest.TestCase):
                 "topics": [{"nombre": "Normativa", "cortes": [9], "imprescindible": True}]}
         with self.assertRaisesRegex(ValueError, "cita cortes que no existen"):
             plan.check_draft(body, 60.0, "video")
+        bad = {"topics no es lista": None,
+               "topics es un diccionario": {"nombre": "x", "cortes": [1]},
+               "tema no es objeto": ["no soy un tema"],
+               "cortes no es lista": [{"nombre": "x", "cortes": 1}],
+               "cortes con booleano": [{"nombre": "x", "cortes": [True]}],
+               "cortes duplicados": [{"nombre": "x", "cortes": [1, 1]}],
+               "imprescindible no booleano": [{"nombre": "x", "cortes": [1],
+                                              "imprescindible": "sí"}]}
+        for label, topics in bad.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                plan.check_draft({"segments": [cut(1, 2, 5)], "topics": topics}, 60.0, "video")
 
 
 class AjustesTest(unittest.TestCase):
@@ -134,6 +149,13 @@ class AjustesTest(unittest.TestCase):
         self.assertEqual(other, {"target": "12s", "objetivo": 12.0, "tolerance": 10.0, "speed": 1.0,
                                  "remove_pauses": False, "silence_db": -45.0, "rate": "25/1",
                                  "sample_rate": 48000})
+        bad = {"remove_pauses no booleano": ({"remove_pauses": "no"}, "booleano"),
+               "speed nulo": ({"speed": None}, "número finito"),
+               "speed no numérico": ({"speed": "x"}, "número finito"),
+               "silence_db no numérico": ({"silence_db": "x"}, "número finito")}
+        for label, (settings, pattern) in bad.items():
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, pattern):
+                plan.settings_of({"settings": settings}, options("."), 60.0, GRID)
 
     def test_the_defaults_are_the_ones_of_the_spec(self):
         self.assertEqual(plan.settings_of({}, options("."), 60.0, GRID),

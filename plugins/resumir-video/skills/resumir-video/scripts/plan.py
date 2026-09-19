@@ -62,23 +62,37 @@ def check_draft(draft, total, kind):
         for field in needed:
             if not isinstance(segment.get(field), str) or not segment[field].strip():
                 raise ValueError(f"Falta {field} en el corte {key}.")
-        if segment.get("priority") not in (1, 2, 3):
+        priority = segment.get("priority")
+        if type(priority) is not int or priority not in (1, 2, 3):
             raise ValueError(f"La prioridad del corte {key} debe ser 1, 2 o 3.")
         for name in ("included", "pinned", "remove_pauses", "visual_only"):
             flag(segment, name, name == "remove_pauses")
         depends = segment.get("depends_on", [])
-        if not isinstance(depends, list) or any(type(x) is not int or x == key for x in depends):
+        if (not isinstance(depends, list) or any(type(x) is not int or x == key for x in depends)
+                or len(depends) != len(set(depends))):
             raise ValueError(f"depends_on del corte {key} debe listar identificadores distintos.")
         seen[key], previous = segment, end
     for segment in segments:
         for other in segment.get("depends_on", []):
             if other not in seen:
                 raise ValueError(f"El corte {segment['id']} depende de {other}, que no existe.")
-    for topic in draft.get("topics", []):
+    topics = draft.get("topics", [])
+    if not isinstance(topics, list):
+        raise ValueError("topics debe ser una lista de temas.")
+    for topic in topics:
+        if not isinstance(topic, dict):
+            raise ValueError("Cada tema debe ser un objeto.")
         if not isinstance(topic.get("nombre"), str) or not topic["nombre"].strip():
             raise ValueError("Cada tema necesita un nombre.")
-        if any(x not in seen for x in topic.get("cortes", [])):
+        cortes = topic.get("cortes", [])
+        if (not isinstance(cortes, list) or any(type(x) is not int for x in cortes)
+                or len(cortes) != len(set(cortes))):
+            raise ValueError(f"cortes del tema «{topic['nombre']}» debe listar identificadores "
+                             "enteros y distintos.")
+        if any(x not in seen for x in cortes):
             raise ValueError(f"El tema «{topic['nombre']}» cita cortes que no existen.")
+        if type(topic.get("imprescindible", False)) is not bool:
+            raise ValueError(f"imprescindible del tema «{topic['nombre']}» debe ser booleano.")
     return segments
 
 
@@ -93,14 +107,23 @@ def settings_of(draft, args, total, grid):
         base["remove_pauses"] = args.pauses == "si"
     if args.silence_db is not None:
         base["silence_db"] = args.silence_db
-    speed = float(base.get("speed", 1.25))
+    speed = base.get("speed", 1.25)
+    if type(speed) not in (int, float) or not math.isfinite(speed):
+        raise ValueError("speed debe ser un número finito.")
+    speed = float(speed)
     if not 1.0 <= speed <= 2.0:
         raise ValueError(f"La velocidad debe estar entre 1,0 y 2,0 (recibida {speed:g}).")
+    remove_pauses = base.get("remove_pauses", True)
+    if type(remove_pauses) is not bool:
+        raise ValueError("remove_pauses debe ser un valor booleano.")
+    silence_db = base.get("silence_db", common.SILENCE_DB)
+    if type(silence_db) not in (int, float) or not math.isfinite(silence_db):
+        raise ValueError("silence_db debe ser un número finito.")
     target = common.parse_target(base.get("target"), total)
     return {"target": base.get("target"), "objetivo": target,
             "tolerance": common.tolerance(target) if target is not None else None,
-            "speed": round(speed, 3), "remove_pauses": bool(base.get("remove_pauses", True)),
-            "silence_db": float(base.get("silence_db", common.SILENCE_DB)),
+            "speed": round(speed, 3), "remove_pauses": remove_pauses,
+            "silence_db": float(silence_db),
             # render rebuilds the cadence from the plan alone, without opening metadata.json.
             "rate": grid["rate"], "sample_rate": grid["sample_rate"]}
 
