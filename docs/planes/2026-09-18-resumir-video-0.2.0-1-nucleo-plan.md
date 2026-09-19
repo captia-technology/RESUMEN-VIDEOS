@@ -1931,6 +1931,9 @@ git commit -m "feat(common): la linea temporal compartida por plan, montaje y do
   parámetro: de ahí salen `rate` y `sample_rate`. Ningún plan posterior la reduce a
   `settings_of(draft, args, total)`; la rama de audio la llama igual, con la línea temporal de un medio
   sin imagen (`rate`, `fps` e `interval` a `None`).
+- `check_draft` exige tipos estrictos (`int` para identificadores, prioridad y cortes de tema; `bool`
+  para las marcas; listas y objetos donde toca) y rechaza duplicados en `depends_on` y
+  `topics.cortes`; `settings_of` valida con el mismo rigor los ajustes que vengan del borrador.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -2038,9 +2041,13 @@ class BorradorTest(unittest.TestCase):
                  "dependencia inexistente": [cut(1, 2, 5, depends_on=[9])],
                  "dependencia de sí mismo": [cut(1, 2, 5, depends_on=[1])],
                  "prioridad inválida": [cut(1, 2, 5, priority=4)],
+                 "prioridad no entera": [cut(1, 2, 5, priority=2.0)],
+                 "prioridad booleana": [cut(1, 2, 5, priority=True)],
                  "identificador no entero": [cut("a", 2, 5)],
                  "tiempo no finito": [cut(1, 2, float("inf"))],
-                 "marca booleana": [cut(1, 2, 5, pinned="sí")]}
+                 "marca booleana": [cut(1, 2, 5, pinned="sí")],
+                 "dependencia duplicada": [cut(1, 2, 5), cut(2, 6, 8),
+                                          cut(3, 9, 11, depends_on=[1, 1])]}
         for label, segments in cases.items():
             with self.subTest(label=label), self.assertRaises(ValueError):
                 plan.check_draft({"segments": segments}, 60.0, "video")
@@ -2059,6 +2066,17 @@ class BorradorTest(unittest.TestCase):
                 "topics": [{"nombre": "Normativa", "cortes": [9], "imprescindible": True}]}
         with self.assertRaisesRegex(ValueError, "cita cortes que no existen"):
             plan.check_draft(body, 60.0, "video")
+        bad = {"topics no es lista": None,
+               "topics es un diccionario": {"nombre": "x", "cortes": [1]},
+               "tema no es objeto": ["no soy un tema"],
+               "cortes no es lista": [{"nombre": "x", "cortes": 1}],
+               "cortes con booleano": [{"nombre": "x", "cortes": [True]}],
+               "cortes duplicados": [{"nombre": "x", "cortes": [1, 1]}],
+               "imprescindible no booleano": [{"nombre": "x", "cortes": [1],
+                                              "imprescindible": "sí"}]}
+        for label, topics in bad.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                plan.check_draft({"segments": [cut(1, 2, 5)], "topics": topics}, 60.0, "video")
 
 
 class AjustesTest(unittest.TestCase):
@@ -2073,6 +2091,13 @@ class AjustesTest(unittest.TestCase):
         self.assertEqual(other, {"target": "12s", "objetivo": 12.0, "tolerance": 10.0, "speed": 1.0,
                                  "remove_pauses": False, "silence_db": -45.0, "rate": "25/1",
                                  "sample_rate": 48000})
+        bad = {"remove_pauses no booleano": ({"remove_pauses": "no"}, "booleano"),
+               "speed nulo": ({"speed": None}, "número finito"),
+               "speed no numérico": ({"speed": "x"}, "número finito"),
+               "silence_db no numérico": ({"silence_db": "x"}, "número finito")}
+        for label, (settings, pattern) in bad.items():
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, pattern):
+                plan.settings_of({"settings": settings}, options("."), 60.0, GRID)
 
     def test_the_defaults_are_the_ones_of_the_spec(self):
         self.assertEqual(plan.settings_of({}, options("."), 60.0, GRID),
@@ -2178,23 +2203,37 @@ def check_draft(draft, total, kind):
         for field in needed:
             if not isinstance(segment.get(field), str) or not segment[field].strip():
                 raise ValueError(f"Falta {field} en el corte {key}.")
-        if segment.get("priority") not in (1, 2, 3):
+        priority = segment.get("priority")
+        if type(priority) is not int or priority not in (1, 2, 3):
             raise ValueError(f"La prioridad del corte {key} debe ser 1, 2 o 3.")
         for name in ("included", "pinned", "remove_pauses", "visual_only"):
             flag(segment, name, name == "remove_pauses")
         depends = segment.get("depends_on", [])
-        if not isinstance(depends, list) or any(type(x) is not int or x == key for x in depends):
+        if (not isinstance(depends, list) or any(type(x) is not int or x == key for x in depends)
+                or len(depends) != len(set(depends))):
             raise ValueError(f"depends_on del corte {key} debe listar identificadores distintos.")
         seen[key], previous = segment, end
     for segment in segments:
         for other in segment.get("depends_on", []):
             if other not in seen:
                 raise ValueError(f"El corte {segment['id']} depende de {other}, que no existe.")
-    for topic in draft.get("topics", []):
+    topics = draft.get("topics", [])
+    if not isinstance(topics, list):
+        raise ValueError("topics debe ser una lista de temas.")
+    for topic in topics:
+        if not isinstance(topic, dict):
+            raise ValueError("Cada tema debe ser un objeto.")
         if not isinstance(topic.get("nombre"), str) or not topic["nombre"].strip():
             raise ValueError("Cada tema necesita un nombre.")
-        if any(x not in seen for x in topic.get("cortes", [])):
+        cortes = topic.get("cortes", [])
+        if (not isinstance(cortes, list) or any(type(x) is not int for x in cortes)
+                or len(cortes) != len(set(cortes))):
+            raise ValueError(f"cortes del tema «{topic['nombre']}» debe listar identificadores "
+                             "enteros y distintos.")
+        if any(x not in seen for x in cortes):
             raise ValueError(f"El tema «{topic['nombre']}» cita cortes que no existen.")
+        if type(topic.get("imprescindible", False)) is not bool:
+            raise ValueError(f"imprescindible del tema «{topic['nombre']}» debe ser booleano.")
     return segments
 
 
@@ -2209,14 +2248,23 @@ def settings_of(draft, args, total, grid):
         base["remove_pauses"] = args.pauses == "si"
     if args.silence_db is not None:
         base["silence_db"] = args.silence_db
-    speed = float(base.get("speed", 1.25))
+    speed = base.get("speed", 1.25)
+    if type(speed) not in (int, float) or not math.isfinite(speed):
+        raise ValueError("speed debe ser un número finito.")
+    speed = float(speed)
     if not 1.0 <= speed <= 2.0:
         raise ValueError(f"La velocidad debe estar entre 1,0 y 2,0 (recibida {speed:g}).")
+    remove_pauses = base.get("remove_pauses", True)
+    if type(remove_pauses) is not bool:
+        raise ValueError("remove_pauses debe ser un valor booleano.")
+    silence_db = base.get("silence_db", common.SILENCE_DB)
+    if type(silence_db) not in (int, float) or not math.isfinite(silence_db):
+        raise ValueError("silence_db debe ser un número finito.")
     target = common.parse_target(base.get("target"), total)
     return {"target": base.get("target"), "objetivo": target,
             "tolerance": common.tolerance(target) if target is not None else None,
-            "speed": round(speed, 3), "remove_pauses": bool(base.get("remove_pauses", True)),
-            "silence_db": float(base.get("silence_db", common.SILENCE_DB)),
+            "speed": round(speed, 3), "remove_pauses": remove_pauses,
+            "silence_db": float(silence_db),
             # render rebuilds the cadence from the plan alone, without opening metadata.json.
             "rate": grid["rate"], "sample_rate": grid["sample_rate"]}
 
