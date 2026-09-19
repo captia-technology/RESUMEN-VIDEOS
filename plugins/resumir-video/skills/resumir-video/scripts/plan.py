@@ -347,10 +347,10 @@ def cut_warnings(row, levels, settings):
                                     "0,6 s del borde: la unión puede partir una palabra.", cut=key))
     if segment.get("visual_only") and row["output"] < SHORT_VISUAL:
         found.append(common.warning("visual_breve", f"El corte visual {key} dura "
-                                    f"{row['output']:.1f} s de salida; cuesta leerlo.", cut=key))
+                                    f"{comma(row['output'])} s de salida; cuesta leerlo.", cut=key))
     elif not segment.get("visual_only") and row["output"] < SHORT_CUT:
-        found.append(common.warning("corte_breve", f"El corte {key} dura {row['output']:.1f} s de "
-                                    "salida; puede quedar descontextualizado.", cut=key))
+        found.append(common.warning("corte_breve", f"El corte {key} dura {comma(row['output'])} s "
+                                    "de salida; puede quedar descontextualizado.", cut=key))
     # Both pause warnings only make sense where pauses are actually removed: a cut that keeps them,
     # by its own mark or by the job's, has nothing to measure.
     # `source` is always positive here: `check_draft` requires start < end, and neither
@@ -373,8 +373,8 @@ def global_warnings(estimate, settings, total, has_words):
     """Warnings about the job as a whole."""
     found, target = [], settings["objetivo"]
     if settings["speed"] > FAST_SPEED:
-        found.append(common.warning("velocidad_alta", f"Velocidad ×{settings['speed']:g}: por "
-                                    "encima de ×1,5 la voz técnica cuesta de seguir."))
+        found.append(common.warning("velocidad_alta", f"Velocidad ×{comma(settings['speed'], 2)}: "
+                                    "por encima de ×1,5 la voz técnica cuesta de seguir."))
     if target is not None and target < LOW_TARGET * total:
         found.append(common.warning("objetivo_muy_bajo", f"El objetivo ({target:.0f} s) es menor "
                                     f"que el 5 % del original ({LOW_TARGET * total:.0f} s)."))
@@ -532,8 +532,8 @@ def comma(value, digits=1):
 
 
 def cell(text):
-    """One Markdown cell: a pipe or a newline would break the table."""
-    return str(text).replace("|", "\\|").replace("\n", " ")
+    """One Markdown cell: a pipe, a stray CR or a newline would break the table."""
+    return str(text).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
 def length(cut):
@@ -610,9 +610,12 @@ def proposal(plan, reserves, total, name):
         head.append(f"| ×{comma(item['velocidad'], 2)} | {'sí' if item['pausas'] else 'no'} | "
                     f"{clock(item['salida'])} | {comma(item['porcentaje'])} % | {item['estado']} |")
     head += ["", "## Sugerencias", ""] + ([f"- {hint['texto']}" for hint in plan["sugerencias"]]
-                                          or ["- ninguna: el plan está dentro de la banda"])
+                                          or [("- ninguna: el plan está dentro de la banda"
+                                               if report["estado"] == "ok" else
+                                               "- ninguna aplicable: no hay ajuste disponible "
+                                               f"para el estado «{report['estado']}».")])
     head += ["", "## Recorrido", "", f"`{plan['recorrido']}`", "",
-             f"0:00 ← cada carácter son {total / BAR:.0f} s → {clock(total)}", "",
+             f"0:00 ← cada carácter son {comma(total / BAR)} s → {clock(total)}", "",
              "## Cómo responder", "",
              "- «acepta» o «móntalo» para montar esta versión.",
              "- «quita el 7 y el 9», «añade el 6», «alarga el 3 diez segundos».",

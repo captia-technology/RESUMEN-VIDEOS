@@ -590,6 +590,8 @@ class PropuestaTest(unittest.TestCase):
 
     def test_a_cell_never_breaks_the_table(self):
         self.assertEqual(plan.cell("a | b\nc"), "a \\| b c")
+        # A lone CR (no accompanying \n) is just as able to break a Markdown row.
+        self.assertEqual(plan.cell("a\rb"), "a b")
 
     def test_the_published_row_of_a_cut(self):
         settings = {"target": "40%", "objetivo": 24.0, "speed": 1.25, "remove_pauses": True,
@@ -598,6 +600,12 @@ class PropuestaTest(unittest.TestCase):
                             self.grid["interval"])
         rows = plan.measure(rows, self.levels, self.grid, settings)
         row = plan.cut_row(rows[0], 1, 0.0, self.grid)
+        # Exactly the nineteen keys of the seleccion-vN.json schema, in that order: neither a
+        # missing one (visual_only, title) nor a stray internal one (absorbed) may slip through.
+        self.assertEqual(list(row), ["id", "numero", "title", "phrase", "reason",
+                                     "audio_evidence", "visual_evidence", "priority", "pinned",
+                                     "visual_only", "remove_pauses", "depends_on", "start", "end",
+                                     "spans", "frames", "samples", "salida", "subcuts"])
         self.assertEqual((row["numero"], row["id"], row["priority"]), (1, 1, 1))
         self.assertEqual((row["start"], row["end"]), (2.0, 10.0))
         self.assertEqual(row["spans"], [[2.0, 5.08], [5.92, 10.0]])
@@ -606,6 +614,8 @@ class PropuestaTest(unittest.TestCase):
         self.assertEqual(row["subcuts"], [{"spans": [[2.0, 5.08], [5.92, 10.0]],
                                            "frames": 143, "samples": 274560}])
         self.assertAlmostEqual(plan.length(row), 5.72)
+        # render/doc write this straight to JSON: every value must serialise with no default=.
+        json.dumps(row)
 
     def test_the_text_timeline_marks_what_is_kept(self):
         settings = {"target": None, "objetivo": None, "speed": 1.25, "remove_pauses": True,
@@ -618,7 +628,11 @@ class PropuestaTest(unittest.TestCase):
         self.assertEqual(len(plan.bar(rows, included, 60.0)), plan.BAR)
 
     def test_the_proposal_has_every_section_of_section_nine(self):
-        body = {"version": 1, "changes": ["propuesta inicial"], "warnings": [],
+        body = {"version": 1, "changes": ["propuesta inicial"],
+                "warnings": [common.warning("corte_vacio", "El corte 2 se queda sin tramos.",
+                                            cut=2),
+                            common.warning("borde_en_voz", "El corte 1 no encuentra silencio.",
+                                           cut=1)],
                 "settings": {"speed": 1.25}, "excluidos": [{"title": "Saludos",
                                                             "reason": "Sin contenido"}],
                 "estimate": {"cortes": 1, "origen": 8.0, "tras_pausas": 7.16, "salida": 5.72,
@@ -644,8 +658,59 @@ class PropuestaTest(unittest.TestCase):
         self.assertIn("| Saludos | Sin contenido |", text)
         self.assertIn("| ×1,00 | sí | 0:07 | 11,9 % | ok |", text)
         self.assertIn("- ninguna: el plan está dentro de la banda", text)
-        self.assertIn("- ninguno", text)
         self.assertIn("«quita el 7 y el 9»", text)
+        # A blocking warning carries the **bloquea** mark; a non-blocking one does not.
+        self.assertIn("- **bloquea** · `corte_vacio` · corte 2 · El corte 2 se queda sin "
+                      "tramos.", text)
+        self.assertIn("- `borde_en_voz` · corte 1 · El corte 1 no encuentra silencio.", text)
+
+    def test_the_suggestions_fallback_follows_the_state(self):
+        body = {"version": 1, "changes": [], "warnings": [], "settings": {"speed": 1.0},
+                "excluidos": [],
+                "estimate": {"cortes": 0, "origen": 0.0, "tras_pausas": 0.0, "salida": 0.0,
+                             "porcentaje": 0.0, "objetivo": None, "banda": None,
+                             "estado": "sin_objetivo"},
+                "segments": [], "alternativas": [], "sugerencias": [],
+                "recorrido": "·" * plan.BAR}
+        text = plan.proposal(body, [], 60.0, "medio.mp4")
+        self.assertIn("- ninguna aplicable: no hay ajuste disponible para el estado "
+                      "«sin_objetivo».", text)
+        self.assertNotIn("- ninguna: el plan está dentro de la banda", text)
+        # An empty `warnings` list still falls back to "- ninguno" in ## Avisos.
+        self.assertIn("- ninguno", text)
+
+    def test_the_timeline_line_never_rounds_to_zero_seconds(self):
+        body = {"version": 1, "changes": [], "warnings": [], "settings": {"speed": 1.0},
+                "excluidos": [],
+                "estimate": {"cortes": 0, "origen": 0.0, "tras_pausas": 0.0, "salida": 0.0,
+                             "porcentaje": 0.0, "objetivo": None, "banda": None,
+                             "estado": "sin_objetivo"},
+                "segments": [], "alternativas": [], "sugerencias": [],
+                "recorrido": "·" * plan.BAR}
+        text = plan.proposal(body, [], 5.0, "medio.mp4")
+        self.assertNotIn("cada carácter son 0 s", text)
+        self.assertIn(f"cada carácter son {plan.comma(5.0 / plan.BAR)} s", text)
+
+    def test_no_decimal_point_reaches_the_proposal(self):
+        # A short cut (below SHORT_CUT) at a speed above FAST_SPEED triggers both corte_breve
+        # and velocidad_alta, the two warnings section 7.7 formats with a raw float.
+        segments = [cut(1, 2.0, 3.5, 2)]
+        rows, included, settings, estimate = prepared(segments, self.levels, self.grid,
+                                                       target="40%", speed=1.75)
+        warnings = plan.global_warnings(estimate, settings, 60.0, True)
+        for row in rows:
+            if row["segment"]["id"] in included:
+                warnings += plan.cut_warnings(row, self.levels, settings)
+        codes = [item["codigo"] for item in warnings]
+        self.assertIn("corte_breve", codes)
+        self.assertIn("velocidad_alta", codes)
+        body = {"version": 1, "changes": [], "warnings": warnings, "settings": settings,
+                "excluidos": [], "estimate": estimate,
+                "segments": [plan.cut_row(row, 1, 0.0, self.grid) for row in rows
+                            if row["segment"]["id"] in included],
+                "alternativas": [], "sugerencias": [], "recorrido": "#" * plan.BAR}
+        text = plan.proposal(body, [], 60.0, "medio.mp4")
+        self.assertNotRegex(text, r"\d\.\d")
 
 
 if __name__ == "__main__":
