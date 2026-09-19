@@ -713,5 +713,148 @@ class PropuestaTest(unittest.TestCase):
         self.assertNotRegex(text, r"\d\.\d")
 
 
+def call(work, **extra):
+    """Run plan.run capturing its stdout, as the CLI would."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = plan.run(options(work, dry_run=False, **extra))
+    return code, buffer.getvalue()
+
+
+def dry(work, **extra):
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = plan.run(options(work, **extra))
+    text = buffer.getvalue()
+    return code, json.loads(text[text.index("{"):text.rindex("}") + 1])
+
+
+class VersionesTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        self.data = work_folder(self.work)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_the_first_version_publishes_plan_proposal_and_history(self):
+        draft(self.work, BASE)
+        code, output = call(self.work)
+        self.assertEqual(code, 0)
+        self.assertIn("seleccion-v1.json", output)
+        body = json.loads((self.work / "seleccion-v1.json").read_text(encoding="utf-8"))
+        self.assertEqual(body["version"], 1)
+        self.assertEqual(body["sha256"], common.plan_sha256(body))
+        self.assertEqual([item["id"] for item in body["segments"]], [1, 2, 3, 5, 6])
+        self.assertEqual([item["id"] for item in body["reserves"]], [4])
+        self.assertNotIn("fingerprint", body)
+        self.assertEqual(set(body["source"]), {"path", "size", "mtime_ns", "sha256"})
+        self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
+        self.assertEqual((body["settings"]["rate"], body["settings"]["sample_rate"]),
+                         ("25/1", 48000))
+        self.assertEqual(body["timeline"], self.data["timeline"])
+        self.assertEqual(body["estimate"]["salida"], 24.36)
+        self.assertEqual(body["changes"], ["propuesta inicial"])
+        self.assertIn("# Propuesta v1", (self.work / "propuesta-v1.md").read_text(encoding="utf-8"))
+        record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8").strip())
+        self.assertEqual((record["evento"], record["version"], record["segments"]), ("init", 1, 5))
+
+    def test_the_second_version_diffs_and_leaves_the_first_untouched(self):
+        draft(self.work, BASE)
+        call(self.work)
+        before = (self.work / "seleccion-v1.json").read_bytes()
+        segments = [dict(segment) for segment in BASE]
+        segments[3]["included"] = True
+        segments[4]["included"] = False
+        segments[2]["end"] = 23.0
+        segments[2]["phrase"] = "Frase 3 recortada"
+        draft(self.work, segments, parent=1)
+        code, output = call(self.work)
+        self.assertEqual(code, 0)
+        body = json.loads((self.work / "seleccion-v2.json").read_text(encoding="utf-8"))
+        # Section 9 asks for seconds in the three lines: 4 lasts 93 frames at 25 fps, so 3,7 s.
+        self.assertEqual(body["changes"],
+                         ["alta: 4 · Tema 4 · 3,7 s", "baja: 5 · Tema 5",
+                          "cambio: 3 · Tema 3 · 4,5 s → 2,1 s · Frase 3 recortada"])
+        self.assertEqual(body["estimate"]["salida"], 20.76)
+        self.assertEqual((self.work / "seleccion-v1.json").read_bytes(), before)
+        self.assertEqual(len((self.work / "historial.jsonl").read_text(
+            encoding="utf-8").splitlines()), 2)
+
+    def test_a_blocking_warning_publishes_and_returns_two(self):
+        draft(self.work, [cut(1, 2.0, 10.0, 1, depends_on=[2]),
+                          cut(2, 19.0, 26.0, 3, included=False)])
+        code, _ = call(self.work)
+        self.assertEqual(code, 2)
+        body = json.loads((self.work / "seleccion-v1.json").read_text(encoding="utf-8"))
+        self.assertTrue(any(item["bloquea"] for item in body["warnings"]))
+
+    def test_a_silent_reserve_does_not_block_and_an_emptied_cut_is_a_change(self):
+        # 20,0–21,5 is silence in the fixture: the discards leave that cut without spans.
+        quiet = cut(2, 20.1, 21.4, 3, included=False)
+        draft(self.work, [cut(1, 2.0, 10.0, 1), quiet])
+        code, _ = call(self.work)
+        # A reserve the agent left out never reaches the render: emptiness does not block it.
+        self.assertEqual(code, 0)
+        body = json.loads((self.work / "seleccion-v1.json").read_text(encoding="utf-8"))
+        self.assertNotIn("corte_vacio", [item["codigo"] for item in body["warnings"]])
+        draft(self.work, [cut(1, 2.0, 10.0, 1), dict(quiet, included=True)])
+        code, _ = call(self.work)
+        self.assertEqual(code, 2)
+        body = json.loads((self.work / "seleccion-v2.json").read_text(encoding="utf-8"))
+        self.assertIn("corte_vacio", [item["codigo"] for item in body["warnings"]])
+        # Section 7.4: the emptied cut goes back to reserves, and that is noted in `changes`.
+        self.assertEqual(body["changes"],
+                         ["corte vacío: 2 · Tema 2 · sin tramos tras quitar pausas: "
+                          "vuelve a reservas (corte_vacio)"])
+
+    def test_dry_run_writes_no_version(self):
+        draft(self.work, BASE)
+        code, body = dry(self.work)
+        self.assertEqual(code, 0)
+        self.assertEqual(body["estimate"]["salida"], 24.36)
+        self.assertEqual(sorted(path.name for path in self.work.iterdir()),
+                         ["audio.wav", "borrador.json", "energia.f32", "medio.mp4",
+                          "metadata.json"])
+
+    def test_the_call_overrides_the_target_of_the_draft(self):
+        draft(self.work, BASE)
+        code, body = dry(self.work, target="12s")
+        self.assertEqual(body["estimate"]["estado"], "por_encima")
+        self.assertEqual(body["settings"]["target"], "12s")
+
+    def test_a_bad_draft_is_refused_with_code_two_and_without_writing(self):
+        draft(self.work, [cut(1, 2.0, 9.0), cut(2, 8.0, 12.0)])
+        code, _ = call(self.work)
+        self.assertEqual(code, 2)
+        self.assertFalse(list(self.work.glob("seleccion-v*.json")))
+        self.assertFalse(list(self.work.glob("propuesta-v*.md")))
+        # A draft that is missing is the same class of invalid argument as one that is wrong.
+        self.assertEqual(call(self.work, draft=None)[0], 2)
+        draft(self.work, BASE)
+        with self.assertRaisesRegex(ValueError, "modo audio"):
+            call(self.work, kind="audio")
+
+
+class CliTest(unittest.TestCase):
+    def test_the_subcommand_is_wired_and_documented(self):
+        parser = video.build_parser()
+        parsed = parser.parse_args(["plan", "--work", "T", "--draft", "b.json", "--target", "10%",
+                                    "--speed", "1.5", "--pauses", "no", "--silence-db", "-45",
+                                    "--kind", "audio", "--dry-run"])
+        self.assertEqual((parsed.command, parsed.work, parsed.draft, parsed.target),
+                         ("plan", "T", "b.json", "10%"))
+        self.assertEqual((parsed.speed, parsed.pauses, parsed.silence_db), (1.5, "no", -45.0))
+        self.assertEqual((parsed.kind, parsed.dry_run, parsed.import_from, parsed.revert),
+                         ("audio", True, None, None))
+        # The shared convention: the subparser carries its own entry point.
+        self.assertIs(parsed.run, plan.run)
+        self.assertIs(parser.parse_args(["check"]).run, video.check)
+        self.assertEqual(parser.parse_args(["plan", "--work", "T", "--import", "p.json"]).import_from,
+                         "p.json")
+        self.assertEqual(parser.parse_args(["plan", "--work", "T", "--revert", "2"]).revert, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

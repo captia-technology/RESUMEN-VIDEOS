@@ -3,6 +3,7 @@
 import json
 import math
 from pathlib import Path
+import sys
 
 import common
 
@@ -623,3 +624,169 @@ def proposal(plan, reserves, total, name):
              "- «súbelo al 15 %», «sin acelerar», «no quites pausas en el 12».",
              "- «vuelve a la v1» o «¿qué has dejado fuera?».", ""]
     return "\n".join(head)
+
+
+def dumps(data):
+    return json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def source_of(data):
+    """Identity and fingerprint of the medium in one place: path, size, mtime and sha256."""
+    source = dict(data["source"])
+    source.update(data.get("fingerprint") or {})
+    if "sha256" not in source:
+        source.update(common.fingerprint(source["path"]))
+    return source
+
+
+def publish_version(work, prefix, body, extra=None):
+    """Reserve N, fill it atomically and publish the companion Markdown beside it.
+
+    `extra` takes no arguments: by the time it runs, N is already in `body["version"]`.
+    """
+    version, path = common.reserve_version(work, prefix)
+    body["version"] = version
+    body["sha256"] = common.plan_sha256(body)
+    common.write_reserved(path, dumps(body) + "\n")
+    if extra is not None:
+        staged = work / f"propuesta-v{version}.md.parcial"
+        staged.write_text(extra(), encoding="utf-8")
+        common.publish(staged, work / f"propuesta-v{version}.md")
+    return version, path
+
+
+def changes(work, parent, cuts, notes):
+    """Diff against the version this draft comes from: additions, removals, edits and merges.
+
+    Section 9 asks for the three lines in seconds, so none of them goes through `common.clock`.
+    """
+    lines = list(notes)
+    path = work / f"seleccion-v{parent}.json" if parent else None
+    if path is None or not path.is_file():
+        return lines or ["propuesta inicial"]
+    before = {item["id"]: item for item in load(path).get("segments", [])}
+    now = {item["id"]: item for item in cuts}
+    for key in sorted(set(now) - set(before)):
+        lines.append(f"alta: {key} · {now[key]['title']} · {comma(length(now[key]))} s")
+    for key in sorted(set(before) - set(now)):
+        lines.append(f"baja: {key} · {before[key]['title']}")
+    for key in sorted(set(before) & set(now)):
+        old, new = before[key], now[key]
+        if (abs(length(old) - length(new)) > 0.05 or old["phrase"] != new["phrase"]
+                or old["title"] != new["title"]):
+            lines.append(f"cambio: {key} · {new['title']} · {comma(length(old))} s → "
+                         f"{comma(length(new))} s · {new['phrase'][:60]}")
+    return lines or ["sin cambios respecto a la versión anterior"]
+
+
+def video_plan(args, work, data, draft, settings, segments, total, levels, words, grid):
+    """The whole section 7 pipeline for a video job."""
+    rows, notes = fuse(adjusted(segments, levels, words, settings["silence_db"]), grid["interval"])
+    rows = measure(rows, levels, grid, settings)
+    included = {row["segment"]["id"] for row in rows
+                if row["segment"].get("included", False) and not row["empty"]}
+    # Section 7.4: a cut the agent wanted and the discards emptied goes back to reserves, and that
+    # move is a change of this version, not only a warning.
+    notes += [f"corte vacío: {row['segment']['id']} · {row['segment']['title']} · sin tramos tras "
+              "quitar pausas: vuelve a reservas (corte_vacio)"
+              for row in rows if row["empty"] and row["segment"].get("included", False)]
+    report = estimate_of(rows, included, settings, total, grid)
+    cuts, place = [], 0.0
+    for row in [item for item in rows if item["segment"]["id"] in included]:
+        cuts.append(cut_row(row, len(cuts) + 1, place, grid))
+        place += row["frames"] / grid["fps"]
+    reserves = [cut_row(row, 0, 0.0, grid) for row in rows
+                if row["segment"]["id"] not in included]
+    warnings = global_warnings(report, settings, total, bool(words))
+    warnings += dependency_warnings(rows, included) + topic_warnings(draft, rows, included)
+    for row in rows:
+        # `included` already leaves the empty ones out, so `row["empty"]` brings them back for their
+        # warning — but only if the agent wanted the cut: an empty reserve is material nobody
+        # mounts, and its blocking `corte_vacio` would return 2 for nothing.
+        if row["segment"].get("included", False) and (row["segment"]["id"] in included
+                                                      or row["empty"]):
+            warnings += cut_warnings(row, levels, settings)
+    # prepare records huecos_pts and fuente_vfr of the packet probe; plan only carries them on.
+    warnings += [common.warning(item["codigo"], item["mensaje"], cut=item.get("corte"))
+                 for item in data.get("avisos", [])]
+    body = {"version": 0, "parent": draft.get("parent"), "kind": "video",
+            "request": draft.get("request", ""), "source": source_of(data),
+            "audio_stream": data["audio_stream"],
+            "settings": settings, "timeline": grid,
+            "segments": cuts, "reserves": reserves, "excluidos": draft.get("excluded", []),
+            "changes": [], "estimate": report,
+            "alternativas": alternatives(rows, levels, grid, settings, included, total),
+            "sugerencias": suggestions(rows, included, settings, report),
+            "warnings": warnings, "recorrido": bar(rows, included, total)}
+    body["changes"] = changes(work, draft.get("parent"), cuts, notes)
+    blocking = any(item["bloquea"] for item in warnings)
+    if args.dry_run:
+        body["sha256"] = common.plan_sha256(body)
+        print(dumps(body))
+        return 2 if blocking else 0
+    name = Path(data["source"]["path"]).name
+    version, path = publish_version(work, "seleccion", body,
+                                    lambda: proposal(body, reserves, total, name))
+    common.history(work, "edit" if draft.get("parent") else "init",
+                   {"version": version, "segments": len(cuts), "estado": report["estado"],
+                    "salida": report["salida"], "sha256": body["sha256"],
+                    "peticion": draft.get("request", "")})
+    print(path)
+    return 2 if blocking else 0
+
+
+def run(args):
+    """Entry point registered by `register`; video.py reaches it through args.run."""
+    work = Path(args.work).resolve()
+    if not work.is_dir():
+        raise ValueError(f"No existe la carpeta de trabajo: {work}")
+    data = load(work / "metadata.json")
+    total = common.duration(data)
+    if not args.draft:
+        # Section 12: a draft that is missing is as invalid an argument as one that is wrong, so it
+        # leaves by the same door as `check_draft` below, with code 2 and without writing anything.
+        print("Error: indica --draft con el borrador del agente.", file=sys.stderr)
+        return 2
+    # prepare writes `kind`; a job that does not declare it is a video job, as in 0.1.0.
+    kind = args.kind or data.get("kind") or "video"
+    if kind != "video":
+        raise ValueError("El modo audio publica un esquema de ideas, no una selección de tramos; "
+                         "este subcomando todavía no lo genera.")
+    draft = load(args.draft)
+    grid = data.get("timeline") or common.timeline(data)
+    try:
+        settings = settings_of(draft, args, total, grid)
+        segments = check_draft(draft, total, kind)
+    except ValueError as exc:
+        # The same door: a draft the agent has to fix is an invalid argument, not a controlled
+        # failure.
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    transcript = work / "transcripcion.json"
+    words = words_of(load(transcript)) if transcript.is_file() else []
+    levels = common.energy(work / "audio.wav", work / "energia.f32")
+    return video_plan(args, work, data, draft, settings, segments, total, levels, words, grid)
+
+
+def register(sub):
+    """Add the `plan` subcommand and leave its entry point in the parsed arguments."""
+    parser = sub.add_parser("plan",
+                            help="Calcula tramos, estimación, avisos y propuesta desde un borrador.")
+    parser.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
+    parser.add_argument("--draft", help="Borrador del agente (JSON) con segments y settings.")
+    parser.add_argument("--target",
+                        help="Objetivo: 10%%, 720s, 12min o 0:12:00 (prevalece sobre el borrador).")
+    parser.add_argument("--speed", type=float, help="Velocidad de 1,0 a 2,0 (por defecto 1,25).")
+    parser.add_argument("--pauses", choices=("si", "no"), help="Eliminación global de pausas.")
+    parser.add_argument("--silence-db", type=float,
+                        help="Umbral de silencio en dBFS (por defecto -50).")
+    parser.add_argument("--kind", choices=("video", "audio"),
+                        help="Modo; por defecto, el de metadata.json.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Calcula e imprime el plan sin publicar versión.")
+    parser.add_argument("--import", dest="import_from",
+                        help="Convierte un plan 0.1 en un borrador nuevo.")
+    parser.add_argument("--revert", type=common.positive,
+                        help="Copia seleccion-vN.json a un borrador nuevo.")
+    parser.set_defaults(run=run)
+    return parser

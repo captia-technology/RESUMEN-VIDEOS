@@ -13,6 +13,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import common
+import plan
 from common import (DEFAULT_THREADS, MAX_FRAMES, MIN_PYTHON, cache_dir, duration, encoders, ffmpeg,
                     frame_count, frame_interval, identity, new_dir, output_rate, positive, probe,
                     require_encoders, run, save, seconds, seek_margin, stream_duration, stream_end,
@@ -189,6 +190,7 @@ def build_parser():
     p.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
                    help=f"Hilos de CPU (por defecto {DEFAULT_THREADS}).")
     p.set_defaults(run=transcribe)
+    plan.register(sub)
     return parser
 
 
