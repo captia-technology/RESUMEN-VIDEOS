@@ -186,8 +186,8 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **99** al terminar el plan (37 en `test_common.py`, 12 en
-  `test_video.py` y 50 en `test_plan.py`). Las **23** de `tests/` no cambian.
+  skill **crece**: de las 15 de hoy se pasa a **100** al terminar el plan (37 en `test_common.py`, 12 en
+  `test_video.py` y 51 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
 
@@ -2329,6 +2329,9 @@ git commit -m "feat(plan): leer y validar el borrador del agente" \
 - `fuse` remapea las `depends_on` de todas las filas que apunten a un id absorbido hacia el id
   conservado (siguiendo cadenas, sin duplicados ni autodependencias), porque de otro modo
   `dependency_warnings` (tarea 13) emitiría un `dependencia_excluida` falso.
+- `fuse` deja en cada fila resultante `row["absorbed"]`: la lista ordenada de los ids que esa fila
+  absorbió (vacía si ninguno), para que `topic_warnings` (tarea 13) siga dando por cubierto un tema
+  cuyo corte citado sobrevive con otro id tras la fusión.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -2501,15 +2504,18 @@ def fuse(rows, interval):
                 == row["segment"].get("included", False)):
             head = merged[-1]
             kept = min(head["segment"]["id"], row["segment"]["id"])
-            absorbed = max(head["segment"]["id"], row["segment"]["id"])
+            discarded = max(head["segment"]["id"], row["segment"]["id"])
             notes.append(f"fusion: {head['segment']['id']} + {row['segment']['id']} "
                          f"-> {kept}")
             head["segment"] = join(head["segment"], row["segment"])
             head["b"] = max(head["b"], row["b"])
             head["note"] = head["note"] or row["note"]
-            follows[absorbed] = kept
+            # `absorbed` travels with the surviving row so `topic_warnings` can still credit a
+            # topic whose cited cut only rides inside another id's cut after the merge.
+            head["absorbed"].append(discarded)
+            follows[discarded] = kept
         else:
-            merged.append(dict(row))
+            merged.append(dict(row, absorbed=[]))
     if follows:
         # A cut that depended on an id now absorbed follows the surviving one instead: left
         # dangling, it would trip `dependency_warnings` (task 13) into a false `dependencia_excluida`.
@@ -2790,14 +2796,18 @@ git commit -m "feat(plan): estimacion exacta, retencion, presupuesto y los seis 
 - Prueba: `plugins/resumir-video/skills/resumir-video/scripts/test_plan.py`
 
 **Interfaces:**
-- Consumes: `common.warning`, `common.bounds`, `common.ENERGY_FLOOR` y las filas medidas.
+- Consumes: `common.warning`, `common.bounds`, `common.ENERGY_FLOOR`, las filas medidas y
+  `row["absorbed"]` de `fuse` (tarea 11).
 - Produces: `percentile(levels, a, b, share=0.10) -> float`,
   `cut_warnings(row, levels, settings) -> list` (`corte_vacio`, `borde_en_voz`, `corte_breve`,
   `visual_breve`, `pausas_excesivas`, `sin_pausas_detectadas`),
   `global_warnings(estimate, settings, total, has_words) -> list` (`velocidad_alta`,
   `objetivo_muy_bajo`, `objetivo_muy_alto`, `esenciales_superan_objetivo` y
   `sin_marcas_por_palabra`), `dependency_warnings(rows, included) -> list` (`dependencia_excluida`) y
-  `topic_warnings(draft, included) -> list` (`tema_sin_cubrir`): trece códigos en total.
+  `topic_warnings(draft, rows, included) -> list` (`tema_sin_cubrir`): trece códigos en total.
+  `topic_warnings` considera cubierto un tema si alguno de sus cortes está en `included` o en el
+  `absorbed` de una fila incluida, porque tras una fusión el corte citado sigue en el montaje con otro
+  id.
   `huecos_pts`, `fuente_vfr` y `cobertura_baja` no se emiten aquí: los producen `prepare` y `compare`;
   `plan` copia los que `metadata.json` traiga en la clave `avisos`.
 - `cut_warnings` usa `settings` de verdad: el umbral de `sin_pausas_detectadas` es
@@ -2826,7 +2836,8 @@ class AvisosTest(unittest.TestCase):
         rows, included, settings, report = prepared(segments, self.levels, self.grid, target=target,
                                                     speed=speed, silence_db=silence_db)
         found = plan.global_warnings(report, settings, 60.0, has_words)
-        found += plan.dependency_warnings(rows, included) + plan.topic_warnings(head, included)
+        found += (plan.dependency_warnings(rows, included)
+                 + plan.topic_warnings(head, rows, included))
         for row in rows:
             if row["segment"].get("included", False) and (row["segment"]["id"] in included
                                                           or row["empty"]):
@@ -2837,8 +2848,9 @@ class AvisosTest(unittest.TestCase):
         return [(item["codigo"], item["corte"], item["bloquea"]) for item in found]
 
     def test_an_empty_cut_blocks_and_hides_the_other_warnings(self):
-        self.assertIn(("corte_vacio", 2, True),
-                      self.codes([cut(1, 2.0, 10.0, 1), cut(2, 20.1, 21.4, 2)]))
+        found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 20.1, 21.4, 2)])
+        # Not just "corte_vacio" is present: nothing else about cut 2 survives alongside it.
+        self.assertEqual([item for item in found if item[1] == 2], [("corte_vacio", 2, True)])
 
     def test_dependencies_and_topics_block(self):
         found = self.codes([cut(1, 2.0, 10.0, 1, depends_on=[2]),
@@ -2848,6 +2860,20 @@ class AvisosTest(unittest.TestCase):
                            topics=[{"nombre": "Normativa", "cortes": [2], "imprescindible": True}])
         self.assertIn(("tema_sin_cubrir", None, True), found)
 
+    def test_topics_follow_the_fused_cut(self):
+        # 1 (2.0-7.0) and 2 (7.0-10.0) touch and fuse into 1: a topic that only cites 2 still
+        # counts it covered, since 2 rides inside 1's cut in the render.
+        found = self.codes([cut(1, 2.0, 7.0, 1), cut(2, 7.0, 10.0, 1)],
+                           topics=[{"nombre": "Normativa", "cortes": [2], "imprescindible": True}])
+        self.assertNotIn(("tema_sin_cubrir", None, True), found)
+        # The opposite: two reserves (19.0-24.0 and 24.0-26.0) fuse together, but neither
+        # survives into `included`, so a topic that cites only the absorbed reserve still has
+        # nothing to show for it.
+        found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 19.0, 24.0, 2, included=False),
+                            cut(3, 24.0, 26.0, 2, included=False)],
+                           topics=[{"nombre": "Normativa", "cortes": [3], "imprescindible": True}])
+        self.assertIn(("tema_sin_cubrir", None, True), found)
+
     def test_short_visual_and_fast_warnings(self):
         found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 19.0, 21.0, 2, visual_only=True),
                             cut(3, 40.0, 47.0, 2, remove_pauses=False)], speed=1.75)
@@ -2855,6 +2881,15 @@ class AvisosTest(unittest.TestCase):
         self.assertIn(("visual_breve", 2, False), found)
         self.assertIn(("corte_breve", 1, False), self.codes([cut(1, 11.5, 13.5, 2),
                                                              cut(2, 40.0, 47.0, 1)]))
+        # Both pause warnings are skipped by the cut's own mark, even over a loud, pause-free
+        # background that would otherwise read as an undetected silence: a visual_only cut
+        # (13.5-18.0) and one with remove_pauses=False (31.0-38.0), neither touching a real pause.
+        guarded = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 13.5, 18.0, 2, visual_only=True),
+                              cut(3, 31.0, 38.0, 2, remove_pauses=False)])
+        for key in (2, 3):
+            marked = {item[0] for item in guarded if item[1] == key}
+            self.assertNotIn("pausas_excesivas", marked)
+            self.assertNotIn("sin_pausas_detectadas", marked)
 
     def test_pauses_and_background_warnings(self):
         found = self.codes([cut(1, 11.8, 13.0, 2), cut(2, 40.0, 47.0, 1)])
@@ -2897,6 +2932,8 @@ class AvisosTest(unittest.TestCase):
     def test_the_tenth_percentile_of_a_quiet_cut(self):
         self.assertEqual(plan.percentile(self.levels, 20.0, 21.5), common.ENERGY_FLOOR)
         self.assertGreater(plan.percentile(self.levels, 2.0, 5.0), -50.0 - plan.QUIET_MARGIN)
+        # An empty window (a == b) has nothing to sort: the floor is the fallback, not a crash.
+        self.assertEqual(plan.percentile(self.levels, 5.0, 5.0), common.ENERGY_FLOOR)
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -2905,7 +2942,7 @@ class AvisosTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Avisos -v
 ```
 
-Esperado: 8 errores `AttributeError: module 'plan' has no attribute 'global_warnings'`.
+Esperado: 9 errores `AttributeError: module 'plan' has no attribute 'global_warnings'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -2938,7 +2975,9 @@ def cut_warnings(row, levels, settings):
                                     "salida; puede quedar descontextualizado.", cut=key))
     # Both pause warnings only make sense where pauses are actually removed: a cut that keeps them,
     # by its own mark or by the job's, has nothing to measure.
-    if settings["remove_pauses"] and not untouched(row) and row["source"] > 0:
+    # `source` is always positive here: `check_draft` requires start < end, and neither
+    # `adjusted` nor `fuse` ever shrink a cut to zero width.
+    if settings["remove_pauses"] and not untouched(row):
         removed = 1 - row["length"] / row["source"]
         if removed > PAUSE_SHARE:
             found.append(common.warning("pausas_excesivas", f"En el corte {key} se elimina el "
@@ -2988,11 +3027,17 @@ def dependency_warnings(rows, included):
     return found
 
 
-def topic_warnings(draft, included):
+def topic_warnings(draft, rows, included):
     """A topic the inventory marked essential must have at least one included cut."""
+    # A cut absorbed by an included one still rides inside it in the render, so it counts as
+    # covered even though its own id never reaches `included`.
+    covered = set(included)
+    for row in rows:
+        if row["segment"]["id"] in included:
+            covered.update(row.get("absorbed", []))
     found = []
     for topic in draft.get("topics", []):
-        if topic.get("imprescindible") and not set(topic.get("cortes", [])) & included:
+        if topic.get("imprescindible") and not set(topic.get("cortes", [])) & covered:
             found.append(common.warning("tema_sin_cubrir", f"El tema «{topic['nombre']}» se marcó "
                                         "imprescindible y no tiene ningún corte incluido."))
     return found
@@ -3004,7 +3049,7 @@ def topic_warnings(draft, included):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 30 tests … OK`.
+Esperado: `Ran 31 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3219,7 +3264,7 @@ def comma(value, digits=1):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 35 tests … OK`.
+Esperado: `Ran 36 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3442,7 +3487,7 @@ def proposal(plan, reserves, total, name):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 39 tests … OK`.
+Esperado: `Ran 40 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3723,7 +3768,7 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     reserves = [cut_row(row, 0, 0.0, grid) for row in rows
                 if row["segment"]["id"] not in included]
     warnings = global_warnings(report, settings, total, bool(words))
-    warnings += dependency_warnings(rows, included) + topic_warnings(draft, included)
+    warnings += dependency_warnings(rows, included) + topic_warnings(draft, rows, included)
     for row in rows:
         # `included` already leaves the empty ones out, so `row["empty"]` brings them back for their
         # warning — but only if the agent wanted the cut: an empty reserve is material nobody
@@ -3845,7 +3890,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 96 tests … OK` (37 + 12 + 47) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 97 tests … OK` (37 + 12 + 48) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -4062,7 +4107,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 99 tests … OK` (37 + 12 + 50), en menos de dos minutos.
+Esperado: `Ran 100 tests … OK` (37 + 12 + 51), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -4125,8 +4170,8 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 50 en
-  `test_plan.py`: **99** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
+  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 51 en
+  `test_plan.py`: **100** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
   de §12 que le corresponden: borrador ausente, borrador rechazado y plan publicado con aviso
