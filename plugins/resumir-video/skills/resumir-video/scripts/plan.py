@@ -135,3 +135,110 @@ def words_of(transcription):
         words.extend({"start": float(word["start"]), "end": float(word["end"])}
                      for word in segment.get("words", []) if word.get("start") is not None)
     return sorted(words, key=lambda word: word["start"])
+
+
+def adjusted(segments, levels, words, threshold):
+    """Chronological edge adjustment that never crosses a neighbour."""
+    rows, floor_ = [], 0.0
+    for index, segment in enumerate(segments):
+        roof = segments[index + 1]["start"] if index + 1 < len(segments) else float("inf")
+        a, b, note = common.adjust_edges(segment["start"], segment["end"], levels, words,
+                                         threshold=threshold)
+        a, b = max(a, floor_), min(b, roof)
+        if b <= a:
+            a, b = segment["start"], segment["end"]
+        rows.append({"segment": segment, "a": a, "b": b, "note": note})
+        floor_ = b
+    return rows
+
+
+def join(one, other):
+    """The cut that results from merging two neighbours: lowest id, highest priority."""
+    ids = {one["id"], other["id"]}
+    fused = dict(one)
+    fused["id"] = min(ids)
+    fused["priority"] = min(one["priority"], other["priority"])
+    # `included` travels explicitly, never as a leftover of `dict(one)`: `fuse` pairs neighbours
+    # that already share it, and a silent inheritance would drop a cut from the render.
+    fused["included"] = one.get("included", False) and other.get("included", False)
+    fused["pinned"] = one.get("pinned", False) or other.get("pinned", False)
+    fused["visual_only"] = one.get("visual_only", False) and other.get("visual_only", False)
+    fused["remove_pauses"] = one.get("remove_pauses", True) and other.get("remove_pauses", True)
+    fused["depends_on"] = sorted({*one.get("depends_on", []), *other.get("depends_on", [])} - ids)
+    fused["start"] = min(one["start"], other["start"])
+    fused["end"] = max(one["end"], other["end"])
+    for field in TEXT + ("visual_evidence",):
+        if one.get(field) and other.get(field) and one[field] != other[field]:
+            fused[field] = f"{one[field]} · {other[field]}"
+    return fused
+
+
+def fuse(rows, interval):
+    """Merge the cuts the adjustment left touching, and note every merge for `changes`."""
+    merged, notes = [], []
+    for row in rows:
+        # Only neighbours with the same `included` merge: fusing a reserve into an included cut
+        # would take the included one out of the render with no trace beyond the note.
+        if (merged and row["a"] - merged[-1]["b"] < interval - 1e-9
+                and merged[-1]["segment"].get("included", False)
+                == row["segment"].get("included", False)):
+            head = merged[-1]
+            notes.append(f"fusion: {head['segment']['id']} + {row['segment']['id']} "
+                         f"-> {min(head['segment']['id'], row['segment']['id'])}")
+            head["segment"] = join(head["segment"], row["segment"])
+            head["b"] = max(head["b"], row["b"])
+            head["note"] = head["note"] or row["note"]
+        else:
+            merged.append(dict(row))
+    return merged, notes
+
+
+def untouched(row):
+    """True for the cuts whose audio is kept whole: visual ones and those that keep their pauses."""
+    segment = row["segment"]
+    return segment.get("visual_only", False) or not segment.get("remove_pauses", True)
+
+
+def spans_of(row, levels, grid, settings):
+    """Frame-aligned spans of one cut once its pauses are removed."""
+    keep = settings["remove_pauses"] and not untouched(row)
+    return common.islands(levels, row["a"], row["b"], interval=grid["interval"],
+                          origin=grid["origin"], remove_pauses=keep,
+                          threshold=settings["silence_db"])
+
+
+def split(spans, frames, samples, grid, speed):
+    """Subcuts of at most MAX_SPANS spans; N and M of the whole cut are shared out among them."""
+    limit = common.MAX_SPANS
+    rate, sample_rate = grid["fps"], grid["sample_rate"]
+    groups = [spans[index:index + limit] for index in range(0, len(spans), limit)] or [[]]
+    parts, frames_left, samples_left = [], frames, samples
+    for index, group in enumerate(groups):
+        length = sum(end - start for start, end in group)
+        last = index == len(groups) - 1
+        # Section 7.5: both totals belong to the whole cut, so the last subcut takes what is left
+        # of each. Recomputing M here would lose samples whenever N / F * SR is not whole.
+        count = (frames_left if last
+                 else min(frames_left, common.frames_for(length, rate, speed)))
+        share = (samples_left if last
+                 else min(samples_left, common.samples_for(count, rate, sample_rate)))
+        parts.append({"spans": group, "frames": count, "samples": share})
+        frames_left -= count
+        samples_left -= share
+    return parts
+
+
+def measure(rows, levels, grid, settings):
+    """Spans, N, M and emptiness of every cut; an empty cut goes back to the reserves."""
+    rate, speed, sample_rate = grid["fps"], settings["speed"], grid["sample_rate"]
+    for row in rows:
+        row["spans"] = spans_of(row, levels, grid, settings)
+        row["length"] = round(sum(end - start for start, end in row["spans"]), 6)
+        row["frames"] = common.frames_for(row["length"], rate, speed)
+        row["output"] = row["frames"] / rate
+        row["samples"] = common.samples_for(row["frames"], rate, sample_rate)
+        row["empty"] = (not row["spans"] or row["frames"] < 1
+                        or row["length"] < speed / rate - 1e-9)
+        row["subcuts"] = split(row["spans"], row["frames"], row["samples"], grid, speed)
+        row["source"] = round(row["b"] - row["a"], 6)
+    return rows

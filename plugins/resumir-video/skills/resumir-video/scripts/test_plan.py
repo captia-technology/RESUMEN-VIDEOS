@@ -180,5 +180,92 @@ class PalabrasTest(unittest.TestCase):
         self.assertEqual(plan.words_of(None), [])
 
 
+class TramosTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        self.data = work_folder(self.work)
+        self.grid = self.data["timeline"]
+        self.levels = common.energy(self.work / "audio.wav")
+        self.settings = {"speed": 1.25, "remove_pauses": True, "silence_db": -50.0,
+                         "target": None, "objetivo": None}
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def measure(self, segments, **extra):
+        rows, notes = plan.fuse(plan.adjusted(segments, self.levels, [], -50.0),
+                                self.grid["interval"])
+        settings = dict(self.settings, **extra)
+        return plan.measure(rows, self.levels, self.grid, settings), notes
+
+    def test_spans_frames_and_samples_of_one_cut(self):
+        rows, _ = self.measure([cut(1, 2.0, 10.0, 1)])
+        self.assertEqual(rows[0]["spans"], [[2.0, 5.08], [5.92, 10.0]])
+        self.assertAlmostEqual(rows[0]["length"], 7.16)
+        self.assertEqual(rows[0]["frames"], 143)
+        self.assertEqual(rows[0]["samples"], 274560)
+        self.assertFalse(rows[0]["empty"])
+
+    def test_keeping_pauses_keeps_one_span(self):
+        rows, _ = self.measure([cut(1, 2.0, 10.0, 1)], remove_pauses=False)
+        self.assertEqual(rows[0]["spans"], [[2.0, 10.0]])
+        self.assertEqual(rows[0]["frames"], 160)
+        rows, _ = self.measure([cut(1, 2.0, 10.0, 1, visual_only=True)])
+        self.assertEqual(rows[0]["spans"], [[2.0, 10.0]])
+
+    def test_a_cut_swallowed_by_a_pause_is_empty(self):
+        rows, _ = self.measure([cut(1, 20.1, 21.4, 2)])
+        self.assertEqual(rows[0]["spans"], [])
+        self.assertTrue(rows[0]["empty"])
+
+    def test_touching_cuts_are_merged_with_the_lowest_id(self):
+        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1), cut(3, 40.0, 47.0, 3)])
+        self.assertEqual([row["segment"]["id"] for row in rows], [1, 3])
+        self.assertEqual(rows[0]["segment"]["priority"], 1)
+        self.assertEqual(rows[0]["segment"]["title"], "Tema 1 · Tema 2")
+        self.assertEqual(rows[0]["spans"], [[2.0, 5.08], [5.92, 8.0]])
+        self.assertEqual(notes, ["fusion: 1 + 2 -> 1"])
+
+    def test_an_included_cut_never_merges_with_a_reserve(self):
+        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1, included=False),
+                                    cut(3, 40.0, 47.0, 3)])
+        self.assertEqual([row["segment"]["id"] for row in rows], [1, 2, 3])
+        self.assertEqual([row["segment"]["included"] for row in rows], [True, False, True])
+        self.assertEqual(notes, [])
+
+    def test_the_adjustment_never_crosses_the_neighbour(self):
+        # Measured before fuse: the clamp is what keeps them from overlapping, and the merge of
+        # the pair that ends up touching is checked by the test above.
+        rows = plan.adjusted([cut(1, 2.0, 11.5, 1), cut(2, 11.6, 18.0, 1)], self.levels, [], -50.0)
+        self.assertEqual([(row["a"], row["b"]) for row in rows], [(2.0, 11.6), (11.6, 18.0)])
+
+    def test_more_than_forty_spans_become_subcuts(self):
+        pauses = tuple((1.0 + 1.2 * index, 1.4 + 1.2 * index) for index in range(49))
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = Path(temporary)
+            data = work_folder(work, pauses=pauses)
+            levels = common.energy(work / "audio.wav")
+            rows, _ = plan.fuse(plan.adjusted([cut(1, 0.5, 59.0, 1)], levels, [], -50.0),
+                                data["timeline"]["interval"])
+            rows = plan.measure(rows, levels, data["timeline"], self.settings)
+            self.assertEqual(len(rows[0]["spans"]), 49)
+            self.assertEqual([len(part["spans"]) for part in rows[0]["subcuts"]], [40, 9])
+            self.assertEqual(sum(part["frames"] for part in rows[0]["subcuts"]), rows[0]["frames"])
+            self.assertEqual(sum(part["samples"] for part in rows[0]["subcuts"]),
+                             rows[0]["samples"])
+            # 25 fps and 48000 Hz divide exactly, so the sums above hold however M is worked out.
+            # At 30000/1001 fps and 44100 Hz they do not: only sharing out M like N keeps the sum.
+            odd = dict(data["timeline"], rate="30000/1001", fps=30000 / 1001,
+                       interval=1001 / 30000, sample_rate=44100)
+            rows, _ = plan.fuse(plan.adjusted([cut(1, 0.5, 59.0, 1)], levels, [], -50.0),
+                                odd["interval"])
+            rows = plan.measure(rows, levels, odd, self.settings)
+            self.assertGreater(len(rows[0]["subcuts"]), 1)
+            self.assertEqual(sum(part["frames"] for part in rows[0]["subcuts"]), rows[0]["frames"])
+            self.assertEqual(sum(part["samples"] for part in rows[0]["subcuts"]),
+                             rows[0]["samples"])
+
+
 if __name__ == "__main__":
     unittest.main()
