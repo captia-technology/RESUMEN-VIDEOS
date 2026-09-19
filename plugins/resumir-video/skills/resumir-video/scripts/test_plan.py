@@ -510,7 +510,7 @@ class AlternativasTest(unittest.TestCase):
                          [(1.0, True), (1.0, False), (1.25, True), (1.25, False)])
 
     def test_alternatives_do_not_disturb_the_measured_rows(self):
-        rows, included, settings, report = self.prepared("40%")
+        rows, included, settings, _ = self.prepared("40%")
         plan.alternatives(rows, self.levels, self.grid, settings, included, 60.0)
         self.assertEqual(sum(row["frames"] for row in rows if row["segment"]["id"] in included),
                          609)
@@ -532,15 +532,49 @@ class AlternativasTest(unittest.TestCase):
         self.assertEqual(plan.suggestions(rows, included, settings, report), [])
         rows, included, settings, report = self.prepared(None)
         self.assertEqual(plan.suggestions(rows, included, settings, report), [])
+        # Beyond x1,5 the speed hint disappears; sacrificar and porcentaje still show up.
+        essentials = [cut(1, 2.0, 10.0, 1), cut(2, 11.0, 18.0, 1), cut(3, 19.0, 26.0, 1)]
+        rows, included, settings, report = self.prepared("1s", essentials)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual([hint["tipo"] for hint in hints], ["sacrificar", "porcentaje"])
+        # Just under the cap the speed hint appears, rounded up to the nearest 0,05.
+        rows, included, settings, report = self.prepared("3.5s", essentials)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual(hints[0]["tipo"], "velocidad")
+        self.assertEqual(hints[0]["valor"], 1.45)
+        # A second reserve that no longer fits once the first is taken is left out too, not
+        # just the ones blocked by an unmet dependency.
+        segments = [cut(1, 0.2, 5.0, 2), cut(2, 31.0, 33.5, 2, included=False),
+                   cut(3, 34.0, 59.0, 2, included=False)]
+        rows, included, settings, report = self.prepared("14s", segments)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual(hints[0]["cortes"], [2])
 
     def test_a_suggestion_never_touches_essentials_pinned_or_dependencies(self):
-        segments = [cut(1, 2.0, 10.0, 1), cut(2, 11.0, 18.0, 3, pinned=True),
-                    cut(3, 19.0, 26.0, 3), cut(4, 40.0, 47.0, 3, depends_on=[5]),
-                    cut(5, 49.0, 55.0, 3)]
-        rows, included, settings, report = self.prepared("12s", segments)
+        # 1 is essential, 2 is pinned and 4 depends on 3: only 4, plain and unprotected, is
+        # free to remove. Each guard here is load-bearing (see the mutation proof of the
+        # fixes round in the task report): dropping any one of the three lets its own cut
+        # through instead of leaving `cortes` at [4].
+        segments = [cut(1, 0.2, 5.0, 1), cut(2, 6.2, 12.0, 3, pinned=True),
+                    cut(3, 13.0, 20.0, 3), cut(4, 21.7, 30.0, 3, depends_on=[3])]
+        rows, included, settings, report = self.prepared("1s", segments)
         hints = plan.suggestions(rows, included, settings, report)
-        # 1 is essential, 2 is pinned and 5 is needed by 4: only 4 can be suggested.
         self.assertEqual(hints[0]["cortes"], [4])
+        # A reserve whose dependency stays excluded is never proposed on its own: 2 depends
+        # on 3, and only 3 (which fits by itself) is recovered.
+        segments = [cut(1, 0.2, 5.0, 2),
+                   cut(2, 31.0, 33.0, 2, included=False, depends_on=[3]),
+                   cut(3, 34.0, 55.0, 2, included=False)]
+        rows, included, settings, report = self.prepared("14s", segments)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual(hints[0]["cortes"], [3])
+        # A pinned essential is never sacrificed either: with nothing else to offer, the
+        # whole suggestion is dropped instead of touching it.
+        segments = [cut(1, 2.0, 20.0, 1, pinned=True), cut(2, 40.0, 47.0, 3),
+                   cut(3, 49.0, 55.0, 3)]
+        rows, included, settings, report = self.prepared("0.1s", segments)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual([hint["tipo"] for hint in hints], ["porcentaje"])
 
 
 if __name__ == "__main__":

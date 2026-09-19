@@ -443,10 +443,13 @@ def alternatives(rows, levels, grid, settings, included, total):
     return out
 
 
-def movable(row, included, rows):
-    """A cut may be suggested for removal only if nothing essential, pinned or needed depends on it."""
+def movable(row, rows, included, *, essentials=False):
+    """A cut can be freed only if it is not pinned and no included cut depends on it.
+
+    Priority 1 stays protected too, unless `essentials` allows sacrificing one.
+    """
     segment = row["segment"]
-    if segment["priority"] == 1 or segment.get("pinned", False):
+    if segment.get("pinned", False) or (not essentials and segment["priority"] == 1):
         return False
     return not any(segment["id"] in other["segment"].get("depends_on", [])
                    for other in rows if other["segment"]["id"] in included)
@@ -458,14 +461,14 @@ def suggestions(rows, included, settings, report):
     target = settings["objetivo"]
     if target is None:
         return out
-    limits = band(target)[0]
+    limits = report["banda"]
     kept = [row for row in rows if row["segment"]["id"] in included and not row["empty"]]
     if report["estado"] == "por_encima":
         excess, chosen = report["salida"] - limits[1], []
         for row in sorted(kept, key=lambda item: (-item["segment"]["priority"], -item["output"])):
             if excess <= 0:
                 break
-            if movable(row, included, rows):
+            if movable(row, rows, included):
                 chosen.append(row["segment"]["id"])
                 excess -= row["output"]
         if chosen:
@@ -473,12 +476,18 @@ def suggestions(rows, included, settings, report):
                         "texto": f"Pasa a reservas {', '.join(str(x) for x in chosen)} para entrar "
                                  f"en la banda (−{report['salida'] - limits[1]:.0f} s)."})
     if report["estado"] == "por_debajo":
+        # A reserve whose dependency is still excluded (and not among the ones just chosen)
+        # cannot be added on its own: it would trip `dependencia_excluida` once rendered.
         room, chosen = limits[1] - report["salida"], []
         for row in sorted(rows, key=lambda item: (item["segment"]["priority"], item["output"])):
-            if row["segment"]["id"] in included or row["empty"]:
+            segment = row["segment"]
+            if segment["id"] in included or row["empty"]:
+                continue
+            depends = segment.get("depends_on", [])
+            if any(other not in included and other not in chosen for other in depends):
                 continue
             if row["output"] <= room:
-                chosen.append(row["segment"]["id"])
+                chosen.append(segment["id"])
                 room -= row["output"]
         if chosen:
             out.append({"tipo": "anadir", "cortes": chosen,
@@ -486,20 +495,27 @@ def suggestions(rows, included, settings, report):
                                  f"{limits[1] - report['salida']:.0f} s más."})
     if report["estado"] == "inviable":
         needed = settings["speed"] * report["esenciales"] / limits[1]
-        if needed <= FAST_SPEED:
+        has_speed = needed <= FAST_SPEED
+        if has_speed:
             value = math.ceil(needed * 20) / 20
             out.append({"tipo": "velocidad", "valor": value,
                         "texto": f"Con velocidad ×{comma(value, 2)} los esenciales entran en la "
                                  "banda."})
         sacrifice, excess = [], report["esenciales"] - limits[1]
-        for row in sorted([item for item in kept if item["segment"]["priority"] == 1],
-                          key=lambda item: -item["output"]):
+        essentials_kept = [item for item in kept if item["segment"]["priority"] == 1]
+        for row in sorted(essentials_kept, key=lambda item: -item["output"]):
             if excess <= 0:
                 break
-            sacrifice.append(row["segment"]["id"])
-            excess -= row["output"]
-        out.append({"tipo": "sacrificar", "cortes": sacrifice,
-                    "texto": f"O renuncia a los esenciales {', '.join(str(x) for x in sacrifice)}."})
+            if movable(row, rows, included, essentials=True):
+                sacrifice.append(row["segment"]["id"])
+                excess -= row["output"]
+        if sacrifice:
+            # "O" only makes sense as a second option: it reads oddly on its own when no
+            # speed change was offered first.
+            prefix = "O renuncia" if has_speed else "Renuncia"
+            out.append({"tipo": "sacrificar", "cortes": sacrifice,
+                        "texto": f"{prefix} a los esenciales "
+                                 f"{', '.join(str(x) for x in sacrifice)}."})
         out.append({"tipo": "porcentaje", "valor": report["minimo"],
                     "texto": f"El porcentaje mínimo razonable es {comma(report['minimo'])} % "
                              f"({report['esenciales']:.0f} s)."})
