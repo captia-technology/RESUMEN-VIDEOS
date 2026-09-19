@@ -4,9 +4,13 @@ import argparse
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
+import unittest.mock
 
 import common
 import plan
@@ -135,6 +139,23 @@ class BorradorTest(unittest.TestCase):
         for label, topics in bad.items():
             with self.subTest(label=label), self.assertRaises(ValueError):
                 plan.check_draft({"segments": [cut(1, 2, 5)], "topics": topics}, 60.0, "video")
+
+
+    def test_excluded_is_a_list_of_objects_with_a_title_and_a_reason(self):
+        good = [{"title": "Saludos", "reason": "Sin contenido"}]
+        plan.check_draft({"segments": [cut(1, 2, 5)], "excluded": good}, 60.0, "video")
+        # Absent and empty are both fine: the key is optional.
+        plan.check_draft({"segments": [cut(1, 2, 5)]}, 60.0, "video")
+        plan.check_draft({"segments": [cut(1, 2, 5)], "excluded": []}, 60.0, "video")
+        bad = {"cadenas": ["Saludos"], "un objeto suelto": {"title": "x", "reason": "y"},
+               "nulo": None, "sin reason": [{"title": "x"}],
+               "reason vacío": [{"title": "x", "reason": "  "}],
+               "title no es texto": [{"title": 3, "reason": "y"}],
+               "uno bueno y uno malo": good + ["Introducción"]}
+        for label, excluded in bad.items():
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, "exclu"):
+                plan.check_draft({"segments": [cut(1, 2, 5)], "excluded": excluded},
+                                 60.0, "video")
 
 
 class AjustesTest(unittest.TestCase):
@@ -721,6 +742,14 @@ def call(work, **extra):
     return code, buffer.getvalue()
 
 
+def refused(work, **extra):
+    """plan.run on a draft that must be refused: its exit code and what it told the agent."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code, _ = call(work, **extra)
+    return code, err.getvalue()
+
+
 def dry(work, **extra):
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
@@ -835,6 +864,74 @@ class VersionesTest(unittest.TestCase):
         draft(self.work, BASE)
         with self.assertRaisesRegex(ValueError, "modo audio"):
             call(self.work, kind="audio")
+
+
+    def names(self):
+        return sorted(path.name for path in self.work.iterdir())
+
+    def test_a_draft_that_would_break_the_proposal_is_refused_before_writing(self):
+        # A list of strings passed the old validation, published the plan and then died writing
+        # the proposal: it is an invalid argument, and nothing is published.
+        draft(self.work, BASE, excluded=["Saludos"])
+        code, message = refused(self.work)
+        self.assertEqual(code, 2)
+        self.assertIn("exclu", message)
+        # `parent: 99` used to publish a plan whose changes read "propuesta inicial" as an edit.
+        for parent in (99, 0, -1, "1", 1.0, True):
+            with self.subTest(parent=parent):
+                draft(self.work, BASE, parent=parent)
+                code, message = refused(self.work)
+                self.assertEqual(code, 2)
+                self.assertIn("parent", message)
+        self.assertFalse(list(self.work.glob("seleccion-v*.json")))
+        self.assertFalse(list(self.work.glob("propuesta-v*.md")))
+        self.assertFalse((self.work / "historial.jsonl").exists())
+
+    def test_parent_may_be_null_or_a_published_version(self):
+        draft(self.work, BASE, parent=None)
+        self.assertEqual(call(self.work)[0], 0)
+        draft(self.work, BASE, parent=1)
+        self.assertEqual(call(self.work)[0], 0)
+        body = json.loads((self.work / "seleccion-v2.json").read_text(encoding="utf-8"))
+        self.assertEqual(body["parent"], 1)
+        self.assertEqual(body["changes"], ["sin cambios respecto a la versión anterior"])
+
+    def test_a_proposal_that_cannot_be_written_leaves_nothing_published(self):
+        before = self.names()
+
+        def cannot():
+            raise KeyError("recorrido")
+
+        with self.assertRaises(KeyError):
+            plan.publish_version(self.work, "seleccion", {"segments": []}, cannot)
+        self.assertEqual(self.names(), before)
+        # The number was not burned either: the next attempt starts again at 1.
+        self.assertEqual(plan.publish_version(self.work, "seleccion", {"segments": []},
+                                              lambda: "# Propuesta v1\n")[0], 1)
+
+    def test_a_proposal_that_already_exists_is_never_replaced(self):
+        (self.work / "propuesta-v1.md").write_text("mía", encoding="utf-8")
+        before = self.names()
+        with self.assertRaisesRegex(ValueError, "no se sobrescribe"):
+            plan.publish_version(self.work, "seleccion", {"segments": []},
+                                 lambda: "# Propuesta v1\n")
+        self.assertEqual(self.names(), before)
+        self.assertEqual((self.work / "propuesta-v1.md").read_text(encoding="utf-8"), "mía")
+
+    def test_a_failure_after_the_reserve_is_filled_takes_the_plan_back(self):
+        before = self.names()
+        for name in ("write_reserved", "publish"):
+            with self.subTest(step=name):
+                with unittest.mock.patch.object(common, name, side_effect=OSError("disco lleno")):
+                    with self.assertRaisesRegex(OSError, "disco lleno"):
+                        plan.publish_version(self.work, "seleccion", {"segments": []},
+                                             lambda: "# Propuesta v1\n")
+                self.assertEqual(self.names(), before)
+        # A plan whose digest cannot be computed is the same kind of failure, before the fill.
+        with self.assertRaises(ValueError):
+            plan.publish_version(self.work, "seleccion", {"x": float("nan")},
+                                 lambda: "# Propuesta v1\n")
+        self.assertEqual(self.names(), before)
 
 
 class ImportarTest(unittest.TestCase):
@@ -961,6 +1058,49 @@ class CliTest(unittest.TestCase):
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--import", "p.json"]).import_from,
                          "p.json")
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--revert", "2"]).revert, 2)
+
+    def test_a_missing_or_broken_draft_leaves_by_code_two_in_spanish(self):
+        script = Path(__file__).with_name("video.py")
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = Path(temporary)
+            work_folder(work)
+            (work / "roto.json").write_text("{esto no es json", encoding="utf-8")
+            (work / "lista.json").write_text("[1, 2]", encoding="utf-8")
+            for name, fragment in (("ausente.json", "No existe el borrador"),
+                                   ("roto.json", "no es JSON válido"),
+                                   ("lista.json", "debe ser un objeto JSON")):
+                with self.subTest(draft=name):
+                    result = subprocess.run(
+                        [sys.executable, "-B", str(script), "plan", "--work", str(work),
+                         "--draft", str(work / name)],
+                        capture_output=True, text=True, encoding="utf-8", env=env)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertTrue(result.stderr.startswith("Error: "), result.stderr)
+                    self.assertIn(fragment, result.stderr)
+                    self.assertNotIn("Errno", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(list(work.glob("seleccion-v*.json")))
+
+    def run_main(self, error):
+        """video.main with `plan.run` replaced by something that raises `error`."""
+        err = io.StringIO()
+        with unittest.mock.patch.object(plan, "run", side_effect=error),                 unittest.mock.patch.object(sys, "argv", ["video.py", "plan", "--work", "T",
+                                                          "--draft", "b.json"]),                 contextlib.redirect_stderr(err):
+            code = video.main()
+        return code, err.getvalue()
+
+    def test_a_programming_error_leaves_as_a_message_and_not_as_a_traceback(self):
+        for error in (AttributeError("sin atributo"), TypeError("tipo"), IndexError("índice")):
+            with self.subTest(error=type(error).__name__):
+                code, message = self.run_main(error)
+                self.assertEqual((code, message), (1, f"Error: {error}\n"))
+        # The branches that were already there keep their own code and message.
+        self.assertEqual(self.run_main(KeyboardInterrupt())[0], 130)
+        code, message = self.run_main(MemoryError())
+        self.assertEqual(code, 1)
+        self.assertIn("memoria insuficiente", message)
+        self.assertEqual(self.run_main(ValueError("uno"))[0], 1)
 
     def test_draft_import_and_revert_are_mutually_exclusive(self):
         parser = video.build_parser()

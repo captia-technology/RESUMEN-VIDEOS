@@ -217,7 +217,8 @@ def main():
     except KeyboardInterrupt:
         print("Interrumpido; revisa las carpetas de salida incompletas.", file=sys.stderr)
         return 130
-    except (ValueError, OSError, KeyError, RuntimeError) as exc:
+    except (ValueError, OSError, KeyError, RuntimeError, AttributeError, TypeError,
+            IndexError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0

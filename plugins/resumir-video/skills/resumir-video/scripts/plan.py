@@ -1,5 +1,6 @@
 """Deterministic planning: spans, exact estimate, states, warnings and the proposal to review."""
 
+import contextlib
 import json
 import math
 from pathlib import Path
@@ -24,6 +25,18 @@ def load(path):
     if not isinstance(data, dict):
         raise ValueError(f"{Path(path).name} debe ser un objeto JSON.")
     return data
+
+
+def load_draft(path):
+    """The agent's draft; a file that is missing or unreadable is an invalid argument."""
+    try:
+        return load(path)
+    except FileNotFoundError:
+        raise ValueError(f"No existe el borrador: {path}") from None
+    except OSError as exc:
+        raise ValueError(f"No se puede leer el borrador {path}: {exc.strerror or exc}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"El borrador {Path(path).name} no es JSON válido: {exc}") from None
 
 
 def number(value, name):
@@ -94,7 +107,28 @@ def check_draft(draft, total, kind):
             raise ValueError(f"El tema «{topic['nombre']}» cita cortes que no existen.")
         if type(topic.get("imprescindible", False)) is not bool:
             raise ValueError(f"imprescindible del tema «{topic['nombre']}» debe ser booleano.")
+    excluded = draft.get("excluded", [])
+    if not isinstance(excluded, list):
+        raise ValueError("excluded debe ser una lista de objetos con title y reason.")
+    for position, item in enumerate(excluded, start=1):
+        # The proposal writes both fields into a table: anything else would break it after the
+        # plan is already published.
+        if not isinstance(item, dict) or any(not isinstance(item.get(field), str)
+                                             or not item[field].strip()
+                                             for field in ("title", "reason")):
+            raise ValueError(f"La exclusión {position} de excluded necesita title y reason "
+                             "de texto no vacío.")
     return segments
+
+
+def check_parent(draft, work):
+    """`parent` is null or the number of a version this folder has already published."""
+    parent = draft.get("parent")
+    if parent is None:
+        return
+    if type(parent) is not int or parent < 1 or not (work / f"seleccion-v{parent}.json").is_file():
+        raise ValueError("parent debe ser nulo o el número de una versión ya publicada "
+                         f"(seleccion-vN.json en la carpeta de trabajo); recibido {parent!r}.")
 
 
 def settings_of(draft, args, total, grid):
@@ -639,19 +673,36 @@ def source_of(data):
     return source
 
 
+def discard(*paths):
+    """Remove leftovers; a cleanup that fails never hides the error that made it necessary."""
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
 def publish_version(work, prefix, body, extra=None):
-    """Reserve N, fill it atomically and publish the companion Markdown beside it.
+    """Reserve N, then publish the plan and its companion Markdown: both, or nothing at all.
 
     `extra` takes no arguments: by the time it runs, N is already in `body["version"]`.
     """
     version, path = common.reserve_version(work, prefix)
-    body["version"] = version
-    body["sha256"] = common.plan_sha256(body)
-    common.write_reserved(path, dumps(body) + "\n")
-    if extra is not None:
-        staged = work / f"propuesta-v{version}.md.parcial"
-        staged.write_text(extra(), encoding="utf-8")
-        common.publish(staged, work / f"propuesta-v{version}.md")
+    final = work / f"propuesta-v{version}.md"
+    staged = work / f"propuesta-v{version}.md.parcial"
+    try:
+        body["version"] = version
+        body["sha256"] = common.plan_sha256(body)
+        if extra is not None:
+            if final.exists():
+                raise ValueError(f"Ya está publicado y no se sobrescribe: {final}")
+            # Drafted before the reserve is filled: a Markdown that cannot be written must not
+            # leave a plan without its proposal behind.
+            staged.write_text(extra(), encoding="utf-8")
+        common.write_reserved(path, dumps(body) + "\n")
+        if extra is not None:
+            common.publish(staged, final)
+    except BaseException:
+        discard(path, staged)
+        raise
     return version, path
 
 
@@ -852,14 +903,15 @@ def run(args):
     if kind != "video":
         raise ValueError("El modo audio publica un esquema de ideas, no una selección de tramos; "
                          "este subcomando todavía no lo genera.")
-    draft = load(args.draft)
     grid = data.get("timeline") or common.timeline(data)
     try:
+        draft = load_draft(args.draft)
         settings = settings_of(draft, args, total, grid)
         segments = check_draft(draft, total, kind)
+        check_parent(draft, work)
     except ValueError as exc:
-        # The same door: a draft the agent has to fix is an invalid argument, not a controlled
-        # failure.
+        # The same door: a draft the agent has to fix (or cannot even give us) is an invalid
+        # argument, not a controlled failure.
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     transcript = work / "transcripcion.json"
