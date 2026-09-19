@@ -454,7 +454,9 @@ class PublicacionTest(unittest.TestCase):
         self.assertEqual((record["evento"], record["version"], record["tipo"]),
                          ("edit", 2, "seleccion"))
         self.assertNotEqual(record["cuando"], "1999-01-01T00:00:00+00:00")
-        self.assertRegex(record["cuando"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        # No letter-colon-slash pair here: the packaging test reads that as a Windows drive path.
+        self.assertRegex(record["cuando"],
+                         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00$")
 
     def test_the_history_gives_up_on_a_payload_it_cannot_walk_without_raising(self):
         circular = {}
