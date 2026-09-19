@@ -847,7 +847,10 @@ class ImportarTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def old_plan(self, **changes):
-        body = {"source": dict(self.data["source"]), "audio_stream": 1,
+        # A real 0.1 plan's source has no sha256: only path, size and mtime_ns (common.identity
+        # of the 0.1.0 era). Copying the 0.2 source whole would let it hide a contrast bug.
+        source = {key: self.data["source"][key] for key in ("path", "size", "mtime_ns")}
+        body = {"source": source, "audio_stream": 1,
                 "segments": [{"start": 3.0, "end": 9.0, "title": "Requisito", "reason": "Motivo",
                               "audio_evidence": "Voz", "visual_evidence": "Tabla"},
                              {"start": 20.0, "end": 25.0, "title": "Excepción", "reason": "Motivo",
@@ -875,14 +878,22 @@ class ImportarTest(unittest.TestCase):
         self.assertEqual(body["source"]["sha256"],
                          common.fingerprint(self.data["source"]["path"])["sha256"])
         self.assertFalse(list(self.work.glob("seleccion-v*.json")))
+        # The imported draft still needs review and acceptance: `plan --draft` on it publishes a
+        # real plan, and `identidad_parcial` rides along into it and into the proposal (section 9).
+        code, _ = call(self.work, draft=str(self.work / "borrador-v1.json"))
+        self.assertEqual(code, 0)
+        published = json.loads((self.work / "seleccion-v1.json").read_text(encoding="utf-8"))
+        self.assertIn("identidad_parcial", [item["codigo"] for item in published["warnings"]])
+        self.assertIn("identidad_parcial",
+                      (self.work / "propuesta-v1.md").read_text(encoding="utf-8"))
 
     def test_only_size_and_mtime_are_contrasted(self):
-        moved = dict(self.data["source"], path="otra/ruta/medio.mp4")
+        base = {key: self.data["source"][key] for key in ("path", "size", "mtime_ns")}
+        moved = dict(base, path="otra/ruta/medio.mp4")
         code, _ = call(self.work, import_from=str(self.old_plan(source=moved)))
         self.assertEqual(code, 0)
         with self.assertRaisesRegex(ValueError, "difiere: size"):
-            call(self.work, import_from=str(self.old_plan(
-                source=dict(self.data["source"], size=99))))
+            call(self.work, import_from=str(self.old_plan(source=dict(base, size=99))))
 
     def test_reverting_copies_a_published_plan_into_a_new_draft(self):
         draft(self.work, BASE)
@@ -900,6 +911,37 @@ class ImportarTest(unittest.TestCase):
         self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
         with self.assertRaisesRegex(ValueError, "No existe seleccion-v9.json"):
             call(self.work, revert=9)
+
+    def test_settings_options_do_not_apply_to_import_or_revert(self):
+        code, _ = call(self.work, import_from=str(self.old_plan()), target="10%")
+        self.assertEqual(code, 2)
+        self.assertFalse(list(self.work.glob("borrador-v*.json")))
+        draft(self.work, BASE)
+        call(self.work)
+        for extra in ({"speed": 1.5}, {"pauses": "no"}, {"silence_db": -45.0}):
+            with self.subTest(extra=extra):
+                code, _ = call(self.work, revert=1, **extra)
+                self.assertEqual(code, 2)
+        self.assertFalse(list(self.work.glob("borrador-v*.json")))
+
+    def test_an_unordered_or_overlapping_zero_one_plan_is_rejected_clearly(self):
+        # The failure is disorder/overlap, not the medium's length: the message must say so
+        # instead of the misleading "fuera del medio" alone.
+        overlapping = self.old_plan(segments=[{"start": 3.0, "end": 9.0, "title": "Uno"},
+                                              {"start": 5.0, "end": 12.0, "title": "Dos"}])
+        with self.assertRaisesRegex(ValueError, "desordenado, solapado o fuera"):
+            call(self.work, import_from=str(overlapping))
+
+    def test_a_malformed_zero_one_plan_is_rejected_without_a_traceback(self):
+        not_objects = self.old_plan(segments=["no soy un objeto"])
+        with self.assertRaisesRegex(ValueError, "objeto"):
+            call(self.work, import_from=str(not_objects))
+        bad_title = self.old_plan(segments=[{"start": 3.0, "end": 9.0, "title": 123}])
+        with self.assertRaisesRegex(ValueError, "título"):
+            call(self.work, import_from=str(bad_title))
+        not_a_list = self.old_plan(segments="no soy una lista")
+        with self.assertRaisesRegex(ValueError, "no tiene cortes"):
+            call(self.work, import_from=str(not_a_list))
 
 
 class CliTest(unittest.TestCase):
@@ -919,6 +961,16 @@ class CliTest(unittest.TestCase):
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--import", "p.json"]).import_from,
                          "p.json")
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--revert", "2"]).revert, 2)
+
+    def test_draft_import_and_revert_are_mutually_exclusive(self):
+        parser = video.build_parser()
+        combos = [["--draft", "b.json", "--import", "p.json"],
+                  ["--draft", "b.json", "--revert", "1"],
+                  ["--import", "p.json", "--revert", "1"]]
+        for combo in combos:
+            with self.subTest(combo=combo), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["plan", "--work", "T", *combo])
 
 
 if __name__ == "__main__":

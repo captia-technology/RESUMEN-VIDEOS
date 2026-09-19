@@ -709,6 +709,10 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     # prepare records huecos_pts and fuente_vfr of the packet probe; plan only carries them on.
     warnings += [common.warning(item["codigo"], item["mensaje"], cut=item.get("corte"))
                  for item in data.get("avisos", [])]
+    # A draft born from --import carries its own warnings (identidad_parcial): the same queue
+    # carries them into the published plan and its proposal, instead of stopping at the draft.
+    warnings += [common.warning(item["codigo"], item["mensaje"], cut=item.get("corte"))
+                 for item in draft.get("warnings", [])]
     body = {"version": 0, "parent": draft.get("parent"), "kind": "video",
             "request": draft.get("request", ""), "source": source_of(data),
             "audio_stream": data["audio_stream"],
@@ -758,13 +762,21 @@ def import_plan(args, work, data, total):
     if differing:
         raise ValueError("El plan importado no corresponde a este medio "
                          f"(difiere: {', '.join(differing)}).")
+    old_segments = old.get("segments")
+    if not isinstance(old_segments, list) or not old_segments:
+        raise ValueError("El plan importado no tiene cortes.")
     segments, previous = [], 0.0
-    for index, segment in enumerate(old.get("segments") or [], start=1):
+    for index, segment in enumerate(old_segments, start=1):
+        if not isinstance(segment, dict):
+            raise ValueError(f"El corte {index} del plan importado debe ser un objeto.")
         start = number(segment.get("start"), f"start del corte {index}")
         end = number(segment.get("end"), f"end del corte {index}")
         if not previous <= start < end <= total:
-            raise ValueError(f"El corte {index} del plan importado está fuera del medio.")
+            raise ValueError(f"El corte {index} del plan importado está desordenado, solapado o "
+                             f"fuera del medio (termina en {total:.3f} s).")
         title = segment.get("title", f"Corte {index}")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"El título del corte {index} del plan importado debe ser texto.")
         segments.append({"id": index, "start": start, "end": end, "title": title, "phrase": title,
                          "reason": segment.get("reason", "Importado de un plan 0.1"),
                          "audio_evidence": segment.get("audio_evidence", "Importado de un plan 0.1"),
@@ -773,8 +785,6 @@ def import_plan(args, work, data, total):
                          "priority": 1, "included": True, "pinned": False, "depends_on": [],
                          "remove_pauses": False, "visual_only": False})
         previous = end
-    if not segments:
-        raise ValueError("El plan importado no tiene cortes.")
     body = {"parent": None, "request": f"Importado de {Path(args.import_from).name}",
             # The fingerprint is recomputed from the file itself, never copied from the 0.1 plan.
             "source": dict(current, **common.fingerprint(current["path"])),
@@ -794,18 +804,19 @@ def revert(args, work):
     if not source.is_file():
         raise ValueError(f"No existe {source.name} en la carpeta de trabajo.")
     old = load(source)
-    kept = {item["id"] for item in old.get("segments", [])}
+    published = old.get("segments", [])
+    kept = {item["id"] for item in published}
     segments = []
-    for item in old.get("segments", []) + old.get("reserves", []):
+    # `cut_row` always writes these keys for both `segments` and `reserves`: no default is needed.
+    for item in published + old.get("reserves", []):
         segments.append({"id": item["id"], "start": item["start"], "end": item["end"],
                          "title": item["title"], "phrase": item["phrase"], "reason": item["reason"],
                          "audio_evidence": item["audio_evidence"],
-                         "visual_evidence": item.get("visual_evidence", ""),
+                         "visual_evidence": item["visual_evidence"],
                          "priority": item["priority"], "included": item["id"] in kept,
-                         "pinned": item.get("pinned", False),
-                         "depends_on": item.get("depends_on", []),
-                         "remove_pauses": item.get("remove_pauses", True),
-                         "visual_only": item.get("visual_only", False)})
+                         "pinned": item["pinned"], "depends_on": item["depends_on"],
+                         "remove_pauses": item["remove_pauses"],
+                         "visual_only": item["visual_only"]})
     segments.sort(key=lambda item: item["start"])
     body = {"parent": old["version"], "request": f"Vuelve a la v{old['version']}",
             "source": old["source"],
@@ -822,10 +833,15 @@ def run(args):
         raise ValueError(f"No existe la carpeta de trabajo: {work}")
     data = load(work / "metadata.json")
     total = common.duration(data)
-    if args.import_from:
-        return import_plan(args, work, data, total)
-    if args.revert is not None:
-        return revert(args, work)
+    if args.import_from or args.revert is not None:
+        # Section 12: these options shape a video job's settings, and neither --import nor
+        # --revert runs one; silently ignoring them would hide a request the caller made.
+        if any(value is not None for value in
+               (args.target, args.speed, args.pauses, args.silence_db)):
+            print("Error: --target, --speed, --pauses y --silence-db no se aplican con --import "
+                 "ni --revert.", file=sys.stderr)
+            return 2
+        return import_plan(args, work, data, total) if args.import_from else revert(args, work)
     if not args.draft:
         # Section 12: a draft that is missing is as invalid an argument as one that is wrong, so it
         # leaves by the same door as `check_draft` below, with code 2 and without writing anything.
@@ -857,7 +873,14 @@ def register(sub):
     parser = sub.add_parser("plan",
                             help="Calcula tramos, estimación, avisos y propuesta desde un borrador.")
     parser.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
-    parser.add_argument("--draft", help="Borrador del agente (JSON) con segments y settings.")
+    # Exactly one way to get a video job's segments: a draft to plan, a 0.1 plan to import, or a
+    # published version to copy back into a new draft. argparse itself refuses any other pair.
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--draft", help="Borrador del agente (JSON) con segments y settings.")
+    source.add_argument("--import", dest="import_from",
+                        help="Convierte un plan 0.1 en un borrador nuevo.")
+    source.add_argument("--revert", type=common.positive,
+                        help="Copia seleccion-vN.json a un borrador nuevo.")
     parser.add_argument("--target",
                         help="Objetivo: 10%%, 720s, 12min o 0:12:00 (prevalece sobre el borrador).")
     parser.add_argument("--speed", type=float, help="Velocidad de 1,0 a 2,0 (por defecto 1,25).")
@@ -868,9 +891,5 @@ def register(sub):
                         help="Modo; por defecto, el de metadata.json.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Calcula e imprime el plan sin publicar versión.")
-    parser.add_argument("--import", dest="import_from",
-                        help="Convierte un plan 0.1 en un borrador nuevo.")
-    parser.add_argument("--revert", type=common.positive,
-                        help="Copia seleccion-vN.json a un borrador nuevo.")
     parser.set_defaults(run=run)
     return parser
