@@ -3074,13 +3074,17 @@ git commit -m "feat(plan): los trece avisos que calcula el planificador" \
   `alternatives(rows, levels, grid, settings, included, total) -> list` con **las cuatro**
   combinaciones `{1,0; la velocidad actual o 1,25} × {pausas sí; pausas no}`, cada una con
   `{"velocidad", "pausas", "salida", "porcentaje", "estado"}`;
-  `movable(row, included, rows) -> bool` (nunca prioridad 1, nunca `pinned`, nunca aquello de lo que
-  dependa un corte incluido) y
+  `movable(row, rows, included, *, essentials=False) -> bool` (nunca `pinned`, nunca aquello de lo
+  que dependa un corte incluido; la prioridad 1 solo se protege si `essentials` es `False`) y
   `suggestions(rows, included, settings, report) -> list` con
   `{"tipo", "texto"}` más `cortes` o `valor`. Las sugerencias no se aplican solas: solo se muestran.
 - `suggestions` no recibe `total` ni `grid`: la banda, el estado, los esenciales, el mínimo y el
   máximo llegan ya resueltos en `report`, y lo demás sale de `settings` y de las propias filas.
   `alternatives` tampoco recibe `sample_rate` suelto: `measure` lo lee de `grid` desde la tarea 11.
+- Con `essentials=True`, `movable` deja pasar la prioridad 1 (lo usa `sacrificar` para elegir qué
+  esenciales renunciar) pero sigue excluyendo siempre `pinned` y los cortes de los que dependa un
+  incluido. `anadir` salta las reservas cuya dependencia siga excluida (no propone una reserva sola
+  si lo que necesita no entra también). Ambas reglas vienen de §7.6.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -3120,7 +3124,7 @@ class AlternativasTest(unittest.TestCase):
                          [(1.0, True), (1.0, False), (1.25, True), (1.25, False)])
 
     def test_alternatives_do_not_disturb_the_measured_rows(self):
-        rows, included, settings, report = self.prepared("40%")
+        rows, included, settings, _ = self.prepared("40%")
         plan.alternatives(rows, self.levels, self.grid, settings, included, 60.0)
         self.assertEqual(sum(row["frames"] for row in rows if row["segment"]["id"] in included),
                          609)
@@ -3142,15 +3146,49 @@ class AlternativasTest(unittest.TestCase):
         self.assertEqual(plan.suggestions(rows, included, settings, report), [])
         rows, included, settings, report = self.prepared(None)
         self.assertEqual(plan.suggestions(rows, included, settings, report), [])
+        # Beyond x1,5 the speed hint disappears; sacrificar and porcentaje still show up.
+        essentials = [cut(1, 2.0, 10.0, 1), cut(2, 11.0, 18.0, 1), cut(3, 19.0, 26.0, 1)]
+        rows, included, settings, report = self.prepared("1s", essentials)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual([hint["tipo"] for hint in hints], ["sacrificar", "porcentaje"])
+        # Just under the cap the speed hint appears, rounded up to the nearest 0,05.
+        rows, included, settings, report = self.prepared("3.5s", essentials)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual(hints[0]["tipo"], "velocidad")
+        self.assertEqual(hints[0]["valor"], 1.45)
+        # A second reserve that no longer fits once the first is taken is left out too, not
+        # just the ones blocked by an unmet dependency.
+        segments = [cut(1, 0.2, 5.0, 2), cut(2, 31.0, 33.5, 2, included=False),
+                   cut(3, 34.0, 59.0, 2, included=False)]
+        rows, included, settings, report = self.prepared("14s", segments)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual(hints[0]["cortes"], [2])
 
     def test_a_suggestion_never_touches_essentials_pinned_or_dependencies(self):
-        segments = [cut(1, 2.0, 10.0, 1), cut(2, 11.0, 18.0, 3, pinned=True),
-                    cut(3, 19.0, 26.0, 3), cut(4, 40.0, 47.0, 3, depends_on=[5]),
-                    cut(5, 49.0, 55.0, 3)]
-        rows, included, settings, report = self.prepared("12s", segments)
+        # 1 is essential, 2 is pinned and 4 depends on 3: only 4, plain and unprotected, is
+        # free to remove. Each guard here is load-bearing (see the mutation proof of the
+        # fixes round in the task report): dropping any one of the three lets its own cut
+        # through instead of leaving `cortes` at [4].
+        segments = [cut(1, 0.2, 5.0, 1), cut(2, 6.2, 12.0, 3, pinned=True),
+                    cut(3, 13.0, 20.0, 3), cut(4, 21.7, 30.0, 3, depends_on=[3])]
+        rows, included, settings, report = self.prepared("1s", segments)
         hints = plan.suggestions(rows, included, settings, report)
-        # 1 is essential, 2 is pinned and 5 is needed by 4: only 4 can be suggested.
         self.assertEqual(hints[0]["cortes"], [4])
+        # A reserve whose dependency stays excluded is never proposed on its own: 2 depends
+        # on 3, and only 3 (which fits by itself) is recovered.
+        segments = [cut(1, 0.2, 5.0, 2),
+                   cut(2, 31.0, 33.0, 2, included=False, depends_on=[3]),
+                   cut(3, 34.0, 55.0, 2, included=False)]
+        rows, included, settings, report = self.prepared("14s", segments)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual(hints[0]["cortes"], [3])
+        # A pinned essential is never sacrificed either: with nothing else to offer, the
+        # whole suggestion is dropped instead of touching it.
+        segments = [cut(1, 2.0, 20.0, 1, pinned=True), cut(2, 40.0, 47.0, 3),
+                   cut(3, 49.0, 55.0, 3)]
+        rows, included, settings, report = self.prepared("0.1s", segments)
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual([hint["tipo"] for hint in hints], ["porcentaje"])
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -3186,10 +3224,13 @@ def alternatives(rows, levels, grid, settings, included, total):
     return out
 
 
-def movable(row, included, rows):
-    """A cut may be suggested for removal only if nothing essential, pinned or needed depends on it."""
+def movable(row, rows, included, *, essentials=False):
+    """A cut can be freed only if it is not pinned and no included cut depends on it.
+
+    Priority 1 stays protected too, unless `essentials` allows sacrificing one.
+    """
     segment = row["segment"]
-    if segment["priority"] == 1 or segment.get("pinned", False):
+    if segment.get("pinned", False) or (not essentials and segment["priority"] == 1):
         return False
     return not any(segment["id"] in other["segment"].get("depends_on", [])
                    for other in rows if other["segment"]["id"] in included)
@@ -3201,14 +3242,14 @@ def suggestions(rows, included, settings, report):
     target = settings["objetivo"]
     if target is None:
         return out
-    limits = band(target)[0]
+    limits = report["banda"]
     kept = [row for row in rows if row["segment"]["id"] in included and not row["empty"]]
     if report["estado"] == "por_encima":
         excess, chosen = report["salida"] - limits[1], []
         for row in sorted(kept, key=lambda item: (-item["segment"]["priority"], -item["output"])):
             if excess <= 0:
                 break
-            if movable(row, included, rows):
+            if movable(row, rows, included):
                 chosen.append(row["segment"]["id"])
                 excess -= row["output"]
         if chosen:
@@ -3216,12 +3257,18 @@ def suggestions(rows, included, settings, report):
                         "texto": f"Pasa a reservas {', '.join(str(x) for x in chosen)} para entrar "
                                  f"en la banda (−{report['salida'] - limits[1]:.0f} s)."})
     if report["estado"] == "por_debajo":
+        # A reserve whose dependency is still excluded (and not among the ones just chosen)
+        # cannot be added on its own: it would trip `dependencia_excluida` once rendered.
         room, chosen = limits[1] - report["salida"], []
         for row in sorted(rows, key=lambda item: (item["segment"]["priority"], item["output"])):
-            if row["segment"]["id"] in included or row["empty"]:
+            segment = row["segment"]
+            if segment["id"] in included or row["empty"]:
+                continue
+            depends = segment.get("depends_on", [])
+            if any(other not in included and other not in chosen for other in depends):
                 continue
             if row["output"] <= room:
-                chosen.append(row["segment"]["id"])
+                chosen.append(segment["id"])
                 room -= row["output"]
         if chosen:
             out.append({"tipo": "anadir", "cortes": chosen,
@@ -3229,20 +3276,27 @@ def suggestions(rows, included, settings, report):
                                  f"{limits[1] - report['salida']:.0f} s más."})
     if report["estado"] == "inviable":
         needed = settings["speed"] * report["esenciales"] / limits[1]
-        if needed <= FAST_SPEED:
+        has_speed = needed <= FAST_SPEED
+        if has_speed:
             value = math.ceil(needed * 20) / 20
             out.append({"tipo": "velocidad", "valor": value,
                         "texto": f"Con velocidad ×{comma(value, 2)} los esenciales entran en la "
                                  "banda."})
         sacrifice, excess = [], report["esenciales"] - limits[1]
-        for row in sorted([item for item in kept if item["segment"]["priority"] == 1],
-                          key=lambda item: -item["output"]):
+        essentials_kept = [item for item in kept if item["segment"]["priority"] == 1]
+        for row in sorted(essentials_kept, key=lambda item: -item["output"]):
             if excess <= 0:
                 break
-            sacrifice.append(row["segment"]["id"])
-            excess -= row["output"]
-        out.append({"tipo": "sacrificar", "cortes": sacrifice,
-                    "texto": f"O renuncia a los esenciales {', '.join(str(x) for x in sacrifice)}."})
+            if movable(row, rows, included, essentials=True):
+                sacrifice.append(row["segment"]["id"])
+                excess -= row["output"]
+        if sacrifice:
+            # "O" only makes sense as a second option: it reads oddly on its own when no
+            # speed change was offered first.
+            prefix = "O renuncia" if has_speed else "Renuncia"
+            out.append({"tipo": "sacrificar", "cortes": sacrifice,
+                        "texto": f"{prefix} a los esenciales "
+                                 f"{', '.join(str(x) for x in sacrifice)}."})
         out.append({"tipo": "porcentaje", "valor": report["minimo"],
                     "texto": f"El porcentaje mínimo razonable es {comma(report['minimo'])} % "
                              f"({report['esenciales']:.0f} s)."})
