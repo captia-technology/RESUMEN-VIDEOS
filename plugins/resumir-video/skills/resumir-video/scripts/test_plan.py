@@ -324,20 +324,35 @@ class EstimacionTest(unittest.TestCase):
 
     def test_the_six_states(self):
         self.assertEqual(self.report(None)["estado"], "sin_objetivo")
-        self.assertEqual(self.report("40%")["estado"], "ok")
+        base = self.report("40%")
+        self.assertEqual(base["estado"], "ok")
         self.assertEqual(self.report("12s")["estado"], "por_encima")
         self.assertEqual(self.report("40s")["estado"], "por_debajo")
         self.assertEqual(self.report("1%")["estado"], "inviable")
         self.assertEqual(self.report("55s")["estado"], "inalcanzable")
+        # Strict edges of section 7.6: at target == top + margin the comparison must stay a
+        # `>`, so equality still falls through to `por_debajo` instead of `inalcanzable`.
+        self.assertEqual(self.report(f"{base['maximo'] + 10}s")["estado"], "por_debajo")
+        # At essentials == target + margin the essentials check must also stay a `>`, so
+        # equality falls through past `inviable` to whatever the full estimate resolves to.
+        self.assertEqual(self.report(f"{base['esenciales'] - 10}s")["estado"], "por_encima")
 
     def test_the_band_of_a_short_target_is_the_ten_second_floor(self):
         self.assertEqual(self.report("12s")["banda"], [2.0, 22.0])
         self.assertEqual(self.report("40s")["banda"], [30.0, 50.0])
+        # The floor also clamps the lower edge at zero instead of going negative.
+        self.assertEqual(self.report("1%")["banda"], [0.0, 10.6])
 
     def test_retention_counts_every_candidate(self):
-        segments = [cut(1, 2.0, 10.0, 1), cut(2, 19.0, 21.0, 2, visual_only=True),
-                    cut(3, 40.0, 47.0, 2, remove_pauses=False)]
-        self.assertAlmostEqual(self.report("40%", segments)["retencion"], 0.950588, places=6)
+        # A reserve (id 4, included=False) and an off-grid visual_only cut (id 2) are both
+        # needed to discriminate `retention`: with every edge on the sampling grid, `length`
+        # equals `source` and the `untouched` branch is a no-op.
+        segments = [cut(1, 2.0, 10.0, 1), cut(2, 19.013, 21.027, 2, visual_only=True),
+                    cut(3, 40.0, 47.0, 2, remove_pauses=False),
+                    cut(4, 50.0, 55.0, 3, included=False)]
+        self.assertAlmostEqual(self.report("40%", segments)["retencion"], 0.920051, places=6)
+        # A global remove_pauses=False keeps every candidate whole: ratio is exactly one.
+        self.assertEqual(self.report("40%", segments, pauses=False)["retencion"], 1.0)
 
     def test_keeping_pauses_and_speed_change_the_output(self):
         self.assertEqual(self.report("40%", pauses=False)["salida"], 28.0)
