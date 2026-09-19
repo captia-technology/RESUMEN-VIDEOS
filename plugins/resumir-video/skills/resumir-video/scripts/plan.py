@@ -139,14 +139,15 @@ def words_of(transcription):
 
 def adjusted(segments, levels, words, threshold):
     """Chronological edge adjustment that never crosses a neighbour."""
+    # `adjust_edges` only ever moves the start earlier and the end later, and a validated draft
+    # (check_draft) already guarantees end <= next start, so a <= b holds after the clamp below
+    # with no further fallback needed.
     rows, floor_ = [], 0.0
     for index, segment in enumerate(segments):
         roof = segments[index + 1]["start"] if index + 1 < len(segments) else float("inf")
         a, b, note = common.adjust_edges(segment["start"], segment["end"], levels, words,
                                          threshold=threshold)
         a, b = max(a, floor_), min(b, roof)
-        if b <= a:
-            a, b = segment["start"], segment["end"]
         rows.append({"segment": segment, "a": a, "b": b, "note": note})
         floor_ = b
     return rows
@@ -175,7 +176,7 @@ def join(one, other):
 
 def fuse(rows, interval):
     """Merge the cuts the adjustment left touching, and note every merge for `changes`."""
-    merged, notes = [], []
+    merged, notes, follows = [], [], {}
     for row in rows:
         # Only neighbours with the same `included` merge: fusing a reserve into an included cut
         # would take the included one out of the render with no trace beyond the note.
@@ -183,13 +184,29 @@ def fuse(rows, interval):
                 and merged[-1]["segment"].get("included", False)
                 == row["segment"].get("included", False)):
             head = merged[-1]
+            kept = min(head["segment"]["id"], row["segment"]["id"])
+            absorbed = max(head["segment"]["id"], row["segment"]["id"])
             notes.append(f"fusion: {head['segment']['id']} + {row['segment']['id']} "
-                         f"-> {min(head['segment']['id'], row['segment']['id'])}")
+                         f"-> {kept}")
             head["segment"] = join(head["segment"], row["segment"])
             head["b"] = max(head["b"], row["b"])
             head["note"] = head["note"] or row["note"]
+            follows[absorbed] = kept
         else:
             merged.append(dict(row))
+    if follows:
+        # A cut that depended on an id now absorbed follows the surviving one instead: left
+        # dangling, it would trip `dependency_warnings` (task 13) into a false `dependencia_excluida`.
+        def settle(id_):
+            while id_ in follows:
+                id_ = follows[id_]
+            return id_
+        for row in merged:
+            depends = row["segment"].get("depends_on")
+            if depends:
+                fixed = sorted({settle(other) for other in depends} - {row["segment"]["id"]})
+                if fixed != depends:
+                    row["segment"] = dict(row["segment"], depends_on=fixed)
     return merged, notes
 
 
@@ -201,9 +218,9 @@ def untouched(row):
 
 def spans_of(row, levels, grid, settings):
     """Frame-aligned spans of one cut once its pauses are removed."""
-    keep = settings["remove_pauses"] and not untouched(row)
+    remove = settings["remove_pauses"] and not untouched(row)
     return common.islands(levels, row["a"], row["b"], interval=grid["interval"],
-                          origin=grid["origin"], remove_pauses=keep,
+                          origin=grid["origin"], remove_pauses=remove,
                           threshold=settings["silence_db"])
 
 
@@ -237,8 +254,9 @@ def measure(rows, levels, grid, settings):
         row["frames"] = common.frames_for(row["length"], rate, speed)
         row["output"] = row["frames"] / rate
         row["samples"] = common.samples_for(row["frames"], rate, sample_rate)
-        row["empty"] = (not row["spans"] or row["frames"] < 1
-                        or row["length"] < speed / rate - 1e-9)
+        # No spans leave L = 0, and N < 1 already implies L < 0.5 * v / F: the length test of
+        # §7.4 alone covers every case, with no need for the two conditions it subsumes.
+        row["empty"] = row["length"] < speed / rate - 1e-9
         row["subcuts"] = split(row["spans"], row["frames"], row["samples"], grid, speed)
         row["source"] = round(row["b"] - row["a"], 6)
     return rows

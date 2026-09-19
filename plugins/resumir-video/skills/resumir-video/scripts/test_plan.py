@@ -220,8 +220,12 @@ class TramosTest(unittest.TestCase):
         self.assertTrue(rows[0]["empty"])
 
     def test_touching_cuts_are_merged_with_the_lowest_id(self):
-        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1), cut(3, 40.0, 47.0, 3)])
-        self.assertEqual([row["segment"]["id"] for row in rows], [1, 3])
+        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1),
+                                    cut(4, 34.0, 35.0, 2), cut(5, 35.04, 36.0, 2),
+                                    cut(3, 40.0, 47.0, 3)])
+        # 4 and 5 sit exactly one frame (the 0.04 s interval) apart: that is not "touching", so
+        # they must stay separate even though every other gap here is either 0 or many seconds.
+        self.assertEqual([row["segment"]["id"] for row in rows], [1, 4, 5, 3])
         self.assertEqual(rows[0]["segment"]["priority"], 1)
         self.assertEqual(rows[0]["segment"]["title"], "Tema 1 · Tema 2")
         self.assertEqual(rows[0]["spans"], [[2.0, 5.08], [5.92, 8.0]])
@@ -234,14 +238,28 @@ class TramosTest(unittest.TestCase):
         self.assertEqual([row["segment"]["included"] for row in rows], [True, False, True])
         self.assertEqual(notes, [])
 
+    def test_dependencies_follow_the_fused_cut(self):
+        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1),
+                                    cut(3, 40.0, 47.0, 3, depends_on=[2])])
+        self.assertEqual([row["segment"]["id"] for row in rows], [1, 3])
+        self.assertEqual(rows[1]["segment"]["depends_on"], [1])
+        self.assertEqual(notes, ["fusion: 1 + 2 -> 1"])
+
     def test_the_adjustment_never_crosses_the_neighbour(self):
         # Measured before fuse: the clamp is what keeps them from overlapping, and the merge of
         # the pair that ends up touching is checked by the test above.
         rows = plan.adjusted([cut(1, 2.0, 11.5, 1), cut(2, 11.6, 18.0, 1)], self.levels, [], -50.0)
         self.assertEqual([(row["a"], row["b"]) for row in rows], [(2.0, 11.6), (11.6, 18.0)])
+        # Without `floor_`, cut 2's start would drift back into the pause behind cut 1's end
+        # (a2 = 6.0): the clamp is what keeps it at the neighbour's edge instead.
+        rows = plan.adjusted([cut(1, 2.0, 6.3, 1), cut(2, 6.4, 10.0, 1)], self.levels, [], -50.0)
+        self.assertEqual([(row["a"], row["b"]) for row in rows], [(2.0, 6.3), (6.3, 10.0)])
 
     def test_more_than_forty_spans_become_subcuts(self):
-        pauses = tuple((1.0 + 1.2 * index, 1.4 + 1.2 * index) for index in range(49))
+        # range(48) still leaves 49 spans (split as [40, 9]), but unlike range(49) its rounding
+        # does not happen to cancel out: recomputing M per subcut would silently disagree with the
+        # whole cut's total, so this case actually discriminates between the two approaches.
+        pauses = tuple((1.0 + 1.2 * index, 1.4 + 1.2 * index) for index in range(48))
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             work = Path(temporary)
             data = work_folder(work, pauses=pauses)
@@ -262,6 +280,8 @@ class TramosTest(unittest.TestCase):
                                 odd["interval"])
             rows = plan.measure(rows, levels, odd, self.settings)
             self.assertGreater(len(rows[0]["subcuts"]), 1)
+            # Pinned to the exact value: recomputing M per subcut would total 1 659 819 instead.
+            self.assertEqual(rows[0]["samples"], 1659818)
             self.assertEqual(sum(part["frames"] for part in rows[0]["subcuts"]), rows[0]["frames"])
             self.assertEqual(sum(part["samples"] for part in rows[0]["subcuts"]),
                              rows[0]["samples"])
