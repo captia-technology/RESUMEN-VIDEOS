@@ -409,6 +409,61 @@ class PublicacionTest(unittest.TestCase):
         self.assertEqual(json.loads(lines[2])["nota"], "registro recortado por exceder 4 KiB")
         self.assertTrue(all(len(line.encode("utf-8")) < common.HISTORY_LIMIT for line in lines))
 
+    def test_the_history_payload_cannot_rewrite_the_moment_or_the_event(self):
+        common.history(self.work, "edit", {"cuando": "1999-01-01T00:00:00+00:00",
+                                           "evento": "falso", "version": 2,
+                                           "tipo": "seleccion"})
+        record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual((record["evento"], record["version"], record["tipo"]),
+                         ("edit", 2, "seleccion"))
+        self.assertNotEqual(record["cuando"], "1999-01-01T00:00:00+00:00")
+        self.assertRegex(record["cuando"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+
+    def test_the_history_gives_up_on_a_payload_it_cannot_walk_without_raising(self):
+        circular = {}
+        circular["yo"] = circular
+        deep = tip = {}
+        for _ in range(3000):
+            tip["dentro"] = {}
+            tip = tip["dentro"]
+        # A RecursionError here would arrive after the version was published, and the work
+        # already done would be reported as a failure.
+        common.history(self.work, "edit", circular)
+        common.history(self.work, "edit", {"detalle": deep})
+        common.history(self.work, "edit", {1: "clave", "dos": "clave"})
+        self.assertFalse((self.work / "historial.jsonl").exists())
+        common.history(self.work, "init", {"version": 1})
+        lines = (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line)["evento"] for line in lines], ["init"])
+
+    def test_a_marker_that_cannot_be_removed_does_not_hide_the_error_of_the_body(self):
+        marker, other = self.work / "montaje.lock", self.work / "otro.lock"
+        with unittest.mock.patch.object(Path, "unlink", side_effect=PermissionError("bloqueado")):
+            with self.assertRaisesRegex(ValueError, "fallo del montaje"):
+                with common.lock(marker):
+                    raise ValueError("fallo del montaje")
+            # Nor does it turn a body that finished into a failure.
+            with common.lock(other):
+                pass
+        # The stale marker is not lost: the next lock reports it with its own message.
+        for stale in (marker, other):
+            with self.subTest(marker=stale.name):
+                with self.assertRaisesRegex(ValueError, "Otro proceso"):
+                    with common.lock(stale):
+                        pass
+
+    def test_published_files_are_written_with_unix_newlines(self):
+        _, path = common.reserve_version(self.work, "seleccion")
+        common.write_reserved(path, '{\n  "version": 1\n}\n')
+        common.history(self.work, "init", {"version": 1})
+        common.history(self.work, "edit", {"version": 2})
+        # Windows would turn every LF into CRLF, which deforms diffs and comparisons of documents.
+        for name in (path.name, "historial.jsonl"):
+            with self.subTest(file=name):
+                data = (self.work / name).read_bytes()
+                self.assertNotIn(b"\r", data)
+                self.assertTrue(data.endswith(b"\n"))
+
     def test_versions_are_reserved_exclusively(self):
         first, first_path = common.reserve_version(self.work, "seleccion")
         second, second_path = common.reserve_version(self.work, "seleccion")

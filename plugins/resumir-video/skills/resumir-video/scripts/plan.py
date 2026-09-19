@@ -697,7 +697,7 @@ def publish_version(work, prefix, body, extra=None):
                 raise ValueError(f"Ya está publicado y no se sobrescribe: {final}")
             # Drafted before the reserve is filled: a Markdown that cannot be written must not
             # leave a plan without its proposal behind.
-            staged.write_text(extra(), encoding="utf-8")
+            staged.write_text(extra(), encoding="utf-8", newline="\n")
         common.write_reserved(path, dumps(body) + "\n")
         if extra is not None:
             common.publish(staged, final)
@@ -786,9 +786,9 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     version, path = publish_version(work, "seleccion", body,
                                     lambda: proposal(body, reserves, total, name))
     common.history(work, "edit" if draft.get("parent") else "init",
-                   {"version": version, "segments": len(cuts), "estado": report["estado"],
-                    "salida": report["salida"], "sha256": body["sha256"],
-                    "peticion": draft.get("request", "")})
+                   {"tipo": "seleccion", "version": version, "segments": len(cuts),
+                    "estado": report["estado"], "salida": report["salida"],
+                    "sha256": body["sha256"], "peticion": draft.get("request", "")})
     print(path)
     return 2 if blocking else 0
 
@@ -801,7 +801,8 @@ def publish_draft(work, body, event, payload, dry_run):
     version, path = common.reserve_version(work, "borrador")
     body["version"] = version
     common.write_reserved(path, dumps(body) + "\n")
-    common.history(work, event, {"version": version, **payload})
+    # `version` numbers a draft here, a selection in the lines of `video_plan`: `tipo` says which.
+    common.history(work, event, {"tipo": "borrador", "version": version, **payload})
     print(path)
     return 0
 

@@ -292,7 +292,9 @@ def lock(path):
     try:
         yield path
     finally:
-        path.unlink(missing_ok=True)
+        # A marker that will not go must not hide the error of the body: the next lock() reports it.
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
 
 
 def shorten(value):
@@ -310,16 +312,18 @@ def history(work, event, payload):
     """One append-only line per call; a diary never undoes the work it was only writing down."""
     moment = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     try:
-        record = shorten({"cuando": moment, "evento": event, **payload})
+        # The payload goes first: it may add fields but never rewrite the moment or the event.
+        record = shorten({**payload, "cuando": moment, "evento": event})
         line = json.dumps(record, ensure_ascii=False, allow_nan=False, sort_keys=True)
         if len(line.encode("utf-8")) >= HISTORY_LIMIT:
             line = json.dumps({"cuando": moment, "evento": event,
                                "nota": "registro recortado por exceder 4 KiB"},
                               ensure_ascii=False, sort_keys=True)
-        with (Path(work) / "historial.jsonl").open("a", encoding="utf-8") as stream:
+        with (Path(work) / "historial.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(line + "\n")
-    except (OSError, TypeError, ValueError):
-        # Losing a line of the log never justifies losing a montage or a version already published.
+    except Exception:
+        # Losing a line of the log never justifies losing a montage or a version already published,
+        # not even to a RecursionError from a payload too deep (or circular) to trim.
         pass
 
 
@@ -345,7 +349,7 @@ def write_reserved(path, text):
     """Fill a version reserved by reserve_version: staged beside it and replaced atomically."""
     path = Path(path)
     staged = path.with_name(path.name + ".parcial")
-    staged.write_text(text, encoding="utf-8")
+    staged.write_text(text, encoding="utf-8", newline="\n")
     os.replace(staged, path)
 
 

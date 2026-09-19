@@ -799,6 +799,12 @@ class VersionesTest(unittest.TestCase):
         self.assertNotIn("| 4 | 0:28", text)
         record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8").strip())
         self.assertEqual((record["evento"], record["version"], record["segments"]), ("init", 1, 5))
+        # `version` names a selection here and a draft in the lines of --import and --revert.
+        self.assertEqual(record["tipo"], "seleccion")
+        # Published as written, with no CRLF that Windows would add to a text-mode write.
+        for name in ("seleccion-v1.json", "propuesta-v1.md", "historial.jsonl"):
+            with self.subTest(file=name):
+                self.assertNotIn(b"\r", (self.work / name).read_bytes())
 
     def test_the_second_version_diffs_and_leaves_the_first_untouched(self):
         draft(self.work, BASE)
@@ -986,6 +992,9 @@ class ImportarTest(unittest.TestCase):
         self.assertEqual(body["source"]["sha256"],
                          common.fingerprint(self.data["source"]["path"])["sha256"])
         self.assertFalse(list(self.work.glob("seleccion-v*.json")))
+        record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8").strip())
+        self.assertEqual((record["evento"], record["tipo"], record["version"]),
+                         ("init", "borrador", 1))
         # The imported draft still needs review and acceptance: `plan --draft` on it publishes a
         # real plan, and `identidad_parcial` rides along into it and into the proposal (section 9).
         code, _ = call(self.work, draft=str(self.work / "borrador-v1.json"))
@@ -1017,6 +1026,10 @@ class ImportarTest(unittest.TestCase):
                          [(2.0, 10.0), (11.0, 18.0)])
         self.assertEqual(body["settings"]["target"], "40%")
         self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
+        lines = (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[-1])
+        self.assertEqual((record["evento"], record["tipo"], record["version"], record["desde"]),
+                         ("edit", "borrador", 1, 1))
         with self.assertRaisesRegex(ValueError, "No existe seleccion-v9.json"):
             call(self.work, revert=9)
 
