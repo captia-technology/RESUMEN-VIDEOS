@@ -2605,8 +2605,11 @@ git commit -m "feat(plan): tramos por corte con bordes, fusion, subcortes y cort
 
 **Interfaces:**
 - Consumes: las filas medidas de la tarea 11 y `common.tolerance`.
-- Produces: `retention(rows) -> float` (ρ sobre **todos** los candidatos, incluidos y reservas, con ρ = 1
-  en `visual_only` y en los que conservan pausas), `band(target) -> ([float, float], float)`,
+- Produces: `retention(rows, settings) -> float` (ρ sobre **todos** los candidatos, incluidos y reservas,
+  con ρ = 1 en `visual_only` y en los que conservan pausas; devuelve 1,0 exacto cuando
+  `settings["remove_pauses"]` es falso, sin ni siquiera recorrer las filas, y en cualquier otro caso
+  acota el cociente a `[1e-6, 1.0]` porque el ajuste a la rejilla puede alargar un tramo hasta casi un
+  fotograma y ρ nunca puede superar 1 por definición), `band(target) -> ([float, float], float)`,
   `state_of(estimate, essentials, target, top) -> str` (uno de `sin_objetivo`, `inalcanzable`,
   `inviable`, `por_encima`, `por_debajo`, `ok`, evaluados **en ese orden**: el primero que se cumple
   gana, y `ok` es el caso que sobrevive a los cinco anteriores; el techo llega ya resuelto en `top`,
@@ -2621,11 +2624,11 @@ git commit -m "feat(plan): tramos por corte con bordes, fusion, subcortes y cort
 def prepared(segments, levels, grid, target=None, speed=1.25, pauses=True, silence_db=-50.0):
     """Measured rows, included ids, settings and estimate: the start of every check below."""
     settings = {"target": target, "objetivo": common.parse_target(target, 60.0), "speed": speed,
-                "remove_pauses": pauses, "silence_db": silence_db}
+               "remove_pauses": pauses, "silence_db": silence_db}
     rows, _ = plan.fuse(plan.adjusted(segments, levels, [], silence_db), grid["interval"])
     rows = plan.measure(rows, levels, grid, settings)
     included = {row["segment"]["id"] for row in rows
-                if row["segment"]["included"] and not row["empty"]}
+               if row["segment"]["included"] and not row["empty"]}
     return rows, included, settings, plan.estimate_of(rows, included, settings, 60.0, grid)
 
 
@@ -2655,20 +2658,35 @@ class EstimacionTest(unittest.TestCase):
 
     def test_the_six_states(self):
         self.assertEqual(self.report(None)["estado"], "sin_objetivo")
-        self.assertEqual(self.report("40%")["estado"], "ok")
+        base = self.report("40%")
+        self.assertEqual(base["estado"], "ok")
         self.assertEqual(self.report("12s")["estado"], "por_encima")
         self.assertEqual(self.report("40s")["estado"], "por_debajo")
         self.assertEqual(self.report("1%")["estado"], "inviable")
         self.assertEqual(self.report("55s")["estado"], "inalcanzable")
+        # Strict edges of section 7.6: at target == top + margin the comparison must stay a
+        # `>`, so equality still falls through to `por_debajo` instead of `inalcanzable`.
+        self.assertEqual(self.report(f"{base['maximo'] + 10}s")["estado"], "por_debajo")
+        # At essentials == target + margin the essentials check must also stay a `>`, so
+        # equality falls through past `inviable` to whatever the full estimate resolves to.
+        self.assertEqual(self.report(f"{base['esenciales'] - 10}s")["estado"], "por_encima")
 
     def test_the_band_of_a_short_target_is_the_ten_second_floor(self):
         self.assertEqual(self.report("12s")["banda"], [2.0, 22.0])
         self.assertEqual(self.report("40s")["banda"], [30.0, 50.0])
+        # The floor also clamps the lower edge at zero instead of going negative.
+        self.assertEqual(self.report("1%")["banda"], [0.0, 10.6])
 
     def test_retention_counts_every_candidate(self):
-        segments = [cut(1, 2.0, 10.0, 1), cut(2, 19.0, 21.0, 2, visual_only=True),
-                    cut(3, 40.0, 47.0, 2, remove_pauses=False)]
-        self.assertAlmostEqual(self.report("40%", segments)["retencion"], 0.950588, places=6)
+        # A reserve (id 4, included=False) and an off-grid visual_only cut (id 2) are both
+        # needed to discriminate `retention`: with every edge on the sampling grid, `length`
+        # equals `source` and the `untouched` branch is a no-op.
+        segments = [cut(1, 2.0, 10.0, 1), cut(2, 19.013, 21.027, 2, visual_only=True),
+                    cut(3, 40.0, 47.0, 2, remove_pauses=False),
+                    cut(4, 50.0, 55.0, 3, included=False)]
+        self.assertAlmostEqual(self.report("40%", segments)["retencion"], 0.920051, places=6)
+        # A global remove_pauses=False keeps every candidate whole: ratio is exactly one.
+        self.assertEqual(self.report("40%", segments, pauses=False)["retencion"], 1.0)
 
     def test_keeping_pauses_and_speed_change_the_output(self):
         self.assertEqual(self.report("40%", pauses=False)["salida"], 28.0)
@@ -2686,11 +2704,18 @@ Esperado: 5 errores `AttributeError: module 'plan' has no attribute 'estimate_of
 - [ ] **Paso 3: implementación mínima**
 
 ```python
-def retention(rows):
+def retention(rows, settings):
     """Audio kept after removing pauses, over every candidate: included cuts and reserves."""
+    if not settings["remove_pauses"]:
+        # Nothing is ever removed when pauses stay in globally: no frame-alignment overshoot to
+        # correct for, so the ratio is exactly whole regardless of what the rows measured.
+        return 1.0
     source = sum(row["source"] for row in rows)
     kept = sum(row["source"] if untouched(row) else row["length"] for row in rows)
-    return 1.0 if source <= 0 else max(1e-6, round(kept / source, 6))
+    # max(1e-6, ...) keeps `presupuesto` finite instead of dividing by zero when every candidate
+    # is empty; min(1.0, ...) caps the frame-alignment overshoot that can push the raw ratio
+    # above one when an edge falls off the sampling grid.
+    return 1.0 if source <= 0 else max(1e-6, min(1.0, round(kept / source, 6)))
 
 
 def band(target):
@@ -2721,16 +2746,19 @@ def estimate_of(rows, included, settings, total, grid):
     output = sum(row["frames"] for row in kept) / grid["fps"]
     essentials = sum(row["frames"] for row in kept
                      if row["segment"]["priority"] == 1) / grid["fps"]
-    share = retention(rows)
+    share = retention(rows, settings)
     top = total * share / settings["speed"]
     target = settings["objetivo"]
-    report = {"cortes": len(kept), "origen": round(sum(row["source"] for row in kept), 3),
-              "tras_pausas": round(sum(row["length"] for row in kept), 3),
+    report = {"cortes": len(kept),
+              "origen": round(sum((row["source"] for row in kept), 0.0), 3),
+              "tras_pausas": round(sum((row["length"] for row in kept), 0.0), 3),
               "salida": round(output, 3), "margen": CODEC_MARGIN,
               "porcentaje": round(100 * output / total, 2), "objetivo": target,
-              "banda": [round(value, 3) for value in band(target)[0]] if target else None,
+              "banda": ([round(value, 3) for value in band(target)[0]]
+                        if target is not None else None),
               "retencion": share, "esenciales": round(essentials, 3),
-              "presupuesto": round(target * settings["speed"] / share, 3) if target else None,
+              "presupuesto": (round(target * settings["speed"] / share, 3)
+                              if target is not None else None),
               "minimo": round(100 * essentials / total, 2), "maximo": round(top, 3)}
     report["estado"] = state_of(output, essentials, target, top)
     return report
