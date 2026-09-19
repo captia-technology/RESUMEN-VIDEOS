@@ -375,7 +375,8 @@ class AvisosTest(unittest.TestCase):
         rows, included, settings, report = prepared(segments, self.levels, self.grid, target=target,
                                                     speed=speed, silence_db=silence_db)
         found = plan.global_warnings(report, settings, 60.0, has_words)
-        found += plan.dependency_warnings(rows, included) + plan.topic_warnings(head, included)
+        found += (plan.dependency_warnings(rows, included)
+                 + plan.topic_warnings(head, rows, included))
         for row in rows:
             if row["segment"].get("included", False) and (row["segment"]["id"] in included
                                                           or row["empty"]):
@@ -386,8 +387,9 @@ class AvisosTest(unittest.TestCase):
         return [(item["codigo"], item["corte"], item["bloquea"]) for item in found]
 
     def test_an_empty_cut_blocks_and_hides_the_other_warnings(self):
-        self.assertIn(("corte_vacio", 2, True),
-                      self.codes([cut(1, 2.0, 10.0, 1), cut(2, 20.1, 21.4, 2)]))
+        found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 20.1, 21.4, 2)])
+        # Not just "corte_vacio" is present: nothing else about cut 2 survives alongside it.
+        self.assertEqual([item for item in found if item[1] == 2], [("corte_vacio", 2, True)])
 
     def test_dependencies_and_topics_block(self):
         found = self.codes([cut(1, 2.0, 10.0, 1, depends_on=[2]),
@@ -397,6 +399,20 @@ class AvisosTest(unittest.TestCase):
                            topics=[{"nombre": "Normativa", "cortes": [2], "imprescindible": True}])
         self.assertIn(("tema_sin_cubrir", None, True), found)
 
+    def test_topics_follow_the_fused_cut(self):
+        # 1 (2.0-7.0) and 2 (7.0-10.0) touch and fuse into 1: a topic that only cites 2 still
+        # counts it covered, since 2 rides inside 1's cut in the render.
+        found = self.codes([cut(1, 2.0, 7.0, 1), cut(2, 7.0, 10.0, 1)],
+                           topics=[{"nombre": "Normativa", "cortes": [2], "imprescindible": True}])
+        self.assertNotIn(("tema_sin_cubrir", None, True), found)
+        # The opposite: two reserves (19.0-24.0 and 24.0-26.0) fuse together, but neither
+        # survives into `included`, so a topic that cites only the absorbed reserve still has
+        # nothing to show for it.
+        found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 19.0, 24.0, 2, included=False),
+                            cut(3, 24.0, 26.0, 2, included=False)],
+                           topics=[{"nombre": "Normativa", "cortes": [3], "imprescindible": True}])
+        self.assertIn(("tema_sin_cubrir", None, True), found)
+
     def test_short_visual_and_fast_warnings(self):
         found = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 19.0, 21.0, 2, visual_only=True),
                             cut(3, 40.0, 47.0, 2, remove_pauses=False)], speed=1.75)
@@ -404,6 +420,15 @@ class AvisosTest(unittest.TestCase):
         self.assertIn(("visual_breve", 2, False), found)
         self.assertIn(("corte_breve", 1, False), self.codes([cut(1, 11.5, 13.5, 2),
                                                              cut(2, 40.0, 47.0, 1)]))
+        # Both pause warnings are skipped by the cut's own mark, even over a loud, pause-free
+        # background that would otherwise read as an undetected silence: a visual_only cut
+        # (13.5-18.0) and one with remove_pauses=False (31.0-38.0), neither touching a real pause.
+        guarded = self.codes([cut(1, 2.0, 10.0, 1), cut(2, 13.5, 18.0, 2, visual_only=True),
+                              cut(3, 31.0, 38.0, 2, remove_pauses=False)])
+        for key in (2, 3):
+            marked = {item[0] for item in guarded if item[1] == key}
+            self.assertNotIn("pausas_excesivas", marked)
+            self.assertNotIn("sin_pausas_detectadas", marked)
 
     def test_pauses_and_background_warnings(self):
         found = self.codes([cut(1, 11.8, 13.0, 2), cut(2, 40.0, 47.0, 1)])
@@ -446,6 +471,8 @@ class AvisosTest(unittest.TestCase):
     def test_the_tenth_percentile_of_a_quiet_cut(self):
         self.assertEqual(plan.percentile(self.levels, 20.0, 21.5), common.ENERGY_FLOOR)
         self.assertGreater(plan.percentile(self.levels, 2.0, 5.0), -50.0 - plan.QUIET_MARGIN)
+        # An empty window (a == b) has nothing to sort: the floor is the fallback, not a crash.
+        self.assertEqual(plan.percentile(self.levels, 5.0, 5.0), common.ENERGY_FLOOR)
 
 
 if __name__ == "__main__":

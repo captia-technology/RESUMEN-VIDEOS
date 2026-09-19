@@ -185,15 +185,18 @@ def fuse(rows, interval):
                 == row["segment"].get("included", False)):
             head = merged[-1]
             kept = min(head["segment"]["id"], row["segment"]["id"])
-            absorbed = max(head["segment"]["id"], row["segment"]["id"])
+            discarded = max(head["segment"]["id"], row["segment"]["id"])
             notes.append(f"fusion: {head['segment']['id']} + {row['segment']['id']} "
                          f"-> {kept}")
             head["segment"] = join(head["segment"], row["segment"])
             head["b"] = max(head["b"], row["b"])
             head["note"] = head["note"] or row["note"]
-            follows[absorbed] = kept
+            # `absorbed` travels with the surviving row so `topic_warnings` can still credit a
+            # topic whose cited cut only rides inside another id's cut after the merge.
+            head["absorbed"].append(discarded)
+            follows[discarded] = kept
         else:
-            merged.append(dict(row))
+            merged.append(dict(row, absorbed=[]))
     if follows:
         # A cut that depended on an id now absorbed follows the surviving one instead: left
         # dangling, it would trip `dependency_warnings` (task 13) into a false `dependencia_excluida`.
@@ -350,7 +353,9 @@ def cut_warnings(row, levels, settings):
                                     "salida; puede quedar descontextualizado.", cut=key))
     # Both pause warnings only make sense where pauses are actually removed: a cut that keeps them,
     # by its own mark or by the job's, has nothing to measure.
-    if settings["remove_pauses"] and not untouched(row) and row["source"] > 0:
+    # `source` is always positive here: `check_draft` requires start < end, and neither
+    # `adjusted` nor `fuse` ever shrink a cut to zero width.
+    if settings["remove_pauses"] and not untouched(row):
         removed = 1 - row["length"] / row["source"]
         if removed > PAUSE_SHARE:
             found.append(common.warning("pausas_excesivas", f"En el corte {key} se elimina el "
@@ -400,11 +405,17 @@ def dependency_warnings(rows, included):
     return found
 
 
-def topic_warnings(draft, included):
+def topic_warnings(draft, rows, included):
     """A topic the inventory marked essential must have at least one included cut."""
+    # A cut absorbed by an included one still rides inside it in the render, so it counts as
+    # covered even though its own id never reaches `included`.
+    covered = set(included)
+    for row in rows:
+        if row["segment"]["id"] in included:
+            covered.update(row.get("absorbed", []))
     found = []
     for topic in draft.get("topics", []):
-        if topic.get("imprescindible") and not set(topic.get("cortes", [])) & included:
+        if topic.get("imprescindible") and not set(topic.get("cortes", [])) & covered:
             found.append(common.warning("tema_sin_cubrir", f"El tema «{topic['nombre']}» se marcó "
                                         "imprescindible y no tiene ningún corte incluido."))
     return found
