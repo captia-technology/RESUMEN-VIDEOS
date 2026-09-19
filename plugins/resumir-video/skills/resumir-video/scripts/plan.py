@@ -632,9 +632,9 @@ def proposal(plan, reserves, total, name):
         head.append(f"| {item['numero']} | {clock(item['start'])}–{clock(item['end'])} "
                     f"| {clock(item['salida'][0])}–{clock(item['salida'][1])} "
                     f"({length(item):.0f} s) | {item['priority']} | {cell(item['phrase'])} |")
-    head += ["", "## Reservas", "", "| id | Origen | Qué aportaría |", "| --- | --- | --- |"]
+    head += ["", "## Reservas", "", "| # | Origen | Qué aportaría |", "| --- | --- | --- |"]
     for item in reserves:
-        head.append(f"| {item['id']} | {clock(item['start'])}–{clock(item['end'])} | "
+        head.append(f"| {item['numero']} | {clock(item['start'])}–{clock(item['end'])} | "
                     f"{cell(item['reason'])} |")
     head += ["", "## Exclusiones deliberadas", "", "| Qué | Por qué |", "| --- | --- |"]
     for item in plan["excluidos"]:
@@ -653,6 +653,7 @@ def proposal(plan, reserves, total, name):
              f"0:00 ← cada carácter son {comma(total / BAR)} s → {clock(total)}", "",
              "## Cómo responder", "",
              "- «acepta» o «móntalo» para montar esta versión.",
+             "- El número es el de la columna # de esta propuesta, común a cortes y reservas.",
              "- «quita el 7 y el 9», «añade el 6», «alarga el 3 diez segundos».",
              "- «añade la parte donde habla de ATEX», «parte el 4», «une 4 y 5».",
              "- «súbelo al 15 %», «sin acelerar», «no quites pausas en el 12».",
@@ -746,8 +747,10 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     for row in [item for item in rows if item["segment"]["id"] in included]:
         cuts.append(cut_row(row, len(cuts) + 1, place, grid))
         place += row["frames"] / grid["fps"]
-    reserves = [cut_row(row, 0, 0.0, grid) for row in rows
-                if row["segment"]["id"] not in included]
+    left = [row for row in rows if row["segment"]["id"] not in included]
+    # One numbering for the whole proposal (section 9): the reserves go on where the cuts stop.
+    reserves = [cut_row(row, len(cuts) + number, 0.0, grid)
+                for number, row in enumerate(left, start=1)]
     warnings = global_warnings(report, settings, total, bool(words))
     warnings += dependency_warnings(rows, included) + topic_warnings(draft, rows, included)
     for row in rows:

@@ -664,7 +664,8 @@ class PropuestaTest(unittest.TestCase):
                 "alternativas": [{"velocidad": 1.0, "pausas": True, "salida": 7.16,
                                   "porcentaje": 11.93, "estado": "ok"}],
                 "sugerencias": [], "recorrido": "#" * plan.BAR}
-        reserves = [{"id": 4, "start": 28.0, "end": 33.0, "reason": "Ejemplo alternativo"}]
+        reserves = [{"numero": 6, "id": 4, "start": 28.0, "end": 33.0,
+                     "reason": "Ejemplo alternativo"}]
         text = plan.proposal(body, reserves, 60.0, "medio.mp4")
         for heading in ("# Propuesta v1", "## Cambios", "## Avisos", "## Cortes", "## Reservas",
                         "## Exclusiones deliberadas", "## Alternativas", "## Sugerencias",
@@ -675,7 +676,10 @@ class PropuestaTest(unittest.TestCase):
                       "(9,5 %) · estado **ok**", text)
         self.assertIn("1 cortes · 0:08 → sin pausas 0:07 → ×1,25 → 0:05", text)
         self.assertIn("| 1 | 0:02–0:10 | 0:00–0:05 (6 s) | 1 | Frase 1 |", text)
-        self.assertIn("| 4 | 0:28–0:33 | Ejemplo alternativo |", text)
+        self.assertIn("| # | Origen | Qué aportaría |", text)
+        self.assertIn("| 6 | 0:28–0:33 | Ejemplo alternativo |", text)
+        self.assertNotIn("| 4 | 0:28", text)
+        self.assertIn("común a cortes y reservas", text)
         self.assertIn("| Saludos | Sin contenido |", text)
         self.assertIn("| ×1,00 | sí | 0:07 | 11,9 % | ok |", text)
         self.assertIn("- ninguna: el plan está dentro de la banda", text)
@@ -777,6 +781,9 @@ class VersionesTest(unittest.TestCase):
         self.assertEqual(body["sha256"], common.plan_sha256(body))
         self.assertEqual([item["id"] for item in body["segments"]], [1, 2, 3, 5, 6])
         self.assertEqual([item["id"] for item in body["reserves"]], [4])
+        # One numbering for the proposal: the reserves go on where the cuts stop.
+        self.assertEqual([item["numero"] for item in body["segments"]], [1, 2, 3, 4, 5])
+        self.assertEqual([item["numero"] for item in body["reserves"]], [6])
         self.assertNotIn("fingerprint", body)
         self.assertEqual(set(body["source"]), {"path", "size", "mtime_ns", "sha256"})
         self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
@@ -785,7 +792,11 @@ class VersionesTest(unittest.TestCase):
         self.assertEqual(body["timeline"], self.data["timeline"])
         self.assertEqual(body["estimate"]["salida"], 24.36)
         self.assertEqual(body["changes"], ["propuesta inicial"])
-        self.assertIn("# Propuesta v1", (self.work / "propuesta-v1.md").read_text(encoding="utf-8"))
+        text = (self.work / "propuesta-v1.md").read_text(encoding="utf-8")
+        self.assertIn("# Propuesta v1", text)
+        # The table of reserves shows the proposal's number (6), not the draft's id (4).
+        self.assertIn("| 6 | 0:28–0:33 | Motivo |", text)
+        self.assertNotIn("| 4 | 0:28", text)
         record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8").strip())
         self.assertEqual((record["evento"], record["version"], record["segments"]), ("init", 1, 5))
 
@@ -1008,6 +1019,21 @@ class ImportarTest(unittest.TestCase):
         self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
         with self.assertRaisesRegex(ValueError, "No existe seleccion-v9.json"):
             call(self.work, revert=9)
+
+    def test_reverting_does_not_depend_on_the_proposal_numbers(self):
+        draft(self.work, BASE)
+        call(self.work)
+        path = self.work / "seleccion-v1.json"
+        published = json.loads(path.read_text(encoding="utf-8"))
+        for item in published["segments"] + published["reserves"]:
+            del item["numero"]
+        path.write_text(json.dumps(published, ensure_ascii=False), encoding="utf-8")
+        code, _ = call(self.work, revert=1)
+        self.assertEqual(code, 0)
+        body = json.loads((self.work / "borrador-v1.json").read_text(encoding="utf-8"))
+        self.assertEqual([(item["id"], item["included"]) for item in body["segments"]],
+                         [(1, True), (2, True), (3, True), (4, False), (5, True), (6, True)])
+        self.assertTrue(all("numero" not in item for item in body["segments"]))
 
     def test_settings_options_do_not_apply_to_import_or_revert(self):
         code, _ = call(self.work, import_from=str(self.old_plan()), target="10%")
