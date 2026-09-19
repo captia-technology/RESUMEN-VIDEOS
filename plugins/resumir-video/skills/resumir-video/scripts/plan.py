@@ -419,3 +419,97 @@ def topic_warnings(draft, rows, included):
             found.append(common.warning("tema_sin_cubrir", f"El tema «{topic['nombre']}» se marcó "
                                         "imprescindible y no tiene ningún corte incluido."))
     return found
+
+
+def copies(rows):
+    """Fresh rows for a what-if run: `measure` writes on the row, not on the segment."""
+    return [{"segment": row["segment"], "a": row["a"], "b": row["b"], "note": row["note"]}
+            for row in rows]
+
+
+def alternatives(rows, levels, grid, settings, included, total):
+    """The four combinations of speed and pauses, each with its estimate and state."""
+    speeds = sorted({1.0, settings["speed"]})
+    if len(speeds) == 1:
+        speeds = [1.0, 1.25]
+    out = []
+    for speed in speeds:
+        for pauses in (True, False):
+            variant = dict(settings, speed=speed, remove_pauses=pauses)
+            report = estimate_of(measure(copies(rows), levels, grid, variant),
+                                 included, variant, total, grid)
+            out.append({"velocidad": speed, "pausas": pauses, "salida": report["salida"],
+                        "porcentaje": report["porcentaje"], "estado": report["estado"]})
+    return out
+
+
+def movable(row, included, rows):
+    """A cut may be suggested for removal only if nothing essential, pinned or needed depends on it."""
+    segment = row["segment"]
+    if segment["priority"] == 1 or segment.get("pinned", False):
+        return False
+    return not any(segment["id"] in other["segment"].get("depends_on", [])
+                   for other in rows if other["segment"]["id"] in included)
+
+
+def suggestions(rows, included, settings, report):
+    """Never applied alone: they respect priority 1, pinned cuts and dependencies."""
+    out = []
+    target = settings["objetivo"]
+    if target is None:
+        return out
+    limits = band(target)[0]
+    kept = [row for row in rows if row["segment"]["id"] in included and not row["empty"]]
+    if report["estado"] == "por_encima":
+        excess, chosen = report["salida"] - limits[1], []
+        for row in sorted(kept, key=lambda item: (-item["segment"]["priority"], -item["output"])):
+            if excess <= 0:
+                break
+            if movable(row, included, rows):
+                chosen.append(row["segment"]["id"])
+                excess -= row["output"]
+        if chosen:
+            out.append({"tipo": "quitar", "cortes": chosen,
+                        "texto": f"Pasa a reservas {', '.join(str(x) for x in chosen)} para entrar "
+                                 f"en la banda (−{report['salida'] - limits[1]:.0f} s)."})
+    if report["estado"] == "por_debajo":
+        room, chosen = limits[1] - report["salida"], []
+        for row in sorted(rows, key=lambda item: (item["segment"]["priority"], item["output"])):
+            if row["segment"]["id"] in included or row["empty"]:
+                continue
+            if row["output"] <= room:
+                chosen.append(row["segment"]["id"])
+                room -= row["output"]
+        if chosen:
+            out.append({"tipo": "anadir", "cortes": chosen,
+                        "texto": f"Recupera de reservas {', '.join(str(x) for x in chosen)}: caben "
+                                 f"{limits[1] - report['salida']:.0f} s más."})
+    if report["estado"] == "inviable":
+        needed = settings["speed"] * report["esenciales"] / limits[1]
+        if needed <= FAST_SPEED:
+            value = math.ceil(needed * 20) / 20
+            out.append({"tipo": "velocidad", "valor": value,
+                        "texto": f"Con velocidad ×{comma(value, 2)} los esenciales entran en la "
+                                 "banda."})
+        sacrifice, excess = [], report["esenciales"] - limits[1]
+        for row in sorted([item for item in kept if item["segment"]["priority"] == 1],
+                          key=lambda item: -item["output"]):
+            if excess <= 0:
+                break
+            sacrifice.append(row["segment"]["id"])
+            excess -= row["output"]
+        out.append({"tipo": "sacrificar", "cortes": sacrifice,
+                    "texto": f"O renuncia a los esenciales {', '.join(str(x) for x in sacrifice)}."})
+        out.append({"tipo": "porcentaje", "valor": report["minimo"],
+                    "texto": f"El porcentaje mínimo razonable es {comma(report['minimo'])} % "
+                             f"({report['esenciales']:.0f} s)."})
+    if report["estado"] == "inalcanzable":
+        out.append({"tipo": "objetivo", "valor": report["maximo"],
+                    "texto": f"El objetivo máximo cumplible es {report['maximo']:.0f} s; no se "
+                             "alarga el resumen con material prescindible."})
+    return out
+
+
+def comma(value, digits=1):
+    """Spanish decimal notation, used by the suggestions and by the proposal."""
+    return f"{value:.{digits}f}".replace(".", ",")

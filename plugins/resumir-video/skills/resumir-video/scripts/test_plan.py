@@ -475,5 +475,73 @@ class AvisosTest(unittest.TestCase):
         self.assertEqual(plan.percentile(self.levels, 5.0, 5.0), common.ENERGY_FLOOR)
 
 
+class AlternativasTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        self.data = work_folder(self.work)
+        self.grid = self.data["timeline"]
+        self.levels = common.energy(self.work / "audio.wav")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def prepared(self, target, segments=None, speed=1.25):
+        """The module helper of task 12, with the fixtures of this class."""
+        return prepared(BASE if segments is None else segments, self.levels, self.grid,
+                        target=target, speed=speed)
+
+    def test_the_four_combinations_of_speed_and_pauses(self):
+        rows, included, settings, _ = self.prepared("40%")
+        self.assertEqual(plan.alternatives(rows, self.levels, self.grid, settings, included, 60.0),
+                         [{"velocidad": 1.0, "pausas": True, "salida": 30.48,
+                           "porcentaje": 50.8, "estado": "ok"},
+                          {"velocidad": 1.0, "pausas": False, "salida": 35.0,
+                           "porcentaje": 58.33, "estado": "por_encima"},
+                          {"velocidad": 1.25, "pausas": True, "salida": 24.36,
+                           "porcentaje": 40.6, "estado": "ok"},
+                          {"velocidad": 1.25, "pausas": False, "salida": 28.0,
+                           "porcentaje": 46.67, "estado": "ok"}])
+
+    def test_a_speed_of_one_still_offers_four(self):
+        rows, included, settings, _ = self.prepared("40%", speed=1.0)
+        rows_out = plan.alternatives(rows, self.levels, self.grid, settings, included, 60.0)
+        self.assertEqual([(item["velocidad"], item["pausas"]) for item in rows_out],
+                         [(1.0, True), (1.0, False), (1.25, True), (1.25, False)])
+
+    def test_alternatives_do_not_disturb_the_measured_rows(self):
+        rows, included, settings, report = self.prepared("40%")
+        plan.alternatives(rows, self.levels, self.grid, settings, included, 60.0)
+        self.assertEqual(sum(row["frames"] for row in rows if row["segment"]["id"] in included),
+                         609)
+
+    def test_suggestions_for_each_state(self):
+        for target, tipo in (("12s", "quitar"), ("40s", "anadir"), ("55s", "objetivo")):
+            with self.subTest(target=target):
+                rows, included, settings, report = self.prepared(target)
+                hints = plan.suggestions(rows, included, settings, report)
+                self.assertEqual([hint["tipo"] for hint in hints], [tipo])
+        rows, included, settings, report = self.prepared("1%")
+        hints = plan.suggestions(rows, included, settings, report)
+        self.assertEqual([hint["tipo"] for hint in hints],
+                         ["velocidad", "sacrificar", "porcentaje"])
+        self.assertEqual(hints[0]["valor"], 1.3)
+        self.assertEqual(hints[1]["cortes"], [1])
+        self.assertEqual(hints[2]["valor"], 18.0)
+        rows, included, settings, report = self.prepared("40%")
+        self.assertEqual(plan.suggestions(rows, included, settings, report), [])
+        rows, included, settings, report = self.prepared(None)
+        self.assertEqual(plan.suggestions(rows, included, settings, report), [])
+
+    def test_a_suggestion_never_touches_essentials_pinned_or_dependencies(self):
+        segments = [cut(1, 2.0, 10.0, 1), cut(2, 11.0, 18.0, 3, pinned=True),
+                    cut(3, 19.0, 26.0, 3), cut(4, 40.0, 47.0, 3, depends_on=[5]),
+                    cut(5, 49.0, 55.0, 3)]
+        rows, included, settings, report = self.prepared("12s", segments)
+        hints = plan.suggestions(rows, included, settings, report)
+        # 1 is essential, 2 is pinned and 5 is needed by 4: only 4 can be suggested.
+        self.assertEqual(hints[0]["cortes"], [4])
+
+
 if __name__ == "__main__":
     unittest.main()
