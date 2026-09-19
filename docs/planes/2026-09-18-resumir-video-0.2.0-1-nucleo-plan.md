@@ -186,8 +186,8 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **98** al terminar el plan (37 en `test_common.py`, 12 en
-  `test_video.py` y 49 en `test_plan.py`). Las **23** de `tests/` no cambian.
+  skill **crece**: de las 15 de hoy se pasa a **99** al terminar el plan (37 en `test_common.py`, 12 en
+  `test_video.py` y 50 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
 
@@ -2326,6 +2326,9 @@ git commit -m "feat(plan): leer y validar el borrador del agente" \
   pierde muestras siempre que `N/F·SR` no sea entero.
 - `fuse` solo funde vecinos que comparten `included`: una reserva pegada a un corte incluido no puede
   arrastrarlo fuera del montaje.
+- `fuse` remapea las `depends_on` de todas las filas que apunten a un id absorbido hacia el id
+  conservado (siguiendo cadenas, sin duplicados ni autodependencias), porque de otro modo
+  `dependency_warnings` (tarea 13) emitiría un `dependencia_excluida` falso.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -2370,8 +2373,12 @@ class TramosTest(unittest.TestCase):
         self.assertTrue(rows[0]["empty"])
 
     def test_touching_cuts_are_merged_with_the_lowest_id(self):
-        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1), cut(3, 40.0, 47.0, 3)])
-        self.assertEqual([row["segment"]["id"] for row in rows], [1, 3])
+        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1),
+                                    cut(4, 34.0, 35.0, 2), cut(5, 35.04, 36.0, 2),
+                                    cut(3, 40.0, 47.0, 3)])
+        # 4 and 5 sit exactly one frame (the 0.04 s interval) apart: that is not "touching", so
+        # they must stay separate even though every other gap here is either 0 or many seconds.
+        self.assertEqual([row["segment"]["id"] for row in rows], [1, 4, 5, 3])
         self.assertEqual(rows[0]["segment"]["priority"], 1)
         self.assertEqual(rows[0]["segment"]["title"], "Tema 1 · Tema 2")
         self.assertEqual(rows[0]["spans"], [[2.0, 5.08], [5.92, 8.0]])
@@ -2384,14 +2391,28 @@ class TramosTest(unittest.TestCase):
         self.assertEqual([row["segment"]["included"] for row in rows], [True, False, True])
         self.assertEqual(notes, [])
 
+    def test_dependencies_follow_the_fused_cut(self):
+        rows, notes = self.measure([cut(1, 2.0, 5.0, 2), cut(2, 5.0, 8.0, 1),
+                                    cut(3, 40.0, 47.0, 3, depends_on=[2])])
+        self.assertEqual([row["segment"]["id"] for row in rows], [1, 3])
+        self.assertEqual(rows[1]["segment"]["depends_on"], [1])
+        self.assertEqual(notes, ["fusion: 1 + 2 -> 1"])
+
     def test_the_adjustment_never_crosses_the_neighbour(self):
         # Measured before fuse: the clamp is what keeps them from overlapping, and the merge of
         # the pair that ends up touching is checked by the test above.
         rows = plan.adjusted([cut(1, 2.0, 11.5, 1), cut(2, 11.6, 18.0, 1)], self.levels, [], -50.0)
         self.assertEqual([(row["a"], row["b"]) for row in rows], [(2.0, 11.6), (11.6, 18.0)])
+        # Without `floor_`, cut 2's start would drift back into the pause behind cut 1's end
+        # (a2 = 6.0): the clamp is what keeps it at the neighbour's edge instead.
+        rows = plan.adjusted([cut(1, 2.0, 6.3, 1), cut(2, 6.4, 10.0, 1)], self.levels, [], -50.0)
+        self.assertEqual([(row["a"], row["b"]) for row in rows], [(2.0, 6.3), (6.3, 10.0)])
 
     def test_more_than_forty_spans_become_subcuts(self):
-        pauses = tuple((1.0 + 1.2 * index, 1.4 + 1.2 * index) for index in range(49))
+        # range(48) still leaves 49 spans (split as [40, 9]), but unlike range(49) its rounding
+        # does not happen to cancel out: recomputing M per subcut would silently disagree with the
+        # whole cut's total, so this case actually discriminates between the two approaches.
+        pauses = tuple((1.0 + 1.2 * index, 1.4 + 1.2 * index) for index in range(48))
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             work = Path(temporary)
             data = work_folder(work, pauses=pauses)
@@ -2412,6 +2433,8 @@ class TramosTest(unittest.TestCase):
                                 odd["interval"])
             rows = plan.measure(rows, levels, odd, self.settings)
             self.assertGreater(len(rows[0]["subcuts"]), 1)
+            # Pinned to the exact value: recomputing M per subcut would total 1 659 819 instead.
+            self.assertEqual(rows[0]["samples"], 1659818)
             self.assertEqual(sum(part["frames"] for part in rows[0]["subcuts"]), rows[0]["frames"])
             self.assertEqual(sum(part["samples"] for part in rows[0]["subcuts"]),
                              rows[0]["samples"])
@@ -2423,7 +2446,7 @@ class TramosTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Tramos -v
 ```
 
-Esperado: 7 errores `AttributeError: module 'plan' has no attribute 'fuse'`.
+Esperado: 8 errores `AttributeError: module 'plan' has no attribute 'fuse'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -2432,14 +2455,15 @@ Añade a `plan.py`:
 ```python
 def adjusted(segments, levels, words, threshold):
     """Chronological edge adjustment that never crosses a neighbour."""
+    # `adjust_edges` only ever moves the start earlier and the end later, and a validated draft
+    # (check_draft) already guarantees end <= next start, so a <= b holds after the clamp below
+    # with no further fallback needed.
     rows, floor_ = [], 0.0
     for index, segment in enumerate(segments):
         roof = segments[index + 1]["start"] if index + 1 < len(segments) else float("inf")
         a, b, note = common.adjust_edges(segment["start"], segment["end"], levels, words,
                                          threshold=threshold)
         a, b = max(a, floor_), min(b, roof)
-        if b <= a:
-            a, b = segment["start"], segment["end"]
         rows.append({"segment": segment, "a": a, "b": b, "note": note})
         floor_ = b
     return rows
@@ -2468,7 +2492,7 @@ def join(one, other):
 
 def fuse(rows, interval):
     """Merge the cuts the adjustment left touching, and note every merge for `changes`."""
-    merged, notes = [], []
+    merged, notes, follows = [], [], {}
     for row in rows:
         # Only neighbours with the same `included` merge: fusing a reserve into an included cut
         # would take the included one out of the render with no trace beyond the note.
@@ -2476,13 +2500,29 @@ def fuse(rows, interval):
                 and merged[-1]["segment"].get("included", False)
                 == row["segment"].get("included", False)):
             head = merged[-1]
+            kept = min(head["segment"]["id"], row["segment"]["id"])
+            absorbed = max(head["segment"]["id"], row["segment"]["id"])
             notes.append(f"fusion: {head['segment']['id']} + {row['segment']['id']} "
-                         f"-> {min(head['segment']['id'], row['segment']['id'])}")
+                         f"-> {kept}")
             head["segment"] = join(head["segment"], row["segment"])
             head["b"] = max(head["b"], row["b"])
             head["note"] = head["note"] or row["note"]
+            follows[absorbed] = kept
         else:
             merged.append(dict(row))
+    if follows:
+        # A cut that depended on an id now absorbed follows the surviving one instead: left
+        # dangling, it would trip `dependency_warnings` (task 13) into a false `dependencia_excluida`.
+        def settle(id_):
+            while id_ in follows:
+                id_ = follows[id_]
+            return id_
+        for row in merged:
+            depends = row["segment"].get("depends_on")
+            if depends:
+                fixed = sorted({settle(other) for other in depends} - {row["segment"]["id"]})
+                if fixed != depends:
+                    row["segment"] = dict(row["segment"], depends_on=fixed)
     return merged, notes
 
 
@@ -2494,9 +2534,9 @@ def untouched(row):
 
 def spans_of(row, levels, grid, settings):
     """Frame-aligned spans of one cut once its pauses are removed."""
-    keep = settings["remove_pauses"] and not untouched(row)
+    remove = settings["remove_pauses"] and not untouched(row)
     return common.islands(levels, row["a"], row["b"], interval=grid["interval"],
-                          origin=grid["origin"], remove_pauses=keep,
+                          origin=grid["origin"], remove_pauses=remove,
                           threshold=settings["silence_db"])
 
 
@@ -2530,8 +2570,9 @@ def measure(rows, levels, grid, settings):
         row["frames"] = common.frames_for(row["length"], rate, speed)
         row["output"] = row["frames"] / rate
         row["samples"] = common.samples_for(row["frames"], rate, sample_rate)
-        row["empty"] = (not row["spans"] or row["frames"] < 1
-                        or row["length"] < speed / rate - 1e-9)
+        # No spans leave L = 0, and N < 1 already implies L < 0.5 * v / F: the length test of
+        # §7.4 alone covers every case, with no need for the two conditions it subsumes.
+        row["empty"] = row["length"] < speed / rate - 1e-9
         row["subcuts"] = split(row["spans"], row["frames"], row["samples"], grid, speed)
         row["source"] = round(row["b"] - row["a"], 6)
     return rows
@@ -2543,7 +2584,7 @@ def measure(rows, levels, grid, settings):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 16 tests … OK`.
+Esperado: `Ran 17 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -2701,7 +2742,7 @@ def estimate_of(rows, included, settings, total, grid):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 21 tests … OK`.
+Esperado: `Ran 22 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -2935,7 +2976,7 @@ def topic_warnings(draft, included):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 29 tests … OK`.
+Esperado: `Ran 30 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3150,7 +3191,7 @@ def comma(value, digits=1):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 34 tests … OK`.
+Esperado: `Ran 35 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3373,7 +3414,7 @@ def proposal(plan, reserves, total, name):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 38 tests … OK`.
+Esperado: `Ran 39 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3776,7 +3817,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 95 tests … OK` (37 + 12 + 46) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 96 tests … OK` (37 + 12 + 47) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -3993,7 +4034,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 98 tests … OK` (37 + 12 + 49), en menos de dos minutos.
+Esperado: `Ran 99 tests … OK` (37 + 12 + 50), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -4056,8 +4097,8 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 49 en
-  `test_plan.py`: **98** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
+  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 50 en
+  `test_plan.py`: **99** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
   de §12 que le corresponden: borrador ausente, borrador rechazado y plan publicado con aviso
