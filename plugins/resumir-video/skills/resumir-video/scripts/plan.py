@@ -735,6 +735,86 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     return 2 if blocking else 0
 
 
+def publish_draft(work, body, event, payload, dry_run):
+    """The shared ending of --import and --revert: a new draft, never a plan."""
+    if dry_run:
+        print(dumps(body))
+        return 0
+    version, path = common.reserve_version(work, "borrador")
+    body["version"] = version
+    common.write_reserved(path, dumps(body) + "\n")
+    common.history(work, event, {"version": version, **payload})
+    print(path)
+    return 0
+
+
+def import_plan(args, work, data, total):
+    """Convert a 0.1 plan into a draft that still needs review and acceptance."""
+    old = load(args.import_from)
+    identity = old.get("source") if isinstance(old.get("source"), dict) else {}
+    current = data["source"]
+    # A 0.1 plan has no fingerprint: only size and mtime can be contrasted.
+    differing = [key for key in ("size", "mtime_ns") if identity.get(key) != current.get(key)]
+    if differing:
+        raise ValueError("El plan importado no corresponde a este medio "
+                         f"(difiere: {', '.join(differing)}).")
+    segments, previous = [], 0.0
+    for index, segment in enumerate(old.get("segments") or [], start=1):
+        start = number(segment.get("start"), f"start del corte {index}")
+        end = number(segment.get("end"), f"end del corte {index}")
+        if not previous <= start < end <= total:
+            raise ValueError(f"El corte {index} del plan importado está fuera del medio.")
+        title = segment.get("title", f"Corte {index}")
+        segments.append({"id": index, "start": start, "end": end, "title": title, "phrase": title,
+                         "reason": segment.get("reason", "Importado de un plan 0.1"),
+                         "audio_evidence": segment.get("audio_evidence", "Importado de un plan 0.1"),
+                         "visual_evidence": segment.get("visual_evidence",
+                                                        "Importado de un plan 0.1"),
+                         "priority": 1, "included": True, "pinned": False, "depends_on": [],
+                         "remove_pauses": False, "visual_only": False})
+        previous = end
+    if not segments:
+        raise ValueError("El plan importado no tiene cortes.")
+    body = {"parent": None, "request": f"Importado de {Path(args.import_from).name}",
+            # The fingerprint is recomputed from the file itself, never copied from the 0.1 plan.
+            "source": dict(current, **common.fingerprint(current["path"])),
+            "settings": {"target": None, "speed": 1.0, "remove_pauses": False,
+                         "silence_db": common.SILENCE_DB},
+            "segments": segments, "excluded": [], "topics": [],
+            "warnings": [common.warning("identidad_parcial", "Plan 0.1 sin huella: se contrastaron "
+                                        "tamaño y fecha y se completó desde el archivo actual.")]}
+    return publish_draft(work, body, "init",
+                         {"segments": len(segments), "importado": Path(args.import_from).name},
+                         args.dry_run)
+
+
+def revert(args, work):
+    """«Vuelve a la vN»: copy that published plan into a new draft."""
+    source = work / f"seleccion-v{args.revert}.json"
+    if not source.is_file():
+        raise ValueError(f"No existe {source.name} en la carpeta de trabajo.")
+    old = load(source)
+    kept = {item["id"] for item in old.get("segments", [])}
+    segments = []
+    for item in old.get("segments", []) + old.get("reserves", []):
+        segments.append({"id": item["id"], "start": item["start"], "end": item["end"],
+                         "title": item["title"], "phrase": item["phrase"], "reason": item["reason"],
+                         "audio_evidence": item["audio_evidence"],
+                         "visual_evidence": item.get("visual_evidence", ""),
+                         "priority": item["priority"], "included": item["id"] in kept,
+                         "pinned": item.get("pinned", False),
+                         "depends_on": item.get("depends_on", []),
+                         "remove_pauses": item.get("remove_pauses", True),
+                         "visual_only": item.get("visual_only", False)})
+    segments.sort(key=lambda item: item["start"])
+    body = {"parent": old["version"], "request": f"Vuelve a la v{old['version']}",
+            "source": old["source"],
+            "settings": {key: old["settings"][key] for key in
+                         ("target", "speed", "remove_pauses", "silence_db")},
+            "segments": segments, "excluded": old.get("excluidos", []), "topics": []}
+    return publish_draft(work, body, "edit", {"desde": old["version"]}, args.dry_run)
+
+
 def run(args):
     """Entry point registered by `register`; video.py reaches it through args.run."""
     work = Path(args.work).resolve()
@@ -742,6 +822,10 @@ def run(args):
         raise ValueError(f"No existe la carpeta de trabajo: {work}")
     data = load(work / "metadata.json")
     total = common.duration(data)
+    if args.import_from:
+        return import_plan(args, work, data, total)
+    if args.revert is not None:
+        return revert(args, work)
     if not args.draft:
         # Section 12: a draft that is missing is as invalid an argument as one that is wrong, so it
         # leaves by the same door as `check_draft` below, with code 2 and without writing anything.

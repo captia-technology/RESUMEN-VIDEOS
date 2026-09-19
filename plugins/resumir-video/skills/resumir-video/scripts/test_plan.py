@@ -837,6 +837,71 @@ class VersionesTest(unittest.TestCase):
             call(self.work, kind="audio")
 
 
+class ImportarTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        self.data = work_folder(self.work)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def old_plan(self, **changes):
+        body = {"source": dict(self.data["source"]), "audio_stream": 1,
+                "segments": [{"start": 3.0, "end": 9.0, "title": "Requisito", "reason": "Motivo",
+                              "audio_evidence": "Voz", "visual_evidence": "Tabla"},
+                             {"start": 20.0, "end": 25.0, "title": "Excepción", "reason": "Motivo",
+                              "audio_evidence": "Voz", "visual_evidence": "Tabla"}]}
+        body.update(changes)
+        path = self.work / "plan01.json"
+        path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_a_zero_one_plan_becomes_a_draft_that_still_needs_review(self):
+        code, output = call(self.work, import_from=str(self.old_plan()))
+        self.assertEqual(code, 0)
+        self.assertIn("borrador-v1.json", output)
+        body = json.loads((self.work / "borrador-v1.json").read_text(encoding="utf-8"))
+        self.assertEqual([(item["id"], item["start"], item["end"], item["priority"],
+                           item["included"], item["remove_pauses"], item["visual_only"],
+                           item["depends_on"]) for item in body["segments"]],
+                         [(1, 3.0, 9.0, 1, True, False, False, []),
+                          (2, 20.0, 25.0, 1, True, False, False, [])])
+        self.assertEqual(body["settings"]["speed"], 1.0)
+        self.assertEqual(body["settings"]["remove_pauses"], False)
+        self.assertEqual([item["codigo"] for item in body["warnings"]], ["identidad_parcial"])
+        self.assertNotIn("fingerprint", body)
+        self.assertEqual(set(body["source"]), {"path", "size", "mtime_ns", "sha256"})
+        self.assertEqual(body["source"]["sha256"],
+                         common.fingerprint(self.data["source"]["path"])["sha256"])
+        self.assertFalse(list(self.work.glob("seleccion-v*.json")))
+
+    def test_only_size_and_mtime_are_contrasted(self):
+        moved = dict(self.data["source"], path="otra/ruta/medio.mp4")
+        code, _ = call(self.work, import_from=str(self.old_plan(source=moved)))
+        self.assertEqual(code, 0)
+        with self.assertRaisesRegex(ValueError, "difiere: size"):
+            call(self.work, import_from=str(self.old_plan(
+                source=dict(self.data["source"], size=99))))
+
+    def test_reverting_copies_a_published_plan_into_a_new_draft(self):
+        draft(self.work, BASE)
+        call(self.work)
+        code, output = call(self.work, revert=1)
+        self.assertEqual(code, 0)
+        self.assertIn("borrador-v1.json", output)
+        body = json.loads((self.work / "borrador-v1.json").read_text(encoding="utf-8"))
+        self.assertEqual(body["parent"], 1)
+        self.assertEqual([(item["id"], item["included"]) for item in body["segments"]],
+                         [(1, True), (2, True), (3, True), (4, False), (5, True), (6, True)])
+        self.assertEqual([(item["start"], item["end"]) for item in body["segments"]][:2],
+                         [(2.0, 10.0), (11.0, 18.0)])
+        self.assertEqual(body["settings"]["target"], "40%")
+        self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
+        with self.assertRaisesRegex(ValueError, "No existe seleccion-v9.json"):
+            call(self.work, revert=9)
+
+
 class CliTest(unittest.TestCase):
     def test_the_subcommand_is_wired_and_documented(self):
         parser = video.build_parser()
