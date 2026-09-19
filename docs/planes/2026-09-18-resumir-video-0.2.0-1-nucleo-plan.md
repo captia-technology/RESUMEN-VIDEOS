@@ -133,6 +133,11 @@ cadencia sin abrir `metadata.json`; `settings.objetivo` son los segundos ya resu
 añadidos de este plan sobre el mínimo que `render` exige: el primero lo usa el diff de `changes`, el
 segundo el regreso a una versión.
 
+`numero` es **único en toda la propuesta**: los cortes incluidos llevan 1…k y las reservas continúan
+esa numeración (k+1, k+2…, en el orden en que aparecen en el borrador), de modo que el número que el
+usuario cita («el 7») es el mismo en la tabla de cortes y en la de reservas y ninguna reserva queda sin
+número. `id` sigue siendo el identificador estable del borrador, y `revert` no lee `numero`.
+
 **Avisos que este plan no emite:** `huecos_pts` y `fuente_vfr` (los detecta el sondeo de paquetes de
 `prepare`), `origen_reasignado` (lo emite `render`) y `cobertura_baja` (lo emite `compare`). `plan`
 propaga los dos primeros si `metadata.json` los trae en la clave `avisos`. `identidad_parcial` lo
@@ -187,8 +192,8 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **107** al terminar el plan (37 en `test_common.py`, 12 en
-  `test_video.py` y 58 en `test_plan.py`). Las **23** de `tests/` no cambian.
+  skill **crece**: de las 15 de hoy se pasa a **126** al terminar el plan (44 en `test_common.py`, 12 en
+  `test_video.py` y 70 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
 
@@ -336,7 +341,18 @@ Sustituye el cuerpo de `main` posterior a `args = build_parser().parse_args()` p
     except MemoryError:
 ```
 
-El resto de `except` queda igual. `prepare`, `frames`, `transcribe` y `show` devuelven `None`, que el
+El resto de los `except` queda igual, salvo el último, que tras la revisión de rama captura también
+los errores de programación para que salgan como `Error: …` con código 1 y no como un traceback:
+
+```python
+    except (ValueError, OSError, KeyError, RuntimeError, AttributeError, TypeError,
+            IndexError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+```
+
+`KeyboardInterrupt` (130) y `MemoryError` (mensaje de memoria, 1) conservan su rama. `prepare`, `frames`, `transcribe` y `show` devuelven `None`, que el
 `or 0` convierte en 0; `check` ya devuelve 0 o 1, y `plan` devolverá 0 o 2.
 
 - [ ] **Paso 5: retirar de `test_video.py` las cuatro pruebas sin sujeto**
@@ -803,7 +819,8 @@ git commit -m "feat(common): huella del medio con sha256 de sus dos extremos" \
   `bounds(levels, a, b) -> (first, last)` (añadido declarado: convierte `[a, b)` en segundos a índices de
   la rejilla de 10 ms, `first = max(0, int(a / ENERGY_STEP + 1e-9))` y
   `last = min(len(levels), math.ceil(b / ENERGY_STEP - 1e-9))`, y la usan `silences`, `voiced` y, en la
-  tarea 13, `plan.percentile`: nadie repite esas dos líneas);
+  tarea 13, `plan.percentile`: nadie repite esas dos líneas; la prueba que fija el épsilon,
+  `test_the_upper_bound_of_a_window_never_opens_one_index_too_wide`, vive en `BordesTest`, tarea 6);
   `silences(levels, a, b, threshold=SILENCE_DB, min_silence=MIN_SILENCE) -> list[tuple[float, float]]`;
   `voiced(levels, a, b, threshold=SILENCE_DB) -> bool` (añadido declarado); constantes
   `SILENCE_DB = -50.0`, `MIN_SILENCE = 0.30`, `ENERGY_STEP = 0.01`, `ENERGY_FLOOR = -120.0`,
@@ -1232,6 +1249,10 @@ git commit -m "feat(common): rejilla de fotogramas e islas tras quitar pausas" \
   lista vacía (subtítulos sin palabras) el ajuste sigue funcionando y solo pierde la protección de
   palabra. El tercer valor es `"borde_en_voz"` o `None`. Constantes añadidas `EDGE_LOOK = 0.08`,
   `EDGE_WINDOW = 0.60`, `EDGE_SILENCE = 0.10`, `WORD_MARGIN = 0.02`.
+- Dos pruebas de `BordesTest` fijan lo que ya existía: los 80 ms de `EDGE_LOOK` en **ambos** bordes (una
+  voz que vuelve 50 ms después del borde cuenta como voz; una que vuelve 90 ms después, no) y el épsilon
+  de `common.bounds` (tarea 4), que no abre una ventana de más en 18 de los 600 primeros múltiplos de
+  10 ms.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -1296,6 +1317,35 @@ class BordesTest(unittest.TestCase):
             start, end, note = common.adjust_edges(0.1, 1.0, levels, [])
             self.assertEqual((start, end), (0.1, 1.6))
             self.assertIsNone(note)
+
+
+    def test_a_voice_within_eighty_milliseconds_of_an_edge_counts_as_speech(self):
+        def edges(pauses, a, b):
+            with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+                path = Path(temporary) / "borde.wav"
+                tone_wav(path, seconds=4.0, pauses=pauses)
+                return common.adjust_edges(a, b, common.energy(path), [])
+
+        # End edge at 2,0 (the start sits inside a leading pause, so it never speaks). Voice back
+        # at 2,05 is inside the 80 ms that §7.3 looks ahead, but the 50 ms of silence before it is
+        # shorter than EDGE_SILENCE: no pause to move to, so the edge is reported.
+        self.assertEqual(edges(((0.0, 0.2), (1.5, 2.05)), 0.1, 2.0), (0.1, 2.0, "borde_en_voz"))
+        # At 2,09 the voice is beyond those 80 ms: the edge is clean and nothing is said.
+        self.assertEqual(edges(((0.0, 0.2), (1.5, 2.09)), 0.1, 2.0), (0.1, 2.0, None))
+        # The same on the start edge at 2,0: the voice ended 50 ms before it, or 90 ms.
+        self.assertEqual(edges(((1.95, 4.0),), 2.0, 3.0), (2.0, 3.0, "borde_en_voz"))
+        self.assertEqual(edges(((1.91, 4.0),), 2.0, 3.0), (2.0, 3.0, None))
+
+    def test_the_upper_bound_of_a_window_never_opens_one_index_too_wide(self):
+        levels = array.array("f", [0.0] * 700)
+        # 0.07 / 0.01 is 7.000000000000001: without the epsilon its ceiling is 8, one window more.
+        self.assertEqual(common.bounds(levels, 0.0, 0.07), (0, 7))
+        # 18 of the first 600 multiples of 10 ms carry that noise upward; every one must close
+        # exactly where it says.
+        noisy = [k for k in range(1, 601) if math.ceil(k / 100 / common.ENERGY_STEP) > k]
+        self.assertEqual(len(noisy), 18)
+        self.assertEqual([k for k in range(1, 601)
+                          if common.bounds(levels, 0.0, k / 100) != (0, k)], [])
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -1304,7 +1354,9 @@ class BordesTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -k Bordes -v
 ```
 
-Esperado: 6 errores `AttributeError: module 'common' has no attribute 'adjust_edges'`.
+Esperado: 7 errores `AttributeError: module 'common' has no attribute 'adjust_edges'`. La octava prueba,
+`test_the_upper_bound_of_a_window_never_opens_one_index_too_wide`, pasa ya: `bounds` es de la tarea 4 y
+esa prueba solo fija su épsilon.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -1379,7 +1431,7 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 25 tests … OK`.
+Esperado: `Ran 27 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1408,6 +1460,8 @@ git commit -m "feat(common): llevar los bordes de cada corte al silencio mas cer
   `clock(value) -> str` (sello de lectura `0:24` / `1:02:07`, **truncado** al segundo) y
   `strip_accents(text) -> str` (conserva `ñ` y `Ñ`). Constantes `BLOCKING`, `MEMORY_PATTERNS` y
   `MAX_SPANS = 40`.
+- `samples_for` **redondea** (`floor(x + 0,5)`), no trunca: a 30000/1001 fps y 48 kHz, 1, 2 y 3
+  fotogramas dan 1602, 3203 y 4805 muestras, un lado y otro de la mitad.
 - `clock` y `MAX_SPANS` viven aquí porque los comparten más de un módulo: el reloj lo usan la propuesta
   de `plan.py` y el documento de `doc.py`, y el tope de tramos lo usan los subcortes de `plan.py` y el
   montaje de `render.py`. Ninguno de los dos se redefine en otro archivo.
@@ -1423,6 +1477,14 @@ class ExactitudTest(unittest.TestCase):
         self.assertEqual(common.frames_for(0.5, 25, 1.0), 13)
         self.assertEqual(common.frames_for(0.0, 25, 1.25), 0)
         self.assertEqual(common.samples_for(200, 30000 / 1001, 48000), 320320)
+
+    def test_samples_round_half_up_instead_of_truncating(self):
+        rate = 30000 / 1001
+        # 1 / rate * 48000 is 1601,6: int() would give 1601, the rounding of section 7.5 gives 1602.
+        # 2 frames are 3203,2 (rounds down) and 3 frames 4804,8 (up): both sides of the half.
+        for frames, expected in ((1, 1602), (2, 3203), (3, 4805)):
+            with self.subTest(frames=frames):
+                self.assertEqual(common.samples_for(frames, rate, 48000), expected)
 
     def test_the_digest_ignores_key_order_and_its_own_field(self):
         one = {"b": 2, "a": [1, {"y": 1, "x": 2}], "sha256": "lo que sea"}
@@ -1459,7 +1521,8 @@ class ExactitudTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -k Exactitud -v
 ```
 
-Esperado: 5 errores `AttributeError: module 'common' has no attribute 'frames_for'`.
+Esperado: 6 errores `AttributeError: module 'common' has no attribute 'frames_for'` (`samples_for`, en la
+del redondeo).
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -1521,7 +1584,7 @@ y así el mismo valor da el mismo texto en la propuesta, en el diff de cambios y
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -v
 ```
 
-Esperado: `Ran 30 tests … OK`.
+Esperado: `Ran 33 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -1555,11 +1618,24 @@ git commit -m "feat(common): N y M exactos, sha256 canonico, avisos, reloj y tex
   el nombre del archivo intermedio, que pasa a llevar el pid (`energia.f32.<pid>.parcial`) para que
   dos procesos que escriban la misma caché a la vez no compartan el mismo `.parcial` (en Windows, con
   cuatro hilos sobre la misma ruta, el nombre fijo daba `PermissionError` en 3 de 5 rondas).
-- `history` **nunca levanta**: si el registro sigue pasando de 4 KiB escribe una línea mínima con una
-  nota, y si el archivo no se deja abrir —o el `payload` ni siquiera es un mapeo— se calla. Por eso el
-  armado del registro (`shorten`) va **dentro** del bloque protegido, no antes. El historial es un
-  diario; un montaje o una versión ya publicados no se deshacen porque falle una anotación. Los eventos admitidos son exactamente `init`,
-  `edit`, `accept`, `render`, `verify`, `doc` y `deliver`; este plan solo escribe `init` y `edit`.
+- `history` **nunca levanta**: captura `Exception`, no solo `OSError`, `TypeError` y `ValueError`,
+  porque un `payload` circular o de miles de niveles levanta `RecursionError` al recortarlo, y ese error
+  llegaría cuando la versión ya está publicada y convertiría en fallo un trabajo hecho. Si el registro
+  sigue pasando de 4 KiB escribe una línea mínima con una nota, y si el archivo no se deja abrir —o el
+  `payload` ni siquiera es un mapeo— se calla. Por eso el armado del registro (`shorten`) va **dentro**
+  del bloque protegido, no antes. El `payload` va **primero** en el diccionario del registro
+  (`{**payload, "cuando": …, "evento": …}`): puede añadir campos, nunca pisar `cuando` ni `evento`.
+  El historial es un diario; un montaje o una versión ya publicados no se deshacen porque falle una
+  anotación. Los eventos admitidos son exactamente `init`, `edit`, `accept`, `render`, `verify`, `doc` y
+  `deliver`; este plan solo escribe `init` y `edit`, y cada línea que escribe lleva `tipo`
+  (`seleccion` en `video_plan`, `borrador` en `--import` y `--revert`), porque `version` numera una
+  selección o un borrador según el caso.
+- `lock` **no enmascara**: el `unlink` del `finally` va bajo `contextlib.suppress(OSError)`. Un marcador
+  que no se deja borrar ni convierte en fallo un cuerpo que terminó bien ni oculta la excepción de uno
+  que falló; el marcador huérfano lo denuncia el siguiente `lock`, con su propio mensaje.
+- Los archivos publicados se escriben con `newline="\n"`: `write_reserved` (y con él `seleccion-vN.json`
+  y `borrador-vN.json`), `propuesta-vN.md` e `historial.jsonl`. En Windows el modo texto convertiría cada
+  LF en CRLF y deformaría los diffs y las comparaciones de los documentos publicados.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -1608,6 +1684,63 @@ class PublicacionTest(unittest.TestCase):
         self.assertEqual(json.loads(lines[2])["nota"], "registro recortado por exceder 4 KiB")
         self.assertTrue(all(len(line.encode("utf-8")) < common.HISTORY_LIMIT for line in lines))
 
+    def test_the_history_payload_cannot_rewrite_the_moment_or_the_event(self):
+        common.history(self.work, "edit", {"cuando": "1999-01-01T00:00:00+00:00",
+                                           "evento": "falso", "version": 2,
+                                           "tipo": "seleccion"})
+        record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual((record["evento"], record["version"], record["tipo"]),
+                         ("edit", 2, "seleccion"))
+        self.assertNotEqual(record["cuando"], "1999-01-01T00:00:00+00:00")
+        # No letter-colon-slash pair here: the packaging test reads that as a Windows drive path.
+        self.assertRegex(record["cuando"],
+                         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00$")
+
+    def test_the_history_gives_up_on_a_payload_it_cannot_walk_without_raising(self):
+        circular = {}
+        circular["yo"] = circular
+        deep = tip = {}
+        for _ in range(3000):
+            tip["dentro"] = {}
+            tip = tip["dentro"]
+        # A RecursionError here would arrive after the version was published, and the work
+        # already done would be reported as a failure.
+        common.history(self.work, "edit", circular)
+        common.history(self.work, "edit", {"detalle": deep})
+        common.history(self.work, "edit", {1: "clave", "dos": "clave"})
+        self.assertFalse((self.work / "historial.jsonl").exists())
+        common.history(self.work, "init", {"version": 1})
+        lines = (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line)["evento"] for line in lines], ["init"])
+
+    def test_a_marker_that_cannot_be_removed_does_not_hide_the_error_of_the_body(self):
+        marker, other = self.work / "montaje.lock", self.work / "otro.lock"
+        with unittest.mock.patch.object(Path, "unlink", side_effect=PermissionError("bloqueado")):
+            with self.assertRaisesRegex(ValueError, "fallo del montaje"):
+                with common.lock(marker):
+                    raise ValueError("fallo del montaje")
+            # Nor does it turn a body that finished into a failure.
+            with common.lock(other):
+                pass
+        # The stale marker is not lost: the next lock reports it with its own message.
+        for stale in (marker, other):
+            with self.subTest(marker=stale.name):
+                with self.assertRaisesRegex(ValueError, "Otro proceso"):
+                    with common.lock(stale):
+                        pass
+
+    def test_published_files_are_written_with_unix_newlines(self):
+        _, path = common.reserve_version(self.work, "seleccion")
+        common.write_reserved(path, '{\n  "version": 1\n}\n')
+        common.history(self.work, "init", {"version": 1})
+        common.history(self.work, "edit", {"version": 2})
+        # Windows would turn every LF into CRLF, which deforms diffs and comparisons of documents.
+        for name in (path.name, "historial.jsonl"):
+            with self.subTest(file=name):
+                data = (self.work / name).read_bytes()
+                self.assertNotIn(b"\r", data)
+                self.assertTrue(data.endswith(b"\n"))
+
     def test_versions_are_reserved_exclusively(self):
         first, first_path = common.reserve_version(self.work, "seleccion")
         second, second_path = common.reserve_version(self.work, "seleccion")
@@ -1646,8 +1779,9 @@ class PublicacionTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_common.py" -k Publicacion -v
 ```
 
-Esperado: 5 errores `AttributeError: module 'common' has no attribute 'publish'`. Añade también
-`import threading` a la cabecera de `test_common.py`.
+Esperado: 9 errores `AttributeError: module 'common' has no attribute 'publish'` (`history`, `lock` o
+`reserve_version` en las que solo usan esas). Añade también `import threading` e `import unittest.mock`
+a la cabecera de `test_common.py`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -1688,7 +1822,9 @@ def lock(path):
     try:
         yield path
     finally:
-        path.unlink(missing_ok=True)
+        # A marker that will not go must not hide the error of the body: the next lock() reports it.
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
 
 
 def shorten(value):
@@ -1706,16 +1842,18 @@ def history(work, event, payload):
     """One append-only line per call; a diary never undoes the work it was only writing down."""
     moment = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     try:
-        record = shorten({"cuando": moment, "evento": event, **payload})
+        # The payload goes first: it may add fields but never rewrite the moment or the event.
+        record = shorten({**payload, "cuando": moment, "evento": event})
         line = json.dumps(record, ensure_ascii=False, allow_nan=False, sort_keys=True)
         if len(line.encode("utf-8")) >= HISTORY_LIMIT:
             line = json.dumps({"cuando": moment, "evento": event,
                                "nota": "registro recortado por exceder 4 KiB"},
                               ensure_ascii=False, sort_keys=True)
-        with (Path(work) / "historial.jsonl").open("a", encoding="utf-8") as stream:
+        with (Path(work) / "historial.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(line + "\n")
-    except (OSError, TypeError, ValueError):
-        # Losing a line of the log never justifies losing a montage or a version already published.
+    except Exception:
+        # Losing a line of the log never justifies losing a montage or a version already published,
+        # not even to a RecursionError from a payload too deep (or circular) to trim.
         pass
 
 
@@ -1741,7 +1879,7 @@ def write_reserved(path, text):
     """Fill a version reserved by reserve_version: staged beside it and replaced atomically."""
     path = Path(path)
     staged = path.with_name(path.name + ".parcial")
-    staged.write_text(text, encoding="utf-8")
+    staged.write_text(text, encoding="utf-8", newline="\n")
     os.replace(staged, path)
 ```
 
@@ -1765,7 +1903,7 @@ argumentos y afirma que `staged.name == f"energia.f32.{os.getpid()}.parcial"`.
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 47 tests … OK` (35 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 54 tests … OK` (42 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 6: commit**
 
@@ -1891,7 +2029,7 @@ def timeline(data):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 49 tests … OK` (37 de `test_common.py` y 12 de `test_video.py`).
+Esperado: `Ran 56 tests … OK` (44 de `test_common.py` y 12 de `test_video.py`).
 
 - [ ] **Paso 5: commit**
 
@@ -1912,10 +2050,18 @@ git commit -m "feat(common): la linea temporal compartida por plan, montaje y do
 
 **Interfaces:**
 - Consumes: de `common`, `parse_target`, `tolerance`, `SILENCE_DB`, `timeline`, `MAX_SPANS`.
-- Produces: `load(path) -> dict` (UTF-8 con o sin BOM), `number(value, name) -> float`,
+- Produces: `load(path) -> dict` (UTF-8 con o sin BOM), `load_draft(path) -> dict` (el borrador del
+  agente: un archivo ausente, ilegible, de JSON roto o que no es UTF-8 sale como `ValueError` con
+  mensaje en español —«No existe el borrador…», «No se puede leer el borrador…», «… no es JSON
+  válido»—, para que `run` lo devuelva por la misma puerta del código 2), `number(value, name) -> float`,
   `flag(segment, key, default=False) -> bool`, `check_draft(draft, total, kind) -> list`
   (§9: rechaza **sin escribir** identificadores inexistentes o repetidos, límites fuera del medio,
-  evidencias vacías y solapes estrictos; los contiguos son legales),
+  evidencias vacías, solapes estrictos y una `excluded` que no sea una lista de objetos con `title` y
+  `reason` de texto no vacío —la propuesta escribe esos dos campos en una tabla, y un texto suelto la
+  rompería con el plan ya publicado—; los contiguos son legales), `check_parent(draft, work) -> None`
+  (`parent` es nulo o un `int`, no `bool`, mayor o igual que 1, con `seleccion-v{parent}.json` en la
+  carpeta de trabajo: función aparte y no argumento opcional de `check_draft`, para que la validación
+  no pueda quedar desactivada por omisión; `run` la llama en el mismo `try`, justo después),
   `settings_of(draft, args, total, grid) -> dict` con las claves
   `{"target", "objetivo", "tolerance", "speed", "remove_pauses", "silence_db", "rate",
   "sample_rate"}`, y `words_of(transcription) -> list` (lista plana de palabras ordenada por `start`).
@@ -1961,8 +2107,13 @@ GRID = {"start": 0.0, "origin": 0.0, "rate": "25/1", "fps": 25.0, "interval": 0.
         "sample_rate": 48000}
 
 
-def work_folder(root, seconds=60.0, pauses=PAUSES, rate="25/1", start="0.000000", videos=1):
-    """A job folder like the one prepare leaves behind, without touching FFmpeg."""
+def work_folder(root, seconds=60.0, pauses=PAUSES, rate="25/1", start="0.000000", videos=1,
+                legacy=False):
+    """A job folder like the one prepare leaves behind, without touching FFmpeg.
+
+    `legacy` writes the metadata.json of prepare 0.1.0 instead: no timeline, kind or avisos, and
+    a source that carries no sha256. The plan must still run on it.
+    """
     work = Path(root)
     tone_wav(work / "audio.wav", seconds=seconds, pauses=pauses)
     streams = [{"index": 0, "codec_type": "video", "r_frame_rate": rate, "avg_frame_rate": rate,
@@ -1981,6 +2132,10 @@ def work_folder(root, seconds=60.0, pauses=PAUSES, rate="25/1", start="0.000000"
     # prepare always writes the timeline, also in audio mode, where the grid keys are null.
     data["timeline"] = common.timeline(data)
     data["avisos"] = []
+    if legacy:
+        for key in ("timeline", "kind", "avisos"):
+            del data[key]
+        del data["source"]["sha256"]
     (work / "metadata.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return data
 
@@ -2080,6 +2235,23 @@ class BorradorTest(unittest.TestCase):
                 plan.check_draft({"segments": [cut(1, 2, 5)], "topics": topics}, 60.0, "video")
 
 
+    def test_excluded_is_a_list_of_objects_with_a_title_and_a_reason(self):
+        good = [{"title": "Saludos", "reason": "Sin contenido"}]
+        plan.check_draft({"segments": [cut(1, 2, 5)], "excluded": good}, 60.0, "video")
+        # Absent and empty are both fine: the key is optional.
+        plan.check_draft({"segments": [cut(1, 2, 5)]}, 60.0, "video")
+        plan.check_draft({"segments": [cut(1, 2, 5)], "excluded": []}, 60.0, "video")
+        bad = {"cadenas": ["Saludos"], "un objeto suelto": {"title": "x", "reason": "y"},
+               "nulo": None, "sin reason": [{"title": "x"}],
+               "reason vacío": [{"title": "x", "reason": "  "}],
+               "title no es texto": [{"title": 3, "reason": "y"}],
+               "uno bueno y uno malo": good + ["Introducción"]}
+        for label, excluded in bad.items():
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, "exclu"):
+                plan.check_draft({"segments": [cut(1, 2, 5)], "excluded": excluded},
+                                 60.0, "video")
+
+
 class AjustesTest(unittest.TestCase):
     def test_the_call_overrides_the_draft(self):
         body = {"settings": {"target": "40%", "speed": 1.25}}
@@ -2167,6 +2339,18 @@ def load(path):
     return data
 
 
+def load_draft(path):
+    """The agent's draft; a file that is missing or unreadable is an invalid argument."""
+    try:
+        return load(path)
+    except FileNotFoundError:
+        raise ValueError(f"No existe el borrador: {path}") from None
+    except OSError as exc:
+        raise ValueError(f"No se puede leer el borrador {path}: {exc.strerror or exc}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"El borrador {Path(path).name} no es JSON válido: {exc}") from None
+
+
 def number(value, name):
     if type(value) not in (int, float) or not math.isfinite(value):
         raise ValueError(f"{name} debe ser un número finito de segundos.")
@@ -2235,7 +2419,28 @@ def check_draft(draft, total, kind):
             raise ValueError(f"El tema «{topic['nombre']}» cita cortes que no existen.")
         if type(topic.get("imprescindible", False)) is not bool:
             raise ValueError(f"imprescindible del tema «{topic['nombre']}» debe ser booleano.")
+    excluded = draft.get("excluded", [])
+    if not isinstance(excluded, list):
+        raise ValueError("excluded debe ser una lista de objetos con title y reason.")
+    for position, item in enumerate(excluded, start=1):
+        # The proposal writes both fields into a table: anything else would break it after the
+        # plan is already published.
+        if not isinstance(item, dict) or any(not isinstance(item.get(field), str)
+                                             or not item[field].strip()
+                                             for field in ("title", "reason")):
+            raise ValueError(f"La exclusión {position} de excluded necesita title y reason "
+                             "de texto no vacío.")
     return segments
+
+
+def check_parent(draft, work):
+    """`parent` is null or the number of a version this folder has already published."""
+    parent = draft.get("parent")
+    if parent is None:
+        return
+    if type(parent) is not int or parent < 1 or not (work / f"seleccion-v{parent}.json").is_file():
+        raise ValueError("parent debe ser nulo o el número de una versión ya publicada "
+                         f"(seleccion-vN.json en la carpeta de trabajo); recibido {parent!r}.")
 
 
 def settings_of(draft, args, total, grid):
@@ -2288,7 +2493,7 @@ comprobación por tipo exacto rechaza `True` como identificador sin líneas adic
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 9 tests … OK`.
+Esperado: `Ran 10 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -2324,7 +2529,9 @@ git commit -m "feat(plan): leer y validar el borrador del agente" \
 - `split` reparte **los dos** totales del corte, `N` y `M`: cada subcorte menos el último toma
   `frames_for` y `samples_for` de sus propios tramos y el último se queda con lo que reste de `N` y de
   `M` (§7.5), igual que hace `render.subcuts` en el plan de montaje. Recalcular `M` subcorte a subcorte
-  pierde muestras siempre que `N/F·SR` no sea entero.
+  pierde muestras siempre que `N/F·SR` no sea entero, y medir `N` grupo a grupo pierde fotogramas: con
+  los 41 tramos de `SPANS_41` (30000/1001 fps, ×1,25, 44100 Hz) el corte entero da `N = 1181`, y sumar
+  el grupo de 40 y el de 1 medidos por separado daría 1180; la prueba afirma 1150 + 31 = 1181.
 - `fuse` solo funde vecinos que comparten `included`: una reserva pegada a un corte incluido no puede
   arrastrarlo fuera del montaje.
 - `fuse` remapea las `depends_on` de todas las filas que apunten a un id absorbido hacia el id
@@ -2336,7 +2543,27 @@ git commit -m "feat(plan): leer y validar el borrador del agente" \
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
+Añade `import unittest.mock` a la cabecera de `test_plan.py` y, al final del archivo, esta constante
+(41 tramos que fijan el reparto de `N`) y la clase:
+
 ```python
+# 41 spans at 30000/1001 fps found with random.Random(3) (4-60 frames each, 3-40 frames apart):
+# split in groups of 40 and 1, the groups measured one by one add up to 1180 frames, not 1181.
+SPANS_41 = [[0.233567, 1.6016], [2.836167, 3.236567], [4.1041, 5.5055], [6.6066, 8.074733],
+            [9.4094, 9.676333], [9.776433, 11.678333], [12.779433, 13.446767], [14.7147, 15.3153],
+            [15.8158, 17.450767], [18.551867, 19.8198], [21.087733, 22.2222],
+            [23.156467, 24.6246], [25.025, 25.6256], [26.026, 27.994633], [29.195833, 30.1301],
+            [30.2302, 31.765067], [31.998633, 32.465767], [33.800433, 34.000633],
+            [34.7347, 36.503133], [36.6366, 38.505133], [39.172467, 40.306933],
+            [41.207833, 42.8428], [43.8438, 44.811433], [46.112733, 47.180467],
+            [47.5475, 49.5495], [50.417033, 50.7507], [50.917533, 51.317933], [52.4524, 53.019633],
+            [53.6536, 55.221833], [56.222833, 57.991267], [58.725333, 59.726333],
+            [60.894167, 62.796067], [63.696967, 65.031633], [65.8658, 67.133733],
+            [68.4684, 69.4694], [70.804067, 71.404667], [72.205467, 73.7737],
+            [73.907167, 75.842433], [76.509767, 77.911167], [78.344933, 79.946533],
+            [80.713967, 81.9819]]
+
+
 class TramosTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
@@ -2442,6 +2669,24 @@ class TramosTest(unittest.TestCase):
             self.assertEqual(sum(part["frames"] for part in rows[0]["subcuts"]), rows[0]["frames"])
             self.assertEqual(sum(part["samples"] for part in rows[0]["subcuts"]),
                              rows[0]["samples"])
+
+
+    def test_n_belongs_to_the_whole_cut_and_the_last_subcut_takes_what_is_left(self):
+        odd = dict(self.grid, rate="30000/1001", fps=30000 / 1001, interval=1001 / 30000,
+                   sample_rate=44100)
+        row = {"segment": cut(1, 0.2, 82.0, 1), "a": 0.2, "b": 82.0, "note": None}
+        # The spans are fixed here, so the numbers below do not move with the audio fixture.
+        with unittest.mock.patch.object(plan, "spans_of", return_value=SPANS_41):
+            row = plan.measure([row], self.levels, odd, self.settings)[0]
+        groups = [SPANS_41[:40], SPANS_41[40:]]
+        # Measured group by group, the counts would add up to one frame less than the cut's N.
+        naive = sum(common.frames_for(sum(end - start for start, end in group), odd["fps"], 1.25)
+                    for group in groups)
+        self.assertEqual((row["frames"], naive), (1181, 1180))
+        self.assertEqual([len(part["spans"]) for part in row["subcuts"]], [40, 1])
+        self.assertEqual(sum(part["frames"] for part in row["subcuts"]), row["frames"])
+        self.assertEqual([part["frames"] for part in row["subcuts"]], [1150, 31])
+        self.assertEqual(sum(part["samples"] for part in row["subcuts"]), row["samples"])
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -2450,7 +2695,8 @@ class TramosTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Tramos -v
 ```
 
-Esperado: 8 errores `AttributeError: module 'plan' has no attribute 'fuse'`.
+Esperado: 9 errores `AttributeError: module 'plan' has no attribute 'fuse'` (`spans_of`, en el del reparto
+de `N`).
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -2591,7 +2837,7 @@ def measure(rows, levels, grid, settings):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 17 tests … OK`.
+Esperado: `Ran 19 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -2624,6 +2870,10 @@ git commit -m "feat(plan): tramos por corte con bordes, fusion, subcortes y cort
   `estimate_of(rows, included, settings, total, grid) -> dict` con las claves
   `cortes`, `origen`, `tras_pausas`, `salida`, `margen`, `porcentaje`, `objetivo`, `banda`, `retencion`,
   `esenciales`, `presupuesto` (`B = T_obj·v/ρ`), `minimo`, `maximo` (`T_max = T_orig·ρ/v`) y `estado`.
+- El atajo de `remove_pauses` falso y el tope `min(1.0, …)` se fijan por separado. Con pausas quitadas,
+  un corte cuyo borde se mueve a la pausa (`cut(1, 2.013, 4.987)`: 3,0 s de 2,987 s de fuente) da un
+  cociente bruto de 1,004352 y el tope lo deja en 1,0. Con pausas conservadas globalmente, otro
+  (`cut(1, 2.021, 4.979)`) da 0,993622 en bruto y 1,0 exacto: solo el atajo lo explica.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -2695,6 +2945,24 @@ class EstimacionTest(unittest.TestCase):
         # A global remove_pauses=False keeps every candidate whole: ratio is exactly one.
         self.assertEqual(self.report("40%", segments, pauses=False)["retencion"], 1.0)
 
+    def test_retention_never_exceeds_one_and_is_exactly_one_when_pauses_stay(self):
+        def measured(segments, pauses):
+            rows, _, settings, report = prepared(segments, self.levels, self.grid, pauses=pauses)
+            raw = (sum(row["source"] if plan.untouched(row) else row["length"] for row in rows)
+                   / sum(row["source"] for row in rows))
+            return raw, plan.retention(rows, settings), report["retencion"]
+
+        # 2,013 snaps out to 2,0 and the end moves to the pause at 5,0: 3,0 s kept out of 2,987 s
+        # of source, a raw quotient of 1,004352. Frame alignment cannot keep more than there was.
+        raw, share, reported = measured([cut(1, 2.013, 4.987, 1)], pauses=True)
+        self.assertAlmostEqual(raw, 1.004352, places=6)
+        self.assertEqual((share, reported), (1.0, 1.0))
+        # With pauses kept globally nothing is removed, whatever the alignment did: 2,021 snaps
+        # in to 2,04, so the raw quotient (0,993622) is below one and only the shortcut gives 1,0.
+        raw, share, reported = measured([cut(1, 2.021, 4.979, 1)], pauses=False)
+        self.assertAlmostEqual(raw, 0.993622, places=6)
+        self.assertEqual((share, reported), (1.0, 1.0))
+
     def test_keeping_pauses_and_speed_change_the_output(self):
         self.assertEqual(self.report("40%", pauses=False)["salida"], 28.0)
         self.assertEqual(self.report("40%", speed=1.0)["salida"], 30.48)
@@ -2706,7 +2974,7 @@ class EstimacionTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Estimacion -v
 ```
 
-Esperado: 5 errores `AttributeError: module 'plan' has no attribute 'estimate_of'`.
+Esperado: 6 errores `AttributeError: module 'plan' has no attribute 'estimate_of'`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -2777,7 +3045,7 @@ def estimate_of(rows, included, settings, total, grid):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 22 tests … OK`.
+Esperado: `Ran 25 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3050,7 +3318,7 @@ def topic_warnings(draft, rows, included):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 31 tests … OK`.
+Esperado: `Ran 34 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3319,7 +3587,7 @@ def comma(value, digits=1):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 36 tests … OK`.
+Esperado: `Ran 39 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3350,6 +3618,10 @@ git commit -m "feat(plan): las cuatro alternativas y las sugerencias por estado"
   cadena de técnicas, cambios, avisos, tabla de cortes, reservas, exclusiones deliberadas,
   alternativas, sugerencias, recorrido y ejemplos de respuesta (§9).
   El `numero` de la tabla es el que el usuario cita («el 7»); el `id` es el identificador estable.
+  La tabla «Reservas» muestra `#` (el `numero` de la reserva) y no `id`: las reservas continúan la
+  numeración de los cortes incluidos, y «Cómo responder» lo dice («El número es el de la columna # de
+  esta propuesta, común a cortes y reservas»). `cut_row` recibe ese número como `index`: quien llama
+  decide la numeración (`video_plan`, en la tarea 16).
 - `clock` **no** se define aquí: es la de `common` (tarea 7), la misma que usará el documento. Trunca al
   segundo, así que `5,72 s` se lee `0:05`.
 - **El «coste de montaje» no sale de aquí.** §9 pide que, tras cada edición, el agente muestre el diff,
@@ -3429,7 +3701,8 @@ class PropuestaTest(unittest.TestCase):
                 "alternativas": [{"velocidad": 1.0, "pausas": True, "salida": 7.16,
                                   "porcentaje": 11.93, "estado": "ok"}],
                 "sugerencias": [], "recorrido": "#" * plan.BAR}
-        reserves = [{"id": 4, "start": 28.0, "end": 33.0, "reason": "Ejemplo alternativo"}]
+        reserves = [{"numero": 6, "id": 4, "start": 28.0, "end": 33.0,
+                     "reason": "Ejemplo alternativo"}]
         text = plan.proposal(body, reserves, 60.0, "medio.mp4")
         for heading in ("# Propuesta v1", "## Cambios", "## Avisos", "## Cortes", "## Reservas",
                         "## Exclusiones deliberadas", "## Alternativas", "## Sugerencias",
@@ -3440,7 +3713,10 @@ class PropuestaTest(unittest.TestCase):
                       "(9,5 %) · estado **ok**", text)
         self.assertIn("1 cortes · 0:08 → sin pausas 0:07 → ×1,25 → 0:05", text)
         self.assertIn("| 1 | 0:02–0:10 | 0:00–0:05 (6 s) | 1 | Frase 1 |", text)
-        self.assertIn("| 4 | 0:28–0:33 | Ejemplo alternativo |", text)
+        self.assertIn("| # | Origen | Qué aportaría |", text)
+        self.assertIn("| 6 | 0:28–0:33 | Ejemplo alternativo |", text)
+        self.assertNotIn("| 4 | 0:28", text)
+        self.assertIn("común a cortes y reservas", text)
         self.assertIn("| Saludos | Sin contenido |", text)
         self.assertIn("| ×1,00 | sí | 0:07 | 11,9 % | ok |", text)
         self.assertIn("- ninguna: el plan está dentro de la banda", text)
@@ -3576,9 +3852,9 @@ def proposal(plan, reserves, total, name):
         head.append(f"| {item['numero']} | {clock(item['start'])}–{clock(item['end'])} "
                     f"| {clock(item['salida'][0])}–{clock(item['salida'][1])} "
                     f"({length(item):.0f} s) | {item['priority']} | {cell(item['phrase'])} |")
-    head += ["", "## Reservas", "", "| id | Origen | Qué aportaría |", "| --- | --- | --- |"]
+    head += ["", "## Reservas", "", "| # | Origen | Qué aportaría |", "| --- | --- | --- |"]
     for item in reserves:
-        head.append(f"| {item['id']} | {clock(item['start'])}–{clock(item['end'])} | "
+        head.append(f"| {item['numero']} | {clock(item['start'])}–{clock(item['end'])} | "
                     f"{cell(item['reason'])} |")
     head += ["", "## Exclusiones deliberadas", "", "| Qué | Por qué |", "| --- | --- |"]
     for item in plan["excluidos"]:
@@ -3597,6 +3873,7 @@ def proposal(plan, reserves, total, name):
              f"0:00 ← cada carácter son {comma(total / BAR)} s → {clock(total)}", "",
              "## Cómo responder", "",
              "- «acepta» o «móntalo» para montar esta versión.",
+             "- El número es el de la columna # de esta propuesta, común a cortes y reservas.",
              "- «quita el 7 y el 9», «añade el 6», «alarga el 3 diez segundos».",
              "- «añade la parte donde habla de ATEX», «parte el 4», «une 4 y 5».",
              "- «súbelo al 15 %», «sin acelerar», «no quites pausas en el 12».",
@@ -3610,7 +3887,7 @@ def proposal(plan, reserves, total, name):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -v
 ```
 
-Esperado: `Ran 43 tests … OK`.
+Esperado: `Ran 46 tests … OK`.
 
 - [ ] **Paso 5: commit**
 
@@ -3635,17 +3912,34 @@ git commit -m "feat(plan): propuesta en Markdown, recorrido de texto y fila publ
   `common.publish`, `common.history`, `common.plan_sha256`, `common.energy`, `common.fingerprint`,
   `common.timeline`, `common.duration`.
 - Produces: `dumps(data) -> str`, `source_of(data) -> dict` (identidad y huella fundidas en
-  `{path, size, mtime_ns, sha256}`), `publish_version(work, prefix, body, extra=None) -> (int, Path)`,
+  `{path, size, mtime_ns, sha256}`), `discard(*paths)` (borra restos ignorando `OSError`: una limpieza
+  que falla no oculta el error que la hizo necesaria),
+  `publish_version(work, prefix, body, extra=None) -> (int, Path)`,
   `changes(work, parent, cuts, notes) -> list[str]`,
   `video_plan(args, work, data, draft, settings, segments, total, levels, words, grid) -> int`,
   `run(args) -> int` y `register(sub) -> parser`, que crea el subcomando `plan` con las opciones
   `--work`, `--draft`, `--target`, `--speed`, `--pauses`, `--silence-db`, `--kind`, `--dry-run`,
   `--import` y `--revert` y lo cierra con `set_defaults(run=run)`. `video.py` solo lo llama.
   `run` devuelve **2** en tres casos: si el plan publicado lleva algún aviso bloqueante, si falta
-  `--draft` y si rechaza el borrador (§12: un borrador que falta o que el agente tiene que corregir es
-  un argumento inválido, no un fallo controlado; en los dos casos se imprime `Error: …` por la salida
-  de errores y no se escribe nada). `--dry-run` no reserva versión, no escribe propuesta ni historial;
-  sí puede crear `energia.f32`, que es material de `prepare`.
+  `--draft` y si rechaza el borrador (§12: un borrador que falta, que no se puede leer, que no es JSON o
+  que el agente tiene que corregir es un argumento inválido, no un fallo controlado: `load_draft` entra
+  en el mismo `try` que `settings_of`, `check_draft` y `check_parent`, y en todos los casos se imprime
+  `Error: …` en español, sin «Errno» ni traceback, por la salida de errores y no se escribe nada).
+  `--dry-run` no reserva versión, no escribe propuesta ni historial; sí puede crear `energia.f32`, que
+  es material de `prepare`.
+- `publish_version` publica el plan y su propuesta **enteros o nada**. El orden es: reserva N →
+  comprueba que `propuesta-vN.md` no existe → redacta el Markdown en un `.parcial` → llena la reserva
+  con `write_reserved` → publica el `.parcial`. Todo lo posterior a `reserve_version` va en un
+  `try/except BaseException` que borra la reserva (llena o vacía) y el `.parcial` con `discard` y
+  re-lanza la excepción original: no queda un plan sin propuesta ni una reserva huérfana, y el número
+  no se quema. Con un `propuesta-vN.md` suelto, cada reintento falla igual («no se sobrescribe») hasta
+  que el usuario lo retira, en vez de saltar a N+1 dejando un hueco.
+- Las reservas se numeran a continuación de los cortes: `numero = len(cortes) + k`, con `k` desde 1 en
+  el orden del borrador, y la propuesta las muestra en la columna `#`. `video_plan` anota el historial
+  con `tipo: "seleccion"`; `--import` y `--revert` (tarea 17) lo anotan con `tipo: "borrador"`.
+- `video.main` captura además `AttributeError`, `TypeError` e `IndexError` (paso 4 de la tarea 1): un
+  error de programación sale como `Error: …` con código 1 y no como un traceback. Sus pruebas, y las
+  del CLI real por `subprocess`, viven en `CliTest`, para no reabrir `test_video.py`.
 - `video_plan` propaga también los avisos que traiga el borrador (`draft.get("warnings", [])`), no
   solo los de `metadata.json`: hoy el único que llega por ahí es `identidad_parcial`, que nace en
   `plan --import` (tarea 17) y así llega hasta el plan publicado y la propuesta.
@@ -3668,7 +3962,9 @@ git commit -m "feat(plan): propuesta en Markdown, recorrido de texto y fila publ
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
-Añade a `test_plan.py` un ayudante y la clase:
+Añade `import os`, `import subprocess` e `import sys` a la cabecera de `test_plan.py` y, al final del
+archivo, los ayudantes (`refused` corre `plan.run` sobre un borrador que debe rechazarse y devuelve el
+código y lo que se dijo al agente) y las clases:
 
 ```python
 def call(work, **extra):
@@ -3677,6 +3973,14 @@ def call(work, **extra):
     with contextlib.redirect_stdout(buffer):
         code = plan.run(options(work, dry_run=False, **extra))
     return code, buffer.getvalue()
+
+
+def refused(work, **extra):
+    """plan.run on a draft that must be refused: its exit code and what it told the agent."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code, _ = call(work, **extra)
+    return code, err.getvalue()
 
 
 def dry(work, **extra):
@@ -3706,6 +4010,9 @@ class VersionesTest(unittest.TestCase):
         self.assertEqual(body["sha256"], common.plan_sha256(body))
         self.assertEqual([item["id"] for item in body["segments"]], [1, 2, 3, 5, 6])
         self.assertEqual([item["id"] for item in body["reserves"]], [4])
+        # One numbering for the proposal: the reserves go on where the cuts stop.
+        self.assertEqual([item["numero"] for item in body["segments"]], [1, 2, 3, 4, 5])
+        self.assertEqual([item["numero"] for item in body["reserves"]], [6])
         self.assertNotIn("fingerprint", body)
         self.assertEqual(set(body["source"]), {"path", "size", "mtime_ns", "sha256"})
         self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
@@ -3714,9 +4021,19 @@ class VersionesTest(unittest.TestCase):
         self.assertEqual(body["timeline"], self.data["timeline"])
         self.assertEqual(body["estimate"]["salida"], 24.36)
         self.assertEqual(body["changes"], ["propuesta inicial"])
-        self.assertIn("# Propuesta v1", (self.work / "propuesta-v1.md").read_text(encoding="utf-8"))
+        text = (self.work / "propuesta-v1.md").read_text(encoding="utf-8")
+        self.assertIn("# Propuesta v1", text)
+        # The table of reserves shows the proposal's number (6), not the draft's id (4).
+        self.assertIn("| 6 | 0:28–0:33 | Motivo |", text)
+        self.assertNotIn("| 4 | 0:28", text)
         record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8").strip())
         self.assertEqual((record["evento"], record["version"], record["segments"]), ("init", 1, 5))
+        # `version` names a selection here and a draft in the lines of --import and --revert.
+        self.assertEqual(record["tipo"], "seleccion")
+        # Published as written, with no CRLF that Windows would add to a text-mode write.
+        for name in ("seleccion-v1.json", "propuesta-v1.md", "historial.jsonl"):
+            with self.subTest(file=name):
+                self.assertNotIn(b"\r", (self.work / name).read_bytes())
 
     def test_the_second_version_diffs_and_leaves_the_first_untouched(self):
         draft(self.work, BASE)
@@ -3739,6 +4056,34 @@ class VersionesTest(unittest.TestCase):
         self.assertEqual((self.work / "seleccion-v1.json").read_bytes(), before)
         self.assertEqual(len((self.work / "historial.jsonl").read_text(
             encoding="utf-8").splitlines()), 2)
+
+    def published(self, work):
+        return json.loads((work / "seleccion-v1.json").read_text(encoding="utf-8"))
+
+    def test_a_metadata_json_of_prepare_zero_one_zero_plans_with_its_fallbacks(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            legacy = Path(temporary)
+            data = work_folder(legacy, legacy=True)
+            # What prepare 0.1.0 leaves behind, and the only thing plan finds in production.
+            self.assertFalse({"timeline", "kind", "avisos"} & set(data))
+            self.assertEqual(set(data["source"]), {"path", "size", "mtime_ns"})
+            draft(legacy, BASE)
+            self.assertEqual(call(legacy)[0], 0)
+            body = self.published(legacy)
+            self.assertEqual(body["version"], 1)
+            self.assertEqual(body["kind"], "video")
+            self.assertEqual(body["timeline"], common.timeline(data))
+            self.assertEqual(body["source"], {"path": data["source"]["path"],
+                                              **common.fingerprint(data["source"]["path"])})
+            self.assertNotIn("avisos", body)
+            self.assertTrue((legacy / "propuesta-v1.md").is_file())
+        # Nothing but the four fallbacks differs from a folder that already carries everything.
+        draft(self.work, BASE)
+        self.assertEqual(call(self.work)[0], 0)
+        current = self.published(self.work)
+        for key in ("segments", "reserves", "settings", "timeline", "estimate", "warnings"):
+            with self.subTest(key=key):
+                self.assertEqual(body[key], current[key])
 
     def test_a_blocking_warning_publishes_and_returns_two(self):
         draft(self.work, [cut(1, 2.0, 10.0, 1, depends_on=[2]),
@@ -3795,13 +4140,99 @@ class VersionesTest(unittest.TestCase):
             call(self.work, kind="audio")
 
 
+    def names(self):
+        return sorted(path.name for path in self.work.iterdir())
+
+    def test_a_draft_that_would_break_the_proposal_is_refused_before_writing(self):
+        draft(self.work, BASE)
+        self.assertEqual(call(self.work)[0], 0)
+        before = self.names()
+        # A list of strings passed the old validation, published the plan and then died writing
+        # the proposal: it is an invalid argument, and nothing is published.
+        draft(self.work, BASE, excluded=["Saludos"])
+        code, message = refused(self.work)
+        self.assertEqual(code, 2)
+        self.assertIn("exclu", message)
+        # `parent: 99` used to publish a plan whose changes read "propuesta inicial" as an edit;
+        # "1" would name a real version were it not for the type.
+        for parent in (99, 0, -1, "1", 1.0, True):
+            with self.subTest(parent=parent):
+                draft(self.work, BASE, parent=parent)
+                code, message = refused(self.work)
+                self.assertEqual(code, 2)
+                self.assertIn("parent", message)
+        self.assertEqual([name for name in self.names() if name != "borrador.json"],
+                         [name for name in before if name != "borrador.json"])
+        self.assertEqual(len((self.work / "historial.jsonl").read_text(
+            encoding="utf-8").splitlines()), 1)
+
+    def test_parent_may_be_null_or_a_published_version(self):
+        draft(self.work, BASE, parent=None)
+        self.assertEqual(call(self.work)[0], 0)
+        draft(self.work, BASE, parent=1)
+        self.assertEqual(call(self.work)[0], 0)
+        body = json.loads((self.work / "seleccion-v2.json").read_text(encoding="utf-8"))
+        self.assertEqual(body["parent"], 1)
+        self.assertEqual(body["changes"], ["sin cambios respecto a la versión anterior"])
+
+    def test_a_proposal_that_cannot_be_written_leaves_nothing_published(self):
+        before = self.names()
+
+        def cannot():
+            raise KeyError("recorrido")
+
+        with self.assertRaises(KeyError):
+            plan.publish_version(self.work, "seleccion", {"segments": []}, cannot)
+        self.assertEqual(self.names(), before)
+        # The number was not burned either: the next attempt starts again at 1, and the proposal
+        # is drafted while the reserve is still the empty file that reserved it.
+        sizes = []
+
+        def draft_proposal():
+            sizes.append((self.work / "seleccion-v1.json").stat().st_size)
+            return "# Propuesta v1\n"
+
+        self.assertEqual(plan.publish_version(self.work, "seleccion", {"segments": []},
+                                              draft_proposal)[0], 1)
+        self.assertEqual(sizes, [0])
+        self.assertGreater((self.work / "seleccion-v1.json").stat().st_size, 0)
+        self.assertEqual((self.work / "propuesta-v1.md").read_text(encoding="utf-8"),
+                         "# Propuesta v1\n")
+
+    def test_a_proposal_that_already_exists_is_never_replaced(self):
+        (self.work / "propuesta-v1.md").write_text("mía", encoding="utf-8")
+        before, drafted = self.names(), []
+        with self.assertRaisesRegex(ValueError, "no se sobrescribe"):
+            plan.publish_version(self.work, "seleccion", {"segments": []},
+                                 lambda: drafted.append(1) or "# Propuesta v1\n")
+        # Refused up front: the proposal was not even drafted.
+        self.assertEqual(drafted, [])
+        self.assertEqual(self.names(), before)
+        self.assertEqual((self.work / "propuesta-v1.md").read_text(encoding="utf-8"), "mía")
+
+    def test_a_failure_after_the_reserve_is_filled_takes_the_plan_back(self):
+        before = self.names()
+        for name in ("write_reserved", "publish"):
+            with self.subTest(step=name):
+                with unittest.mock.patch.object(common, name, side_effect=OSError("disco lleno")):
+                    with self.assertRaisesRegex(OSError, "disco lleno"):
+                        plan.publish_version(self.work, "seleccion", {"segments": []},
+                                             lambda: "# Propuesta v1\n")
+                self.assertEqual(self.names(), before)
+        # A plan whose digest cannot be computed is the same kind of failure, before the fill.
+        with self.assertRaises(ValueError):
+            plan.publish_version(self.work, "seleccion", {"x": float("nan")},
+                                 lambda: "# Propuesta v1\n")
+        self.assertEqual(self.names(), before)
+
+
 class CliTest(unittest.TestCase):
     def test_the_subcommand_is_wired_and_documented(self):
         parser = video.build_parser()
         parsed = parser.parse_args(["plan", "--work", "T", "--draft", "b.json", "--target", "10%",
                                     "--speed", "1.5", "--pauses", "no", "--silence-db", "-45",
                                     "--kind", "audio", "--dry-run"])
-        self.assertEqual((parsed.command, parsed.work, parsed.draft, parsed.target), 
+        self.assertEqual((parsed.command, parsed.work, parsed.draft, parsed.target),
                          ("plan", "T", "b.json", "10%"))
         self.assertEqual((parsed.speed, parsed.pauses, parsed.silence_db), (1.5, "no", -45.0))
         self.assertEqual((parsed.kind, parsed.dry_run, parsed.import_from, parsed.revert),
@@ -3812,6 +4243,49 @@ class CliTest(unittest.TestCase):
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--import", "p.json"]).import_from,
                          "p.json")
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--revert", "2"]).revert, 2)
+
+    def test_a_missing_or_broken_draft_leaves_by_code_two_in_spanish(self):
+        script = Path(__file__).with_name("video.py")
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = Path(temporary)
+            work_folder(work)
+            (work / "roto.json").write_text("{esto no es json", encoding="utf-8")
+            (work / "lista.json").write_text("[1, 2]", encoding="utf-8")
+            for name, fragment in (("ausente.json", "No existe el borrador"),
+                                   ("roto.json", "no es JSON válido"),
+                                   ("lista.json", "debe ser un objeto JSON")):
+                with self.subTest(draft=name):
+                    result = subprocess.run(
+                        [sys.executable, "-B", str(script), "plan", "--work", str(work),
+                         "--draft", str(work / name)],
+                        capture_output=True, text=True, encoding="utf-8", env=env)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertTrue(result.stderr.startswith("Error: "), result.stderr)
+                    self.assertIn(fragment, result.stderr)
+                    self.assertNotIn("Errno", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(list(work.glob("seleccion-v*.json")))
+
+    def run_main(self, error):
+        """video.main with `plan.run` replaced by something that raises `error`."""
+        err = io.StringIO()
+        with unittest.mock.patch.object(plan, "run", side_effect=error),                 unittest.mock.patch.object(sys, "argv", ["video.py", "plan", "--work", "T",
+                                                          "--draft", "b.json"]),                 contextlib.redirect_stderr(err):
+            code = video.main()
+        return code, err.getvalue()
+
+    def test_a_programming_error_leaves_as_a_message_and_not_as_a_traceback(self):
+        for error in (AttributeError("sin atributo"), TypeError("tipo"), IndexError("índice")):
+            with self.subTest(error=type(error).__name__):
+                code, message = self.run_main(error)
+                self.assertEqual((code, message), (1, f"Error: {error}\n"))
+        # The branches that were already there keep their own code and message.
+        self.assertEqual(self.run_main(KeyboardInterrupt())[0], 130)
+        code, message = self.run_main(MemoryError())
+        self.assertEqual(code, 1)
+        self.assertIn("memoria insuficiente", message)
+        self.assertEqual(self.run_main(ValueError("uno"))[0], 1)
 
     def test_draft_import_and_revert_are_mutually_exclusive(self):
         parser = video.build_parser()
@@ -3830,11 +4304,15 @@ class CliTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Versiones -v
 ```
 
-Esperado: 8 errores `AttributeError: module 'plan' has no attribute 'run'`.
+Esperado: 15 pruebas con error `AttributeError: module 'plan' has no attribute 'run'` (o `'publish_version'`
+en las que llaman a `publish_version` sin pasar por `run`) y un fallo,
+`test_a_missing_or_broken_draft_leaves_by_code_two_in_spanish`: sin el subcomando, `argparse` sale con su
+propio mensaje y no con `Error: …`. `test_draft_import_and_revert_are_mutually_exclusive` ya pasa.
 
 - [ ] **Paso 3: implementar la publicación en `plan.py`**
 
-Añade `import sys` a la cabecera de `plan.py` (orden alfabético, después de `pathlib`) y estas funciones:
+Añade `import contextlib` (antes de `json`) e `import sys` (después de `pathlib`) a la cabecera de
+`plan.py` y estas funciones:
 
 ```python
 def dumps(data):
@@ -3850,19 +4328,36 @@ def source_of(data):
     return source
 
 
+def discard(*paths):
+    """Remove leftovers; a cleanup that fails never hides the error that made it necessary."""
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
 def publish_version(work, prefix, body, extra=None):
-    """Reserve N, fill it atomically and publish the companion Markdown beside it.
+    """Reserve N, then publish the plan and its companion Markdown: both, or nothing at all.
 
     `extra` takes no arguments: by the time it runs, N is already in `body["version"]`.
     """
     version, path = common.reserve_version(work, prefix)
-    body["version"] = version
-    body["sha256"] = common.plan_sha256(body)
-    common.write_reserved(path, dumps(body) + "\n")
-    if extra is not None:
-        staged = work / f"propuesta-v{version}.md.parcial"
-        staged.write_text(extra(), encoding="utf-8")
-        common.publish(staged, work / f"propuesta-v{version}.md")
+    final = work / f"propuesta-v{version}.md"
+    staged = work / f"propuesta-v{version}.md.parcial"
+    try:
+        body["version"] = version
+        body["sha256"] = common.plan_sha256(body)
+        if extra is not None:
+            if final.exists():
+                raise ValueError(f"Ya está publicado y no se sobrescribe: {final}")
+            # Drafted before the reserve is filled: a Markdown that cannot be written must not
+            # leave a plan without its proposal behind.
+            staged.write_text(extra(), encoding="utf-8", newline="\n")
+        common.write_reserved(path, dumps(body) + "\n")
+        if extra is not None:
+            common.publish(staged, final)
+    except BaseException:
+        discard(path, staged)
+        raise
     return version, path
 
 
@@ -3906,8 +4401,10 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     for row in [item for item in rows if item["segment"]["id"] in included]:
         cuts.append(cut_row(row, len(cuts) + 1, place, grid))
         place += row["frames"] / grid["fps"]
-    reserves = [cut_row(row, 0, 0.0, grid) for row in rows
-                if row["segment"]["id"] not in included]
+    left = [row for row in rows if row["segment"]["id"] not in included]
+    # One numbering for the whole proposal (section 9): the reserves go on where the cuts stop.
+    reserves = [cut_row(row, len(cuts) + number, 0.0, grid)
+                for number, row in enumerate(left, start=1)]
     warnings = global_warnings(report, settings, total, bool(words))
     warnings += dependency_warnings(rows, included) + topic_warnings(draft, rows, included)
     for row in rows:
@@ -3943,9 +4440,9 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     version, path = publish_version(work, "seleccion", body,
                                     lambda: proposal(body, reserves, total, name))
     common.history(work, "edit" if draft.get("parent") else "init",
-                   {"version": version, "segments": len(cuts), "estado": report["estado"],
-                    "salida": report["salida"], "sha256": body["sha256"],
-                    "peticion": draft.get("request", "")})
+                   {"tipo": "seleccion", "version": version, "segments": len(cuts),
+                    "estado": report["estado"], "salida": report["salida"],
+                    "sha256": body["sha256"], "peticion": draft.get("request", "")})
     print(path)
     return 2 if blocking else 0
 
@@ -3976,14 +4473,15 @@ def run(args):
     if kind != "video":
         raise ValueError("El modo audio publica un esquema de ideas, no una selección de tramos; "
                          "este subcomando todavía no lo genera.")
-    draft = load(args.draft)
     grid = data.get("timeline") or common.timeline(data)
     try:
+        draft = load_draft(args.draft)
         settings = settings_of(draft, args, total, grid)
         segments = check_draft(draft, total, kind)
+        check_parent(draft, work)
     except ValueError as exc:
-        # The same door: a draft the agent has to fix is an invalid argument, not a controlled
-        # failure.
+        # The same door: a draft the agent has to fix (or cannot even give us) is an invalid
+        # argument, not a controlled failure.
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     transcript = work / "transcripcion.json"
@@ -4047,7 +4545,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 101 tests … OK` (37 + 12 + 52) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 119 tests … OK` (44 + 12 + 63) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -4083,7 +4581,8 @@ git commit -m "feat(plan): publicar seleccion-vN.json, la propuesta y el histori
 - Ese final común es de las dos funciones, así que se escribe una sola vez:
   `publish_draft(work, body, event, payload, dry_run) -> int` imprime el borrador y devuelve 0 con
   `--dry-run`; si no, reserva `borrador-vN.json`, fija `body["version"]`, lo escribe con
-  `write_reserved`, anota el historial con `event` y `payload` —más la versión reservada—, imprime la
+  `write_reserved`, anota el historial con `event` y `payload` —más la versión reservada y
+  `tipo: "borrador"`, porque `version` numera aquí un borrador y no una selección—, imprime la
   ruta y devuelve 0. `import_plan` y `revert` solo se diferencian en el cuerpo que preparan y en lo que
   anotan.
 - `import_plan` valida la forma de `segments` antes de tocar sus elementos: rechaza con `ValueError`
@@ -4091,6 +4590,8 @@ git commit -m "feat(plan): publicar seleccion-vN.json, la propuesta y el histori
   fuera del medio (mensaje único para los tres casos, con la duración exacta), o si `title` no es una
   cadena no vacía. Un plan 0.1 real no lleva `sha256` en `source` —solo `path`, `size` y
   `mtime_ns`—, y las pruebas reproducen esa fixture tal cual, no la huella completa de un `source` 0.2.
+- `revert` no lee `numero`: ordena por `start`, así que sirve también con un plan publicado sin ese
+  campo (una prueba borra `numero` de `seleccion-v1.json` y revierte igual).
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -4136,6 +4637,9 @@ class ImportarTest(unittest.TestCase):
         self.assertEqual(body["source"]["sha256"],
                          common.fingerprint(self.data["source"]["path"])["sha256"])
         self.assertFalse(list(self.work.glob("seleccion-v*.json")))
+        record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8").strip())
+        self.assertEqual((record["evento"], record["tipo"], record["version"]),
+                         ("init", "borrador", 1))
         # The imported draft still needs review and acceptance: `plan --draft` on it publishes a
         # real plan, and `identidad_parcial` rides along into it and into the proposal (section 9).
         code, _ = call(self.work, draft=str(self.work / "borrador-v1.json"))
@@ -4167,8 +4671,27 @@ class ImportarTest(unittest.TestCase):
                          [(2.0, 10.0), (11.0, 18.0)])
         self.assertEqual(body["settings"]["target"], "40%")
         self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
+        lines = (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[-1])
+        self.assertEqual((record["evento"], record["tipo"], record["version"], record["desde"]),
+                         ("edit", "borrador", 1, 1))
         with self.assertRaisesRegex(ValueError, "No existe seleccion-v9.json"):
             call(self.work, revert=9)
+
+    def test_reverting_does_not_depend_on_the_proposal_numbers(self):
+        draft(self.work, BASE)
+        call(self.work)
+        path = self.work / "seleccion-v1.json"
+        published = json.loads(path.read_text(encoding="utf-8"))
+        for item in published["segments"] + published["reserves"]:
+            del item["numero"]
+        path.write_text(json.dumps(published, ensure_ascii=False), encoding="utf-8")
+        code, _ = call(self.work, revert=1)
+        self.assertEqual(code, 0)
+        body = json.loads((self.work / "borrador-v1.json").read_text(encoding="utf-8"))
+        self.assertEqual([(item["id"], item["included"]) for item in body["segments"]],
+                         [(1, True), (2, True), (3, True), (4, False), (5, True), (6, True)])
+        self.assertTrue(all("numero" not in item for item in body["segments"]))
 
     def test_settings_options_do_not_apply_to_import_or_revert(self):
         code, _ = call(self.work, import_from=str(self.old_plan()), target="10%")
@@ -4211,7 +4734,9 @@ class ImportarTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Importar -v
 ```
 
-Esperado: 6 fallos; `run` exige `--draft` y no mira `import_from` ni `revert`.
+Esperado: 6 errores `NameError` (`import_plan` o `revert` aún no existen, y `run` ya las llama desde la
+tarea 16); `test_settings_options_do_not_apply_to_import_or_revert` pasa porque esa guarda ya está en
+`run`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -4224,7 +4749,8 @@ def publish_draft(work, body, event, payload, dry_run):
     version, path = common.reserve_version(work, "borrador")
     body["version"] = version
     common.write_reserved(path, dumps(body) + "\n")
-    common.history(work, event, {"version": version, **payload})
+    # `version` numbers a draft here, a selection in the lines of `video_plan`: `tipo` says which.
+    common.history(work, event, {"tipo": "borrador", "version": version, **payload})
     print(path)
     return 0
 
@@ -4303,14 +4829,9 @@ def revert(args, work):
     return publish_draft(work, body, "edit", {"desde": old["version"]}, args.dry_run)
 ```
 
-y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
-
-```python
-    if args.import_from:
-        return import_plan(args, work, data, total)
-    if args.revert is not None:
-        return revert(args, work)
-```
+`run` no cambia en esta tarea: la tarea 16 ya lo deja despachando `--import` y `--revert` (y rechazando
+las opciones de ajuste que los acompañen) antes de exigir `--draft`; aquí solo se escriben las
+funciones a las que llama.
 
 - [ ] **Paso 4: ejecutarla y verla pasar**
 
@@ -4318,7 +4839,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 107 tests … OK` (37 + 12 + 58), en menos de dos minutos.
+Esperado: `Ran 126 tests … OK` (44 + 12 + 70), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -4381,14 +4902,28 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 58 en
-  `test_plan.py`: **107** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
+  subcomandos); al terminar el plan hay 44 en `test_common.py`, 12 en `test_video.py` y 70 en
+  `test_plan.py`: **126** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
-  de §12 que le corresponden: borrador ausente, borrador rechazado y plan publicado con aviso
-  bloqueante —los dos primeros son la misma clase de argumento inválido—. Los fallos de
+  de §12 que le corresponden: borrador ausente o ilegible, borrador rechazado (con `excluded` o `parent`
+  mal formados incluidos) y plan publicado con aviso bloqueante —los dos primeros son la misma clase de
+  argumento inválido—. Los fallos de
   entorno (carpeta inexistente, `metadata.json` ilegible) siguen saliendo por `main` como `Error: …` con
   código 1.
 - **Eventos del historial.** Este plan escribe `init` (primera versión o importación) y `edit` (versión
   derivada o regreso a una anterior). `accept`, `render`, `verify`, `doc` y `deliver` son de los otros
-  planes; ninguno inventa eventos nuevos.
+  planes; ninguno inventa eventos nuevos. Cada línea lleva además `tipo` (`seleccion` en `video_plan`,
+  `borrador` en `--import` y `--revert`), y el `payload` no puede pisar `cuando` ni `evento`.
+
+## Revisión de rama y tanda final
+
+Tras las 17 tareas se hizo una revisión de rama, con pruebas de extremo a extremo por la CLI y 45 mutantes, y una tanda de arreglos (`e8b616f`, `82e82f4`, `5325b55`, `e9e57e6`, `cc9587f`); las tareas de arriba ya reproducen el código resultante.
+
+- `excluded` y `parent`: `check_draft` valida `excluded` y la nueva `check_parent` valida `parent` (tareas 10 y 16).
+- Publicación entera o nada: `publish_version` redacta la propuesta antes de llenar la reserva y lo limpia todo si algo falla (tarea 16).
+- Errores de borrador en español: `load_draft` dentro del `try` de `run` y `video.main` con más excepciones (tareas 1, 10 y 16).
+- Numeración de reservas: `numero` correlativo a los cortes y columna `#` en la tabla «Reservas» (tareas 15 y 16).
+- `history`, `lock` y LF: `history` captura `Exception`, no deja que el payload pise `cuando`/`evento` y lleva `tipo`; `lock` no enmascara; los archivos publicados llevan `newline="\n"` (tarea 8).
+- Cinco pruebas que faltaban: reparto de `N`, `metadata.json` de `prepare` 0.1.0, `EDGE_LOOK`, `samples_for` y `bounds`, y `retention` (tareas 6, 7, 11, 12 y 16); la skill pasa de 107 a 126 pruebas.
+- Aparcado: `topics` al revertir, el tamaño de los módulos y varios cosméticos.
