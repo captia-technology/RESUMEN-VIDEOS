@@ -577,5 +577,76 @@ class AlternativasTest(unittest.TestCase):
         self.assertEqual([hint["tipo"] for hint in hints], ["porcentaje"])
 
 
+class PropuestaTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        self.data = work_folder(self.work)
+        self.grid = self.data["timeline"]
+        self.levels = common.energy(self.work / "audio.wav")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_a_cell_never_breaks_the_table(self):
+        self.assertEqual(plan.cell("a | b\nc"), "a \\| b c")
+
+    def test_the_published_row_of_a_cut(self):
+        settings = {"target": "40%", "objetivo": 24.0, "speed": 1.25, "remove_pauses": True,
+                    "silence_db": -50.0}
+        rows, _ = plan.fuse(plan.adjusted([cut(1, 2.0, 10.0, 1)], self.levels, [], -50.0),
+                            self.grid["interval"])
+        rows = plan.measure(rows, self.levels, self.grid, settings)
+        row = plan.cut_row(rows[0], 1, 0.0, self.grid)
+        self.assertEqual((row["numero"], row["id"], row["priority"]), (1, 1, 1))
+        self.assertEqual((row["start"], row["end"]), (2.0, 10.0))
+        self.assertEqual(row["spans"], [[2.0, 5.08], [5.92, 10.0]])
+        self.assertEqual((row["frames"], row["samples"]), (143, 274560))
+        self.assertEqual(row["salida"], [0.0, 5.72])
+        self.assertEqual(row["subcuts"], [{"spans": [[2.0, 5.08], [5.92, 10.0]],
+                                           "frames": 143, "samples": 274560}])
+        self.assertAlmostEqual(plan.length(row), 5.72)
+
+    def test_the_text_timeline_marks_what_is_kept(self):
+        settings = {"target": None, "objetivo": None, "speed": 1.25, "remove_pauses": True,
+                    "silence_db": -50.0}
+        rows, _ = plan.fuse(plan.adjusted(BASE, self.levels, [], -50.0), self.grid["interval"])
+        rows = plan.measure(rows, self.levels, self.grid, settings)
+        included = {row["segment"]["id"] for row in rows if row["segment"]["included"]}
+        self.assertEqual(plan.bar(rows, included, 60.0),
+                         "··########·#######·#######··············#######··######·····")
+        self.assertEqual(len(plan.bar(rows, included, 60.0)), plan.BAR)
+
+    def test_the_proposal_has_every_section_of_section_nine(self):
+        body = {"version": 1, "changes": ["propuesta inicial"], "warnings": [],
+                "settings": {"speed": 1.25}, "excluidos": [{"title": "Saludos",
+                                                            "reason": "Sin contenido"}],
+                "estimate": {"cortes": 1, "origen": 8.0, "tras_pausas": 7.16, "salida": 5.72,
+                             "porcentaje": 9.53, "objetivo": 6.0, "banda": [0.0, 16.0],
+                             "estado": "ok"},
+                "segments": [{"numero": 1, "id": 1, "priority": 1, "phrase": "Frase 1",
+                              "start": 2.0, "end": 10.0, "salida": [0.0, 5.72]}],
+                "alternativas": [{"velocidad": 1.0, "pausas": True, "salida": 7.16,
+                                  "porcentaje": 11.93, "estado": "ok"}],
+                "sugerencias": [], "recorrido": "#" * plan.BAR}
+        reserves = [{"id": 4, "start": 28.0, "end": 33.0, "reason": "Ejemplo alternativo"}]
+        text = plan.proposal(body, reserves, 60.0, "medio.mp4")
+        for heading in ("# Propuesta v1", "## Cambios", "## Avisos", "## Cortes", "## Reservas",
+                        "## Exclusiones deliberadas", "## Alternativas", "## Sugerencias",
+                        "## Recorrido", "## Cómo responder"):
+            self.assertIn(heading, text)
+        # clock truncates, so 5,72 s of output is read as 0:05 everywhere.
+        self.assertIn("Original 1:00 · objetivo 0:06 (banda 0:00–0:16) · estimación 0:05 "
+                      "(9,5 %) · estado **ok**", text)
+        self.assertIn("1 cortes · 0:08 → sin pausas 0:07 → ×1,25 → 0:05", text)
+        self.assertIn("| 1 | 0:02–0:10 | 0:00–0:05 (6 s) | 1 | Frase 1 |", text)
+        self.assertIn("| 4 | 0:28–0:33 | Ejemplo alternativo |", text)
+        self.assertIn("| Saludos | Sin contenido |", text)
+        self.assertIn("| ×1,00 | sí | 0:07 | 11,9 % | ok |", text)
+        self.assertIn("- ninguna: el plan está dentro de la banda", text)
+        self.assertIn("- ninguno", text)
+        self.assertIn("«quita el 7 y el 9»", text)
+
+
 if __name__ == "__main__":
     unittest.main()

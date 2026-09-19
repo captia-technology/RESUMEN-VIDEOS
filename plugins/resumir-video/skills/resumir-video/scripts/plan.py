@@ -529,3 +529,94 @@ def suggestions(rows, included, settings, report):
 def comma(value, digits=1):
     """Spanish decimal notation, used by the suggestions and by the proposal."""
     return f"{value:.{digits}f}".replace(".", ",")
+
+
+def cell(text):
+    """One Markdown cell: a pipe or a newline would break the table."""
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def length(cut):
+    """Output seconds of a published row."""
+    return cut["salida"][1] - cut["salida"][0]
+
+
+def cut_row(row, index, place, grid):
+    """One cut of the published plan: origin, spans, exact N and M, and its place in the output."""
+    segment = row["segment"]
+    return {"id": segment["id"], "numero": index, "title": segment["title"],
+            "phrase": segment["phrase"], "reason": segment["reason"],
+            "audio_evidence": segment["audio_evidence"],
+            "visual_evidence": segment.get("visual_evidence", ""),
+            "priority": segment["priority"], "pinned": segment.get("pinned", False),
+            "visual_only": segment.get("visual_only", False),
+            "remove_pauses": segment.get("remove_pauses", True),
+            "depends_on": sorted(segment.get("depends_on", [])),
+            "start": round(row["a"], 6), "end": round(row["b"], 6),
+            "spans": [[round(x, 6), round(y, 6)] for x, y in row["spans"]],
+            "frames": row["frames"], "samples": row["samples"],
+            "salida": [round(place, 6), round(place + row["frames"] / grid["fps"], 6)],
+            "subcuts": [{"spans": [[round(x, 6), round(y, 6)] for x, y in part["spans"]],
+                         "frames": part["frames"], "samples": part["samples"]}
+                        for part in row["subcuts"]]}
+
+
+def bar(rows, included, total, width=BAR):
+    """Text timeline: one character per slice of the original, filled where a cut is kept."""
+    slots = ["·"] * width
+    for row in rows:
+        if row["segment"]["id"] not in included or row["empty"]:
+            continue
+        first = max(0, min(width - 1, int(width * row["a"] / total)))
+        last = max(first, min(width - 1, math.ceil(width * row["b"] / total) - 1))
+        for index in range(first, last + 1):
+            slots[index] = "#"
+    return "".join(slots)
+
+
+def proposal(plan, reserves, total, name):
+    """propuesta-vN.md: what the user reads before accepting."""
+    report, settings, clock = plan["estimate"], plan["settings"], common.clock
+    head = [f"# Propuesta v{plan['version']} · resumen de «{name}»", "",
+            f"Original {clock(total)} · " + (f"objetivo {clock(report['objetivo'])} "
+            f"(banda {clock(report['banda'][0])}–{clock(report['banda'][1])}) · "
+            if report["objetivo"] else "sin objetivo · ") +
+            f"estimación {clock(report['salida'])} ({comma(report['porcentaje'])} %) · "
+            f"estado **{report['estado']}**", "",
+            f"{report['cortes']} cortes · {clock(report['origen'])} → sin pausas "
+            f"{clock(report['tras_pausas'])} → ×{comma(settings['speed'], 2)} → "
+            f"{clock(report['salida'])}", ""]
+    head += ["## Cambios", ""] + [f"- {line}" for line in plan["changes"]] + [""]
+    head += ["## Avisos", ""]
+    head += [f"- {'**bloquea** · ' if item['bloquea'] else ''}`{item['codigo']}`"
+             + (f" · corte {item['corte']}" if item["corte"] else "") + f" · {item['mensaje']}"
+             for item in plan["warnings"]] or ["- ninguno"]
+    head += ["", "## Cortes", "", "| # | Origen | Salida estimada | Prioridad | Qué se dice |",
+             "| --- | --- | --- | --- | --- |"]
+    for item in plan["segments"]:
+        head.append(f"| {item['numero']} | {clock(item['start'])}–{clock(item['end'])} "
+                    f"| {clock(item['salida'][0])}–{clock(item['salida'][1])} "
+                    f"({length(item):.0f} s) | {item['priority']} | {cell(item['phrase'])} |")
+    head += ["", "## Reservas", "", "| id | Origen | Qué aportaría |", "| --- | --- | --- |"]
+    for item in reserves:
+        head.append(f"| {item['id']} | {clock(item['start'])}–{clock(item['end'])} | "
+                    f"{cell(item['reason'])} |")
+    head += ["", "## Exclusiones deliberadas", "", "| Qué | Por qué |", "| --- | --- |"]
+    for item in plan["excluidos"]:
+        head.append(f"| {cell(item.get('title', ''))} | {cell(item.get('reason', ''))} |")
+    head += ["", "## Alternativas", "", "| Velocidad | Pausas | Salida | % | Estado |",
+             "| --- | --- | --- | --- | --- |"]
+    for item in plan["alternativas"]:
+        head.append(f"| ×{comma(item['velocidad'], 2)} | {'sí' if item['pausas'] else 'no'} | "
+                    f"{clock(item['salida'])} | {comma(item['porcentaje'])} % | {item['estado']} |")
+    head += ["", "## Sugerencias", ""] + ([f"- {hint['texto']}" for hint in plan["sugerencias"]]
+                                          or ["- ninguna: el plan está dentro de la banda"])
+    head += ["", "## Recorrido", "", f"`{plan['recorrido']}`", "",
+             f"0:00 ← cada carácter son {total / BAR:.0f} s → {clock(total)}", "",
+             "## Cómo responder", "",
+             "- «acepta» o «móntalo» para montar esta versión.",
+             "- «quita el 7 y el 9», «añade el 6», «alarga el 3 diez segundos».",
+             "- «añade la parte donde habla de ATEX», «parte el 4», «une 4 y 5».",
+             "- «súbelo al 15 %», «sin acelerar», «no quites pausas en el 12».",
+             "- «vuelve a la v1» o «¿qué has dejado fuera?».", ""]
+    return "\n".join(head)
