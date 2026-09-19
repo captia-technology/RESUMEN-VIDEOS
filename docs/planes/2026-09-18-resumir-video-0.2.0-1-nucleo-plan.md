@@ -135,8 +135,9 @@ segundo el regreso a una versión.
 
 **Avisos que este plan no emite:** `huecos_pts` y `fuente_vfr` (los detecta el sondeo de paquetes de
 `prepare`), `origen_reasignado` (lo emite `render`) y `cobertura_baja` (lo emite `compare`). `plan`
-propaga los dos primeros si `metadata.json` los trae en la clave `avisos`. `identidad_parcial` solo
-aparece en `plan --import`.
+propaga los dos primeros si `metadata.json` los trae en la clave `avisos`. `identidad_parcial` lo
+emite `plan --import`, y `plan` lo propaga desde el borrador (`draft["warnings"]`) hasta la
+propuesta, igual que los dos anteriores.
 
 **Interfaz que este plan consume y no produce:** `metadata.json` ampliado por `prepare` con `kind`,
 `source` con huella, `timeline` y `audio_stream`, y las funciones `common.pictures` y `common.kind`, que
@@ -186,8 +187,8 @@ cualquier trabajo cuyo `metadata.json` no declare `kind`, así que no queda bloq
   justificar) pasan a `plan.check_draft`, en la tarea 10 de este mismo plan y con más casos que
   `validate_plan`; de la primera de esas dos, el `stream_end` contra un MKV real se queda aquí, dentro
   de `test_forward_only_containers` (paso 6), por lo dicho arriba. Por eso la suma de pruebas de la
-  skill **crece**: de las 15 de hoy se pasa a **103** al terminar el plan (37 en `test_common.py`, 12 en
-  `test_video.py` y 54 en `test_plan.py`). Las **23** de `tests/` no cambian.
+  skill **crece**: de las 15 de hoy se pasa a **107** al terminar el plan (37 en `test_common.py`, 12 en
+  `test_video.py` y 58 en `test_plan.py`). Las **23** de `tests/` no cambian.
 
 ---
 
@@ -3645,6 +3646,14 @@ git commit -m "feat(plan): propuesta en Markdown, recorrido de texto y fila publ
   un argumento inválido, no un fallo controlado; en los dos casos se imprime `Error: …` por la salida
   de errores y no se escribe nada). `--dry-run` no reserva versión, no escribe propuesta ni historial;
   sí puede crear `energia.f32`, que es material de `prepare`.
+- `video_plan` propaga también los avisos que traiga el borrador (`draft.get("warnings", [])`), no
+  solo los de `metadata.json`: hoy el único que llega por ahí es `identidad_parcial`, que nace en
+  `plan --import` (tarea 17) y así llega hasta el plan publicado y la propuesta.
+- `--draft`, `--import` y `--revert` forman un grupo mutuamente excluyente de `register`
+  (`add_mutually_exclusive_group`): pedir dos a la vez es un error de `argparse`, con salida 2 y sin
+  tocar la carpeta de trabajo. Además, `run` rechaza con código 2 y sin escribir nada si
+  `--target`, `--speed`, `--pauses` o `--silence-db` acompañan a `--import` o `--revert`: esas
+  opciones dan forma a un trabajo de vídeo y ni importar ni volver a una versión ejecutan uno.
 - El `extra` de `publish_version` es un invocable **sin argumentos** que devuelve el Markdown
   acompañante: cuando se le llama, la versión ya está fijada en `body["version"]`, que es de donde la
   lee `proposal`, así que pasársela aparte solo duplicaría el dato.
@@ -3803,6 +3812,16 @@ class CliTest(unittest.TestCase):
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--import", "p.json"]).import_from,
                          "p.json")
         self.assertEqual(parser.parse_args(["plan", "--work", "T", "--revert", "2"]).revert, 2)
+
+    def test_draft_import_and_revert_are_mutually_exclusive(self):
+        parser = video.build_parser()
+        combos = [["--draft", "b.json", "--import", "p.json"],
+                  ["--draft", "b.json", "--revert", "1"],
+                  ["--import", "p.json", "--revert", "1"]]
+        for combo in combos:
+            with self.subTest(combo=combo), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["plan", "--work", "T", *combo])
 ```
 
 - [ ] **Paso 2: ejecutarla y verla fallar**
@@ -3811,7 +3830,7 @@ class CliTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Versiones -v
 ```
 
-Esperado: 7 errores `AttributeError: module 'plan' has no attribute 'run'`.
+Esperado: 8 errores `AttributeError: module 'plan' has no attribute 'run'`.
 
 - [ ] **Paso 3: implementar la publicación en `plan.py`**
 
@@ -3901,6 +3920,10 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     # prepare records huecos_pts and fuente_vfr of the packet probe; plan only carries them on.
     warnings += [common.warning(item["codigo"], item["mensaje"], cut=item.get("corte"))
                  for item in data.get("avisos", [])]
+    # A draft born from --import carries its own warnings (identidad_parcial): the same queue
+    # carries them into the published plan and its proposal, instead of stopping at the draft.
+    warnings += [common.warning(item["codigo"], item["mensaje"], cut=item.get("corte"))
+                 for item in draft.get("warnings", [])]
     body = {"version": 0, "parent": draft.get("parent"), "kind": "video",
             "request": draft.get("request", ""), "source": source_of(data),
             "audio_stream": data["audio_stream"],
@@ -3934,6 +3957,15 @@ def run(args):
         raise ValueError(f"No existe la carpeta de trabajo: {work}")
     data = load(work / "metadata.json")
     total = common.duration(data)
+    if args.import_from or args.revert is not None:
+        # Section 12: these options shape a video job's settings, and neither --import nor
+        # --revert runs one; silently ignoring them would hide a request the caller made.
+        if any(value is not None for value in
+               (args.target, args.speed, args.pauses, args.silence_db)):
+            print("Error: --target, --speed, --pauses y --silence-db no se aplican con --import "
+                 "ni --revert.", file=sys.stderr)
+            return 2
+        return import_plan(args, work, data, total) if args.import_from else revert(args, work)
     if not args.draft:
         # Section 12: a draft that is missing is as invalid an argument as one that is wrong, so it
         # leaves by the same door as `check_draft` below, with code 2 and without writing anything.
@@ -3965,7 +3997,14 @@ def register(sub):
     parser = sub.add_parser("plan",
                             help="Calcula tramos, estimación, avisos y propuesta desde un borrador.")
     parser.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
-    parser.add_argument("--draft", help="Borrador del agente (JSON) con segments y settings.")
+    # Exactly one way to get a video job's segments: a draft to plan, a 0.1 plan to import, or a
+    # published version to copy back into a new draft. argparse itself refuses any other pair.
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--draft", help="Borrador del agente (JSON) con segments y settings.")
+    source.add_argument("--import", dest="import_from",
+                        help="Convierte un plan 0.1 en un borrador nuevo.")
+    source.add_argument("--revert", type=common.positive,
+                        help="Copia seleccion-vN.json a un borrador nuevo.")
     parser.add_argument("--target",
                         help="Objetivo: 10%%, 720s, 12min o 0:12:00 (prevalece sobre el borrador).")
     parser.add_argument("--speed", type=float, help="Velocidad de 1,0 a 2,0 (por defecto 1,25).")
@@ -3976,10 +4015,6 @@ def register(sub):
                         help="Modo; por defecto, el de metadata.json.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Calcula e imprime el plan sin publicar versión.")
-    parser.add_argument("--import", dest="import_from",
-                        help="Convierte un plan 0.1 en un borrador nuevo.")
-    parser.add_argument("--revert", type=common.positive,
-                        help="Copia seleccion-vN.json a un borrador nuevo.")
     parser.set_defaults(run=run)
     return parser
 ```
@@ -4012,7 +4047,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
 ```
 
-Esperado: `Ran 100 tests … OK` (37 + 12 + 51) y la ayuda con las diez opciones. Comprueba también el
+Esperado: `Ran 101 tests … OK` (37 + 12 + 52) y la ayuda con las diez opciones. Comprueba también el
 código de salida real de un plan con aviso bloqueante creando la carpeta de prueba a mano si quieres;
 el valor debe ser 2.
 
@@ -4051,6 +4086,11 @@ git commit -m "feat(plan): publicar seleccion-vN.json, la propuesta y el histori
   `write_reserved`, anota el historial con `event` y `payload` —más la versión reservada—, imprime la
   ruta y devuelve 0. `import_plan` y `revert` solo se diferencian en el cuerpo que preparan y en lo que
   anotan.
+- `import_plan` valida la forma de `segments` antes de tocar sus elementos: rechaza con `ValueError`
+  si `segments` no es una lista no vacía, si un corte no es un objeto, si está desordenado, solapado o
+  fuera del medio (mensaje único para los tres casos, con la duración exacta), o si `title` no es una
+  cadena no vacía. Un plan 0.1 real no lleva `sha256` en `source` —solo `path`, `size` y
+  `mtime_ns`—, y las pruebas reproducen esa fixture tal cual, no la huella completa de un `source` 0.2.
 
 - [ ] **Paso 1: escribir la prueba que falla**
 
@@ -4065,7 +4105,10 @@ class ImportarTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def old_plan(self, **changes):
-        body = {"source": dict(self.data["source"]), "audio_stream": 1,
+        # A real 0.1 plan's source has no sha256: only path, size and mtime_ns (common.identity
+        # of the 0.1.0 era). Copying the 0.2 source whole would let it hide a contrast bug.
+        source = {key: self.data["source"][key] for key in ("path", "size", "mtime_ns")}
+        body = {"source": source, "audio_stream": 1,
                 "segments": [{"start": 3.0, "end": 9.0, "title": "Requisito", "reason": "Motivo",
                               "audio_evidence": "Voz", "visual_evidence": "Tabla"},
                              {"start": 20.0, "end": 25.0, "title": "Excepción", "reason": "Motivo",
@@ -4093,14 +4136,22 @@ class ImportarTest(unittest.TestCase):
         self.assertEqual(body["source"]["sha256"],
                          common.fingerprint(self.data["source"]["path"])["sha256"])
         self.assertFalse(list(self.work.glob("seleccion-v*.json")))
+        # The imported draft still needs review and acceptance: `plan --draft` on it publishes a
+        # real plan, and `identidad_parcial` rides along into it and into the proposal (section 9).
+        code, _ = call(self.work, draft=str(self.work / "borrador-v1.json"))
+        self.assertEqual(code, 0)
+        published = json.loads((self.work / "seleccion-v1.json").read_text(encoding="utf-8"))
+        self.assertIn("identidad_parcial", [item["codigo"] for item in published["warnings"]])
+        self.assertIn("identidad_parcial",
+                      (self.work / "propuesta-v1.md").read_text(encoding="utf-8"))
 
     def test_only_size_and_mtime_are_contrasted(self):
-        moved = dict(self.data["source"], path="otra/ruta/medio.mp4")
+        base = {key: self.data["source"][key] for key in ("path", "size", "mtime_ns")}
+        moved = dict(base, path="otra/ruta/medio.mp4")
         code, _ = call(self.work, import_from=str(self.old_plan(source=moved)))
         self.assertEqual(code, 0)
         with self.assertRaisesRegex(ValueError, "difiere: size"):
-            call(self.work, import_from=str(self.old_plan(
-                source=dict(self.data["source"], size=99))))
+            call(self.work, import_from=str(self.old_plan(source=dict(base, size=99))))
 
     def test_reverting_copies_a_published_plan_into_a_new_draft(self):
         draft(self.work, BASE)
@@ -4118,6 +4169,37 @@ class ImportarTest(unittest.TestCase):
         self.assertEqual(body["source"]["sha256"], self.data["source"]["sha256"])
         with self.assertRaisesRegex(ValueError, "No existe seleccion-v9.json"):
             call(self.work, revert=9)
+
+    def test_settings_options_do_not_apply_to_import_or_revert(self):
+        code, _ = call(self.work, import_from=str(self.old_plan()), target="10%")
+        self.assertEqual(code, 2)
+        self.assertFalse(list(self.work.glob("borrador-v*.json")))
+        draft(self.work, BASE)
+        call(self.work)
+        for extra in ({"speed": 1.5}, {"pauses": "no"}, {"silence_db": -45.0}):
+            with self.subTest(extra=extra):
+                code, _ = call(self.work, revert=1, **extra)
+                self.assertEqual(code, 2)
+        self.assertFalse(list(self.work.glob("borrador-v*.json")))
+
+    def test_an_unordered_or_overlapping_zero_one_plan_is_rejected_clearly(self):
+        # The failure is disorder/overlap, not the medium's length: the message must say so
+        # instead of the misleading "fuera del medio" alone.
+        overlapping = self.old_plan(segments=[{"start": 3.0, "end": 9.0, "title": "Uno"},
+                                              {"start": 5.0, "end": 12.0, "title": "Dos"}])
+        with self.assertRaisesRegex(ValueError, "desordenado, solapado o fuera"):
+            call(self.work, import_from=str(overlapping))
+
+    def test_a_malformed_zero_one_plan_is_rejected_without_a_traceback(self):
+        not_objects = self.old_plan(segments=["no soy un objeto"])
+        with self.assertRaisesRegex(ValueError, "objeto"):
+            call(self.work, import_from=str(not_objects))
+        bad_title = self.old_plan(segments=[{"start": 3.0, "end": 9.0, "title": 123}])
+        with self.assertRaisesRegex(ValueError, "título"):
+            call(self.work, import_from=str(bad_title))
+        not_a_list = self.old_plan(segments="no soy una lista")
+        with self.assertRaisesRegex(ValueError, "no tiene cortes"):
+            call(self.work, import_from=str(not_a_list))
 ```
 
 `work_folder` ya deja un `medio.mp4` de mentira en la carpeta desde la tarea 10, así que
@@ -4129,7 +4211,7 @@ class ImportarTest(unittest.TestCase):
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_plan.py" -k Importar -v
 ```
 
-Esperado: 3 fallos; `run` exige `--draft` y no mira `import_from` ni `revert`.
+Esperado: 6 fallos; `run` exige `--draft` y no mira `import_from` ni `revert`.
 
 - [ ] **Paso 3: implementación mínima**
 
@@ -4157,13 +4239,21 @@ def import_plan(args, work, data, total):
     if differing:
         raise ValueError("El plan importado no corresponde a este medio "
                          f"(difiere: {', '.join(differing)}).")
+    old_segments = old.get("segments")
+    if not isinstance(old_segments, list) or not old_segments:
+        raise ValueError("El plan importado no tiene cortes.")
     segments, previous = [], 0.0
-    for index, segment in enumerate(old.get("segments") or [], start=1):
+    for index, segment in enumerate(old_segments, start=1):
+        if not isinstance(segment, dict):
+            raise ValueError(f"El corte {index} del plan importado debe ser un objeto.")
         start = number(segment.get("start"), f"start del corte {index}")
         end = number(segment.get("end"), f"end del corte {index}")
         if not previous <= start < end <= total:
-            raise ValueError(f"El corte {index} del plan importado está fuera del medio.")
+            raise ValueError(f"El corte {index} del plan importado está desordenado, solapado o "
+                             f"fuera del medio (termina en {total:.3f} s).")
         title = segment.get("title", f"Corte {index}")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"El título del corte {index} del plan importado debe ser texto.")
         segments.append({"id": index, "start": start, "end": end, "title": title, "phrase": title,
                          "reason": segment.get("reason", "Importado de un plan 0.1"),
                          "audio_evidence": segment.get("audio_evidence", "Importado de un plan 0.1"),
@@ -4172,8 +4262,6 @@ def import_plan(args, work, data, total):
                          "priority": 1, "included": True, "pinned": False, "depends_on": [],
                          "remove_pauses": False, "visual_only": False})
         previous = end
-    if not segments:
-        raise ValueError("El plan importado no tiene cortes.")
     body = {"parent": None, "request": f"Importado de {Path(args.import_from).name}",
             # The fingerprint is recomputed from the file itself, never copied from the 0.1 plan.
             "source": dict(current, **common.fingerprint(current["path"])),
@@ -4193,18 +4281,19 @@ def revert(args, work):
     if not source.is_file():
         raise ValueError(f"No existe {source.name} en la carpeta de trabajo.")
     old = load(source)
-    kept = {item["id"] for item in old.get("segments", [])}
+    published = old.get("segments", [])
+    kept = {item["id"] for item in published}
     segments = []
-    for item in old.get("segments", []) + old.get("reserves", []):
+    # `cut_row` always writes these keys for both `segments` and `reserves`: no default is needed.
+    for item in published + old.get("reserves", []):
         segments.append({"id": item["id"], "start": item["start"], "end": item["end"],
                          "title": item["title"], "phrase": item["phrase"], "reason": item["reason"],
                          "audio_evidence": item["audio_evidence"],
-                         "visual_evidence": item.get("visual_evidence", ""),
+                         "visual_evidence": item["visual_evidence"],
                          "priority": item["priority"], "included": item["id"] in kept,
-                         "pinned": item.get("pinned", False),
-                         "depends_on": item.get("depends_on", []),
-                         "remove_pauses": item.get("remove_pauses", True),
-                         "visual_only": item.get("visual_only", False)})
+                         "pinned": item["pinned"], "depends_on": item["depends_on"],
+                         "remove_pauses": item["remove_pauses"],
+                         "visual_only": item["visual_only"]})
     segments.sort(key=lambda item: item["start"])
     body = {"parent": old["version"], "request": f"Vuelve a la v{old['version']}",
             "source": old["source"],
@@ -4229,7 +4318,7 @@ y en `run`, justo después de calcular `total` y antes de exigir `--draft`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 ```
 
-Esperado: `Ran 103 tests … OK` (37 + 12 + 54), en menos de dos minutos.
+Esperado: `Ran 107 tests … OK` (37 + 12 + 58), en menos de dos minutos.
 
 - [ ] **Paso 5: comprobación final de todo el repositorio**
 
@@ -4292,8 +4381,8 @@ git commit -m "feat(plan): importar planes 0.1 y volver a una version publicada"
   vez, en `common.py` (tarea 7).
 - **Recuento de pruebas.** El repositorio parte de 15 pruebas en la skill y 23 en `tests/`. La tarea 1
   deja la skill en 12 (retira cuatro, reescribe otras cuatro sin montar nada y añade la del registro de
-  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 54 en
-  `test_plan.py`: **103** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
+  subcomandos); al terminar el plan hay 37 en `test_common.py`, 12 en `test_video.py` y 58 en
+  `test_plan.py`: **107** con `-p "test_*.py"`, más las 23 de `tests/`, que este plan no toca.
   `test_video.py` no vuelve a cambiar por el montaje: el plan de montaje solo crea `test_render.py`.
 - **Códigos de salida.** `run` devuelve 0 cuando publica sin avisos bloqueantes y 2 en los tres casos
   de §12 que le corresponden: borrador ausente, borrador rechazado y plan publicado con aviso
