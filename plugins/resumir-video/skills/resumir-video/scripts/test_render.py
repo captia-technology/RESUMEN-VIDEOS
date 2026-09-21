@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -369,6 +370,113 @@ class FilterOnMediaTest(unittest.TestCase):
             # aresample at the head neither adds nor removes a sample (measured).
             plain = chain.replace("aresample=async=1:first_pts=0,", "")
             self.assertEqual(samples(plain, "sin.wav"), (count, first))
+
+
+def graph_frames(source, chain, target):
+    """Frames that actually reach the filter graph, counted by a leading showinfo on stderr."""
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-n",
+                             "-ss", "1.000000", "-noaccurate_seek", "-copyts", "-i", str(source),
+                             "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", chain,
+                             *map(str, render.ENCODER), str(target)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode:
+        raise AssertionError(result.stderr[-2000:])
+    return len(re.findall(r"\] n: *\d+ pts:", result.stderr))
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class PartTest(unittest.TestCase):
+    def prepared(self, root):
+        source = root / "fuente.mkv"
+        coded(source)
+        plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                           segments=[sample_segment(title="Prueba", start=4.0, end=8.0,
+                                                    spans=[[4.0, 5.0], [7.0, 8.0]],
+                                                    frames=40, samples=76800)])
+        plan["audio_stream"] = 1
+        return source, plan
+
+    def test_the_reading_stops_at_the_end_of_the_cut(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "largo.mkv"
+            coded(source, length=40)                       # 1000 frames
+            chain = render.video_filter([(4.0, 6.0)], 0.0, "25/1", 1.25, 40)
+            head, guard, rest = chain.split(",", 2)
+            self.assertTrue(guard.startswith("trim=end="), chain)
+            guarded = graph_frames(source, f"showinfo,{chain}", root / "con.mkv")
+            whole = graph_frames(source, f"showinfo,{head},{rest}", root / "sin.mkv")
+            # Measured here: 153 frames with the guard and the whole 1000 without it. Neither -t
+            # nor -to can replace it next to -copyts: both leave the chain at zero frames.
+            self.assertLess(guarded, 300, guarded)
+            self.assertGreater(whole, 900, whole)
+            self.assertEqual(render.counted_frames(root / "con.mkv"), 40)
+            self.assertEqual(render.counted_frames(root / "sin.mkv"), 40)
+
+    def test_a_cut_that_ends_on_the_last_frame_of_the_medium_is_whole(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "fuente.mkv"
+            coded(source)                                  # 10 s: frames 0…249
+            plan = sample_plan(source={"path": str(source.resolve()),
+                                       **common.fingerprint(source)},
+                               segments=[sample_segment(title="Cierre", start=9.0, end=10.0,
+                                                        spans=[[9.0, 10.0]], frames=25,
+                                                        samples=48000)])
+            plan["settings"]["speed"] = 1.0
+            plan["audio_stream"] = 1
+            data = common.probe(source)
+            part = render.subcuts(plan["segments"][0])[0]
+            target = root / "cierre.mkv"
+            render.render_part(data, plan, part, target, 1)
+            self.assertEqual(render.counted_frames(target), 25)
+            self.assertEqual(render.counted_samples(target, 48000, root), 48000)
+            # Frames 225…249: the last frame of the medium is kept and tpad clones nothing.
+            self.assertEqual(luminances(target), list(range(225, 250)))
+
+    def test_a_rendered_part_has_exactly_n_frames_and_m_samples(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, plan = self.prepared(root)
+            data = common.probe(source)
+            part = render.subcuts(plan["segments"][0])[0]
+            target = root / "corte.mkv"
+            render.render_part(data, plan, part, target, 1)
+            self.assertEqual(render.counted_frames(target), 40)
+            self.assertEqual(render.counted_samples(target, 48000, root), 76800)
+            self.assertEqual(luminances(target)[:2], [100, 101])
+
+    def test_the_cache_is_reused_and_a_damaged_entry_is_rebuilt(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, plan = self.prepared(root)
+            data = common.probe(source)
+            cortes = root / "cortes"
+            cortes.mkdir()
+            part = render.subcuts(plan["segments"][0])[0]
+            release = render.ffmpeg_release()
+            first = render.cached_part(data, plan, part, cortes, release, 1)
+            stamp = first.stat().st_mtime_ns
+            again = render.cached_part(data, plan, part, cortes, release, 1)
+            self.assertEqual(again, first)
+            self.assertEqual(again.stat().st_mtime_ns, stamp)
+            first.with_suffix(".json").unlink()
+            third = render.cached_part(data, plan, part, cortes, release, 1)
+            self.assertEqual(third, first)
+            self.assertTrue(third.with_suffix(".json").is_file())
+            note = json.loads(third.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual((note["frames"], note["samples"]), (40, 76800))
+            self.assertFalse(list(cortes.glob("*.parcial")))
+            # A note that disagrees with the part is as bad as none: `is_cached` says so and the
+            # cut is rebuilt, which is what `build` and the estimate of Tarea 11 also rely on.
+            self.assertTrue(render.is_cached(plan, part, cortes, release))
+            note["frames"] = 41
+            third.with_suffix(".json").write_text(json.dumps(note), encoding="utf-8")
+            self.assertFalse(render.is_cached(plan, part, cortes, release))
+            fourth = render.cached_part(data, plan, part, cortes, release, 1)
+            kept = json.loads(fourth.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual((kept["frames"], kept["samples"]), (40, 76800))
+            self.assertFalse(list(cortes.glob("*.parcial")))
 
 
 if __name__ == "__main__":

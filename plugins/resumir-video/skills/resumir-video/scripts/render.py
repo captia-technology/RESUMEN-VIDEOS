@@ -6,9 +6,12 @@ import json
 import math
 from pathlib import Path
 import sys
+import tempfile
+import wave
 
-from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, fingerprint, output_interval, plan_sha256,
-                    positive, run, seconds, warning)
+from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, ffmpeg, fingerprint, output_interval,
+                    plan_sha256, positive, publish, run, save, seconds, seek_margin,
+                    timeline_start, video_stream, warning)
 
 
 class Refused(ValueError):
@@ -164,6 +167,100 @@ def audio_filter(spans, base, speed, m_samples, label="0:a"):
                  f"concat=n={count}:v=0:a=1,{tempo}apad=whole_len={m_samples},"
                  f"atrim=end_sample={m_samples}[a]")
     return ";".join(chain)
+
+
+def counted_frames(path):
+    """Frames actually decodable in a file; nb_frames of the header is not trustworthy enough."""
+    report = json.loads(run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                             "-show_entries", "stream=nb_read_frames", "-of", "json", str(path)]))
+    return int(report["streams"][0]["nb_read_frames"])
+
+
+def counted_samples(path, sample_rate, folder):
+    """Samples of the audio track: ffprobe gives none for PCM in Matroska, so it is decoded."""
+    with tempfile.TemporaryDirectory(prefix="muestras-", dir=folder) as temporary:
+        # 24-bit PCM is WAVE_FORMAT_EXTENSIBLE and `wave` refuses it: decode to 16 bits first.
+        copy = Path(temporary) / "cuenta.wav"
+        ffmpeg("-i", path, "-map", "0:a:0", "-ac", "1", "-ar", str(sample_rate),
+               "-c:a", "pcm_s16le", copy)
+        with wave.open(str(copy)) as stream:
+            return stream.getnframes()
+
+
+def render_part(data, plan, part, target, threads):
+    """Two FFmpeg passes (H.264 video and 24-bit PCM audio) remuxed without re-encoding."""
+    spans, settings = part["spans"], plan["settings"]
+    base, source = timeline_start(data), data["source"]["path"]
+    # Only -ss: next to -copyts, -t and -to are counted from the first packet read and leave the
+    # chain at zero frames (measured). The video filter carries its own reading guard and the audio
+    # one closes on its own with the atrim of each span.
+    seek = max(0.0, spans[0][0] - seek_margin(data))
+    threading = ("-threads", str(threads), "-filter_threads", str(threads))
+    folder = target.parent
+    with tempfile.TemporaryDirectory(prefix="pasada-", dir=folder, ignore_cleanup_errors=True) as tmp:
+        picture, sound = Path(tmp) / "v.mkv", Path(tmp) / "a.mkv"
+        ffmpeg(*threading, "-ss", seconds(seek),
+               "-noaccurate_seek", "-copyts", "-i", source,
+               "-map", f"0:{video_stream(data)['index']}", "-an", "-sn", "-dn",
+               "-map_metadata", "-1", "-map_chapters", "-1",
+               "-vf", video_filter(spans, base, settings["rate"], float(settings["speed"]),
+                                   part["frames"]),
+               *ENCODER, picture)
+        ffmpeg(*threading, "-ss", seconds(seek), "-noaccurate_seek", "-copyts",
+               "-i", source,
+               "-filter_complex", audio_filter(spans, base, float(settings["speed"]),
+                                               part["samples"], f"0:{plan['audio_stream']}"),
+               "-map", "[a]", "-vn", "-sn", "-dn", "-map_metadata", "-1",
+               "-c:a", "pcm_s24le", sound)
+        staged = Path(tmp) / "corte.mkv"
+        ffmpeg("-i", picture, "-i", sound, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", staged)
+        frames = counted_frames(staged)
+        samples = counted_samples(staged, plan["settings"]["sample_rate"], tmp)
+        if (frames, samples) != (part["frames"], part["samples"]):
+            raise Invalid(f"El corte {part['cut']} subcorte {part['index'] + 1}/{part['total']} "
+                          f"produjo {frames} fotogramas y {samples} muestras; se esperaban "
+                          f"{part['frames']} y {part['samples']}.")
+        publish(staged, target)
+
+
+def cut_note(part, release):
+    """What travels beside a cached cut: its numbers, so a later call can trust the file."""
+    return {"cut": part["cut"], "index": part["index"], "total": part["total"],
+            "spans": [[round(start, 3), round(end, 3)] for start, end in part["spans"]],
+            "frames": part["frames"], "samples": part["samples"], "ffmpeg": release}
+
+
+def is_cached(plan, part, cortes, release):
+    """The one criterion for «already cached»: the cut, and a note whose counts are the part's."""
+    target = cortes / f"{cut_key(plan, part, release)}.mkv"
+    note = target.with_suffix(".json")
+    if not (target.is_file() and note.is_file()):
+        return False
+    try:
+        kept = json.loads(note.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(kept, dict) and (kept.get("frames"), kept.get("samples")) == (
+        part["frames"], part["samples"])
+
+
+def cached_part(data, plan, part, cortes, release, threads):
+    """Render the part unless the cache already holds it with the right frame and sample counts."""
+    target = cortes / f"{cut_key(plan, part, release)}.mkv"
+    note = target.with_suffix(".json")
+    if is_cached(plan, part, cortes, release):
+        return target
+    # A cut without its note, or with a note that disagrees, is not trustworthy: rebuild both.
+    for path in (target, note):
+        if path.exists():
+            path.replace(path.with_suffix(path.suffix + ".parcial"))
+    render_part(data, plan, part, target, threads)
+    save(note, cut_note(part, release))
+    for path in (target, note):
+        leftover = path.with_suffix(path.suffix + ".parcial")
+        if leftover.exists():
+            leftover.unlink()
+    return target
 
 
 def render(args):
