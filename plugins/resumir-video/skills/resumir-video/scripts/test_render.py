@@ -181,8 +181,26 @@ class KeyTest(unittest.TestCase):
         other["settings"] = dict(other["settings"], speed=1.0)
         self.assertNotEqual(base, render.cut_key(other, part, "8.0.1"))
         other = sample_plan()
+        other["settings"] = dict(other["settings"], rate="30/1")
+        self.assertNotEqual(base, render.cut_key(other, part, "8.0.1"))
+        other = sample_plan()
+        other["audio_stream"] = 2
+        self.assertNotEqual(base, render.cut_key(other, part, "8.0.1"))
+        other = sample_plan()
         other["source"] = dict(other["source"], sha256="cd")
         self.assertNotEqual(base, render.cut_key(other, part, "8.0.1"))
+        other = sample_plan()
+        other["source"] = dict(other["source"], size=999)
+        self.assertNotEqual(base, render.cut_key(other, part, "8.0.1"))
+        other = sample_plan()
+        other["source"] = dict(other["source"], mtime_ns=999)
+        self.assertNotEqual(base, render.cut_key(other, part, "8.0.1"))
+        original_encoder = render.ENCODER
+        try:
+            render.ENCODER = ("-crf", "23")
+            self.assertNotEqual(base, render.cut_key(plan, part, "8.0.1"))
+        finally:
+            render.ENCODER = original_encoder
         other = sample_plan()
         other["source"] = dict(other["source"], path="otra/ruta.mkv")
         self.assertEqual(base, render.cut_key(other, part, "8.0.1"))
