@@ -669,5 +669,39 @@ class ResumeTest(unittest.TestCase):
             self.assertTrue(all(render.counted_frames(cut) == 40 for cut in cuts))
 
 
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class AssemblyTest(unittest.TestCase):
+    def test_the_montage_keeps_every_frame_and_stays_in_sync(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "fuente.mkv"
+            coded(source)
+            plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                               segments=[sample_segment(id=1, numero=1, title="A", start=1.0,
+                                                        end=5.0, spans=[[1.0, 2.0], [4.0, 5.0]],
+                                                        frames=40, samples=76800),
+                                         sample_segment(id=2, numero=2, title="B", start=7.0,
+                                                        end=8.5, spans=[[7.0, 8.5]],
+                                                        frames=30, samples=57600)])
+            plan["audio_stream"] = 1
+            data = common.probe(source)
+            cortes = root / "cortes"
+            cortes.mkdir()
+            cuts = render.build(data, plan, cortes, render.ffmpeg_release(), 1, None)
+            # The list and the cuts share a folder: the concat demuxer resolves names from the cwd.
+            staged = cortes / "resumen.mp4"
+            render.assemble(cortes, cuts, staged, 1)
+            self.assertEqual(render.counted_frames(staged), 70)
+            final = common.probe(staged)
+            picture, sound = common.streams(final)
+            self.assertAlmostEqual(common.stream_duration(final, picture), 70 / 25, delta=0.02)
+            self.assertLessEqual(abs(common.stream_duration(final, picture)
+                                     - common.stream_duration(final, sound)), 0.1)
+            self.assertEqual(sound["codec_name"], "aac")
+            # The cuts keep their content: source frames 25…49, 100…124 and 175…211.
+            values = luminances(staged)
+            self.assertEqual((values[0], values[20], values[40], values[-1]), (25, 100, 175, 211))
+
+
 if __name__ == "__main__":
     unittest.main()

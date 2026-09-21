@@ -11,8 +11,8 @@ import time
 import wave
 
 from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, MEMORY_PATTERNS, ffmpeg, fingerprint,
-                    output_interval, plan_sha256, positive, publish, run, save, seconds,
-                    seek_margin, timeline_start, video_stream, warning)
+                    listing, output_interval, plan_sha256, positive, publish, require_encoders,
+                    run, save, seconds, seek_margin, timeline_start, video_stream, warning)
 
 
 class Refused(ValueError):
@@ -326,6 +326,21 @@ def build(data, plan, cortes, release, threads, budget):
             # Stderr: stdout carries only the JSON state of code 3 (§12), never progress lines.
             print(f"Corte {done}/{total}", file=sys.stderr, flush=True)
     return cuts
+
+
+def assemble(folder, cuts, staged, threads):
+    """Two concat demuxers over the same list: video is copied and the audio is encoded once (D-006)."""
+    require_encoders("libx264", "aac")
+    names = [Path(cut).name for cut in cuts]
+    # Relative names run from `folder`: the concat demuxer parses list paths as URLs ('#', '?').
+    listing(folder / "cortes.txt", names)
+    ffmpeg("-f", "concat", "-safe", "1", "-i", "cortes.txt",
+           "-f", "concat", "-safe", "1", "-i", "cortes.txt",
+           "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+           "-af", "aresample=async=1:min_hard_comp=0.01",
+           "-c:a", "aac", "-b:a", "192k", "-threads", str(threads),
+           "-movflags", "+faststart", staged.name, cwd=folder)
+    (folder / "cortes.txt").unlink()
 
 
 def render(args):
