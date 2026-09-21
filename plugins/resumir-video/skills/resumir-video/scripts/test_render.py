@@ -1,5 +1,6 @@
 """Checks for the montage: fast ones first, then integration over generated media."""
 
+import array
 import contextlib
 import io
 import json
@@ -818,6 +819,187 @@ class ImagePlacementTest(unittest.TestCase):
             # Same cut, wrong source times: the montage holds seconds 1 and 4, not 6 and 9.
             rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root)
             self.assertTrue(any(row["distancia"] > render.IMAGE_MARK for row in rows), rows)
+
+
+class EnvelopeTest(unittest.TestCase):
+    def test_the_reference_is_stretched_by_the_speed(self):
+        levels = array.array("f", [float(value) for value in range(10)])
+        stretched = render.stretched(levels, 1.25, 8)
+        self.assertEqual(len(stretched), 8)
+        self.assertAlmostEqual(stretched[0], 0.0)
+        self.assertAlmostEqual(stretched[4], 5.0)
+        self.assertAlmostEqual(stretched[1], 1.25, places=5)
+        self.assertAlmostEqual(render.stretched(levels, 4.0, 6)[-1], 9.0)
+
+    def test_the_alignment_finds_the_shift_and_the_difference(self):
+        shape = [-60.0] * 6 + [-10.0] * 20 + [-60.0] * 6
+        produced = array.array("f", shape)
+        reference = array.array("f", shape)
+        difference, lag, value = render.align(produced, reference)
+        self.assertEqual(lag, 0)
+        self.assertAlmostEqual(difference, 0.0)
+        self.assertAlmostEqual(value, 1.0)
+        # The reference's plateau starts 3 blocks earlier than the produced one's: what was
+        # produced happens later than the reference, and `align` reports that as a positive lag
+        # (measured against the real function: `align(produced, moved)` is `(0.0, 3, 1.0)`).
+        moved = array.array("f", shape[3:] + [-60.0] * 3)
+        difference, lag, value = render.align(produced, moved)
+        self.assertEqual(lag, 3)
+        self.assertLess(difference, 1.0)
+        # Mirror case: now it is what was produced whose plateau starts 3 blocks earlier, so it is
+        # produced that happens before the reference and the lag flips sign.
+        difference, lag, value = render.align(moved, reference)
+        self.assertEqual(lag, -3)
+        self.assertLess(difference, 1.0)
+
+    def test_a_flat_envelope_says_nothing_about_correlation(self):
+        flat = array.array("f", [-9.0] * 40)
+        self.assertLess(render.spread(flat), render.ENVELOPE_SPREAD)
+        shaped = array.array("f", [-60.0] * 20 + [-9.0] * 20)
+        self.assertGreater(render.spread(shaped), render.ENVELOPE_SPREAD)
+
+    def test_a_scrambled_shape_correlates_below_the_gate(self):
+        # §8 coverage: a modulated envelope (spread above the gate) whose blocks are reordered
+        # correlates poorly even though nothing here is silence or truncated.
+        steady = array.array("f", ([-9.0] * 10 + [-40.0] * 10) * 2)
+        scrambled = array.array("f", ([-40.0] * 10 + [-9.0] * 10) * 2)
+        self.assertGreaterEqual(render.spread(scrambled), render.ENVELOPE_SPREAD)
+        self.assertLess(render.correlation(steady, scrambled), render.ENVELOPE_CORRELATION)
+
+    def test_a_lag_beyond_the_gate_is_reported(self):
+        # §8 coverage: a shift of 5 blocks (50 ms) exceeds both the 40 ms of ENVELOPE_LAG and the
+        # 45 ms of §8; `validate` reads it from `abs(desfase_ms)`, computed the same way here.
+        shape = [-60.0] * 10 + [-10.0] * 30 + [-60.0] * 10
+        produced = array.array("f", shape)
+        reference = array.array("f", shape[5:] + [-60.0] * 5)
+        difference, lag, value = render.align(produced, reference)
+        self.assertEqual(lag, 5)
+        desfase_ms = abs(lag) * round(render.LEVEL_BLOCK * 1000)
+        self.assertGreater(desfase_ms, 45)
+        self.assertGreater(desfase_ms, render.ENVELOPE_LAG * round(render.LEVEL_BLOCK * 1000))
+
+
+def spoken(path, length=12):
+    """Source with 1 s of tone and 0.5 s of silence in turns: an envelope with real modulation."""
+    common.ffmpeg("-f", "lavfi", "-i", f"color=c=black:s=320x180:r=25:d={length}",
+                  "-f", "lavfi", "-i", "aevalsrc=exprs='0.5*sin(2*PI*440*t)*"
+                                       r"lt(mod(t\,1.5)\,1.0)':sample_rate=48000:"
+                                       f"duration={length}",
+                  "-vf", "geq=lum='N':cb=128:cr=128,format=yuv420p",
+                  "-c:v", "libx264", "-crf", "12", "-preset", "ultrafast", "-bf", "0",
+                  "-c:a", "pcm_s16le", path)
+
+
+def spoken_second_track(path, length=6):
+    """Same tone/silence envelope, but as the SECOND audio stream; the first is silent."""
+    common.ffmpeg("-f", "lavfi", "-i", f"color=c=black:s=320x180:r=25:d={length}",
+                  "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=mono:d={length}",
+                  "-f", "lavfi", "-i", "aevalsrc=exprs='0.5*sin(2*PI*440*t)*"
+                                       r"lt(mod(t\,1.5)\,1.0)':sample_rate=48000:"
+                                       f"duration={length}",
+                  "-map", "0:v", "-map", "1:a", "-map", "2:a",
+                  "-vf", "geq=lum='N':cb=128:cr=128,format=yuv420p",
+                  "-c:v", "libx264", "-crf", "12", "-preset", "ultrafast", "-bf", "0",
+                  "-c:a", "pcm_s16le", path)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class SoundPlacementTest(unittest.TestCase):
+    # 74 frames / 142 080 samples (spans up to 4.4 s instead of 4.08 s): the previous fixture left
+    # only 0.001 of margin over ENVELOPE_CORRELATION at the end (0.901 measured); this one measures
+    # 0.973 and 1.0, so a codec change would not block a correct montage by accident.
+    def built(self, root, source_path=None):
+        source = source_path or root / "voz.mkv"
+        if source_path is None:
+            spoken(source)
+        spans = [[0.0, 1.08], [1.42, 2.58], [2.92, 4.4]]
+        plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                           segments=[sample_segment(id=1, numero=1, title="A", start=0.0, end=4.4,
+                                                    spans=spans, frames=74, samples=142080)])
+        plan["audio_stream"] = 1
+        data = common.probe(source)
+        cortes = root / "cortes"
+        cortes.mkdir()
+        cuts = render.build(data, plan, cortes, render.ffmpeg_release(), 1, None)
+        staged = cortes / "resumen.mp4"
+        render.assemble(cortes, cuts, staged, 1)
+        return data, staged, [(a, b) for a, b in spans]
+
+    def test_a_well_placed_cut_matches_its_source(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = self.built(root)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root)
+            self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
+            # Measured here: 0.81 dB / 0.973 at the start and 0.17 dB / 1.0 at the end, both with
+            # real margin over ENVELOPE_MARK and ENVELOPE_CORRELATION.
+            for row in rows:
+                with self.subTest(row=row):
+                    self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
+                    self.assertLessEqual(abs(row["desfase_ms"]), render.ENVELOPE_LAG * 10, row)
+                    self.assertGreater(row["bloques"], 80, row)
+                    self.assertIsNotNone(row["correlacion"], row)
+                    self.assertGreaterEqual(row["correlacion"], render.ENVELOPE_CORRELATION, row)
+
+    def test_a_cut_claimed_from_the_wrong_place_is_detected(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, _ = self.built(root)
+            moved = [(0.75, 1.83), (2.17, 3.33), (3.67, 5.15)]
+            rows = render.sound_placement(data, staged, moved, 0.0, 74 / 25, 1.25, root)
+            # §8 coverage: measured 54.22 / 74.16 dB and correlación −0.131 / −0.498, so both the
+            # difference and the correlation gates would reject this montage.
+            self.assertTrue(any(row["diferencia_db"] > render.ENVELOPE_MARK for row in rows), rows)
+            self.assertTrue(any(row["correlacion"] is not None
+                                and row["correlacion"] < render.ENVELOPE_CORRELATION
+                                for row in rows), rows)
+
+    def test_a_shifted_source_is_still_matched_correctly(self):
+        # §13 coverage of hallazgo 4: base contada dos veces. `shifted()` (Tarea 3) remuxes with
+        # -output_ts_offset so format.start_time = 7 s; the numbers must be identical to the
+        # unshifted source above, because window_levels never adds `base`.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            plain = root / "voz-plana.mkv"
+            spoken(plain)
+            moved = root / "voz-desfasada.mkv"
+            shifted(moved, plain, ahead=7)
+            data, staged, spans = self.built(root, source_path=moved)
+            self.assertAlmostEqual(common.timeline_start(data), 7.0, places=3)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root)
+            for row in rows:
+                with self.subTest(row=row):
+                    self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
+                    self.assertIsNotNone(row["correlacion"], row)
+                    self.assertGreaterEqual(row["correlacion"], render.ENVELOPE_CORRELATION, row)
+
+    def test_the_chosen_track_is_compared_against_the_source(self):
+        # §8 coverage of hallazgo 5: `plan["audio_stream"]` is not the first audio track. Without
+        # `track`, sound_placement would compare the montage against the silent first track and
+        # reject a correct montage.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "dos-pistas.mkv"
+            spoken_second_track(source)
+            spans = [[0.5, 1.58], [1.92, 3.08]]
+            plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                               segments=[sample_segment(id=1, numero=1, title="A", start=0.5,
+                                                        end=3.08, spans=spans, frames=56,
+                                                        samples=107520)])
+            plan["settings"]["speed"] = 1.0
+            plan["audio_stream"] = 2                    # the second audio stream, absolute index 2
+            data = common.probe(source)
+            cortes = root / "cortes"
+            cortes.mkdir()
+            cuts = render.build(data, plan, cortes, render.ffmpeg_release(), 1, None)
+            staged = cortes / "resumen.mp4"
+            render.assemble(cortes, cuts, staged, 1)
+            spans_t = [(a, b) for a, b in spans]
+            rows = render.sound_placement(data, staged, spans_t, 0.0, 56 / 25, 1.0, root,
+                                          track=f"0:{plan['audio_stream']}")
+            for row in rows:
+                with self.subTest(row=row):
+                    self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
 
 
 if __name__ == "__main__":

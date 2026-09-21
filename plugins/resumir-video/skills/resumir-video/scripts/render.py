@@ -1,6 +1,7 @@
 """Cached, resumable montage of an accepted plan: budget, assembly, blocking validation and report."""
 
 import argparse
+import array
 import hashlib
 import json
 import math
@@ -10,10 +11,10 @@ import tempfile
 import time
 import wave
 
-from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, MEMORY_PATTERNS, ffmpeg, fingerprint,
-                    listing, output_interval, plan_sha256, positive, probe, publish,
-                    require_encoders, run, save, seconds, seek_margin, stream_duration, streams,
-                    timeline_start, video_stream, warning)
+from common import (BLOCKING, DEFAULT_THREADS, ENERGY_STEP, MAX_SPANS, MEMORY_PATTERNS, energy,
+                    ffmpeg, fingerprint, listing, output_interval, plan_sha256, positive, probe,
+                    publish, require_encoders, run, save, seconds, seek_margin, stream_duration,
+                    streams, timeline_start, video_stream, warning)
 
 
 class Refused(ValueError):
@@ -412,6 +413,118 @@ def image_placement(data, final, spans, out_start, out_end, folder):
                                   origin_track)
             rows.append({"punto": name, "salida_s": round(moment, 3), "origen_s": round(origin, 3),
                          "distancia": round(image_distance(produced, expected), 4)})
+    return rows
+
+
+# Its own name: video.BLOCK is the 600 s block of the sweep and this one is 10 ms of envelope.
+# Alias, no literal: si common.ENERGY_STEP cambia, window_levels y desfase_ms siguen de acuerdo.
+LEVEL_BLOCK = ENERGY_STEP
+LEVEL_RATE = 16000
+WINDOW = 1.0
+# Provisional thresholds of §15, written down in docs/requisitos.md by the packaging plan.
+ENVELOPE_OK, ENVELOPE_MARK = 4.0, 8.0
+ENVELOPE_LAG = 4                 # blocks of 10 ms: 40 ms, inside the 45 ms of the specification
+ENVELOPE_SPREAD = 6.0            # dB below which the envelope is flat and correlation says nothing
+ENVELOPE_CORRELATION = 0.9
+
+
+def window_levels(path, start, length, folder, name, track="0:a:0"):
+    """RMS envelope of a window, always through a temporary mono 16-bit decode (§8)."""
+    # Here -t is legitimate: there is no -copyts, so it is the plain duration after the seek, and
+    # `start` is already in the s = pts − format.start_time convention of §3 (never `base + s`):
+    # measured on a 12 s sine remuxed with `-output_ts_offset 7` (start_time = 7.000000), `-ss 1`
+    # without -copyts gives the same wav as the unshifted original, and `-ss 8` a different one.
+    copy = Path(folder) / f"{name}.wav"
+    ffmpeg("-ss", seconds(max(0.0, start)), "-t", seconds(length), "-i", path, "-map", track,
+           "-ac", "1", "-ar", str(LEVEL_RATE), "-c:a", "pcm_s16le", copy)
+    return energy(copy)
+
+
+def stretched(levels, speed, count):
+    """The source envelope resampled by the speed, interpolating between blocks."""
+    out = array.array("f")
+    for index in range(count):
+        position = index * speed
+        lower = int(position)
+        if lower >= len(levels) - 1:
+            out.append(levels[-1])
+            continue
+        share = position - lower
+        out.append(levels[lower] * (1 - share) + levels[lower + 1] * share)
+    return out
+
+
+def correlation(left, right):
+    count = min(len(left), len(right))
+    if count < 4:
+        return 0.0
+    first, second = left[:count], right[:count]
+    mean_one, mean_two = sum(first) / count, sum(second) / count
+    covariance = sum((a - mean_one) * (b - mean_two) for a, b in zip(first, second))
+    spread_one = sum((a - mean_one) ** 2 for a in first)
+    spread_two = sum((b - mean_two) ** 2 for b in second)
+    if spread_one <= 0 or spread_two <= 0:
+        return 0.0
+    return covariance / math.sqrt(spread_one * spread_two)
+
+
+def spread(levels):
+    """Standard deviation of an envelope, in dB."""
+    if len(levels) < 2:
+        return 0.0
+    mean = sum(levels) / len(levels)
+    return math.sqrt(sum((value - mean) ** 2 for value in levels) / len(levels))
+
+
+def align(produced, reference, span=ENVELOPE_LAG + 2):
+    """Lag that minimises the mean absolute difference in dB, with its correlation.
+
+    `lag` is positive when `produced` happens later than `reference` (produced is delayed) and
+    negative when it happens earlier (produced is advanced); `validate` only reads `abs(lag)`, so
+    the sign never changes which cuts are accepted.
+    """
+    best = (999.0, 0, 0.0)
+    for lag in range(-span, span + 1):
+        left, right = produced[max(0, lag):], reference[max(0, -lag):]
+        count = min(len(left), len(right))
+        if count < 4:
+            continue
+        difference = sum(abs(left[i] - right[i]) for i in range(count)) / count
+        if difference < best[0]:
+            best = (difference, lag, correlation(left, right))
+    return best
+
+
+def sound_placement(data, final, spans, out_start, out_end, speed, folder, track="0:a:0"):
+    """Compare the envelope at both ends of the cut with the source, rescaled by the speed (§8)."""
+    source = data["source"]["path"]
+    first, last = spans[0], spans[-1]
+    head = min(WINDOW, (first[1] - first[0]) / speed, out_end - out_start)
+    tail = min(WINDOW, (last[1] - last[0]) / speed, out_end - out_start)
+    # `first[0]` and `last[1] - tail * speed` are already `s` (§3): window_levels seeks with plain
+    # -ss, no -copyts, so they must NOT be shifted by `base` — measured with a source of
+    # start_time = 7 s: adding `base` here reads the wrong window (or none, past the end) even
+    # though the montage is correct.
+    points = (("inicio", head, out_start, first[0]),
+              ("fin", tail, out_end - tail, last[1] - tail * speed))
+    rows = []
+    with tempfile.TemporaryDirectory(prefix="envolvente-", dir=folder) as temporary:
+        for name, window, moment, origin in points:
+            if window <= 4 * LEVEL_BLOCK:
+                rows.append({"punto": name, "bloques": 0, "diferencia_db": 0.0, "desfase_ms": 0,
+                             "correlacion": None, "modulacion_db": 0.0})
+                continue
+            produced = window_levels(final, moment, window, temporary, f"{name}-salida")
+            original = window_levels(source, origin, window * speed, temporary, f"{name}-origen",
+                                     track)
+            reference = stretched(original, speed, len(produced))
+            difference, lag, value = align(produced, reference)
+            modulation = spread(reference)
+            rows.append({"punto": name, "bloques": len(produced),
+                         "diferencia_db": round(difference, 2),
+                         "desfase_ms": lag * round(LEVEL_BLOCK * 1000),
+                         "correlacion": None if modulation < ENVELOPE_SPREAD else round(value, 3),
+                         "modulacion_db": round(modulation, 1)})
     return rows
 
 
