@@ -1,5 +1,6 @@
 """Checks for the montage: fast ones first, then integration over generated media."""
 
+import argparse
 import array
 import contextlib
 import io
@@ -1000,6 +1001,258 @@ class SoundPlacementTest(unittest.TestCase):
             for row in rows:
                 with self.subTest(row=row):
                     self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class SheetTest(unittest.TestCase):
+    def test_every_join_gets_one_contact_sheet(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            _, _, _, staged = assembled(root)
+            uniones = root / "uniones"
+            uniones.mkdir()
+            names = render.sheets(staged, [40], uniones, 25.0)
+            self.assertEqual(names, ["union-01.jpg"])
+            sheet = common.probe(uniones / "union-01.jpg")
+            picture = common.video_stream(sheet)
+            columns = render.JOIN_SHEET[0]
+            self.assertEqual(picture["width"],
+                             2 * render.JOIN_GAP + columns * render.JOIN_WIDTH
+                             + (columns - 1) * render.JOIN_GAP)
+            self.assertGreater((uniones / "union-01.jpg").stat().st_size, 1000)
+
+    def test_a_join_at_the_very_start_is_clamped(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            _, _, _, staged = assembled(root)
+            uniones = root / "uniones"
+            uniones.mkdir()
+            self.assertEqual(render.sheets(staged, [2], uniones, 25.0), ["union-01.jpg"])
+            self.assertTrue((uniones / "union-01.jpg").is_file())
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class ValidateTest(unittest.TestCase):
+    def plan_for(self, data, spans, frames=74, samples=142080):
+        """El mismo plan que monta `SoundPlacementTest.built`, reconstruido aquí para `all_parts` y
+        `validate` (`built` devuelve `(data, staged, spans)`, no el plan que usó por dentro)."""
+        source = Path(data["source"]["path"])
+        plan = sample_plan(source={"path": str(source), **common.fingerprint(source)},
+                           segments=[sample_segment(id=1, numero=1, title="A", start=spans[0][0],
+                                                    end=spans[-1][1], spans=spans, frames=frames,
+                                                    samples=samples)])
+        plan["audio_stream"] = 1
+        return plan
+
+    def test_a_correct_montage_passes(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            plan = self.plan_for(data, spans)
+            checks = render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+            self.assertTrue(checks["colocacion"])
+            self.assertIsInstance(checks["marcas"], list)
+
+    def test_a_cut_correlated_below_the_gate_is_invalid(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, _ = SoundPlacementTest().built(root)
+            # El mismo desplazamiento de test_a_cut_claimed_from_the_wrong_place_is_detected: medido
+            # allí en −0,131 / −0,498 de correlación, muy por debajo de ENVELOPE_CORRELATION (0,9).
+            moved = [(0.75, 1.83), (2.17, 3.33), (3.67, 5.15)]
+            plan = self.plan_for(data, moved)
+            with self.assertRaisesRegex(render.Invalid, "correlación"):
+                render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+
+    def test_a_lag_beyond_the_gate_is_invalid_on_its_own(self):
+        # §8 coverage del hallazgo 9: un desplazamiento bastante más pequeño que el de arriba deja la
+        # diferencia media y la correlación muy dentro de sus propias guardas y aun así dispara el
+        # desfase por sí solo. Medido aquí: desplazando cada tramo 0,05 s, el punto «fin» da 0,17 dB
+        # y 1,0 de correlación (ambos con margen real) y 60 ms de desfase, por encima de los 40 ms de
+        # `ENVELOPE_LAG` (45 ms en la especificación).
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            shifted = [(round(a + 0.05, 6), round(b + 0.05, 6)) for a, b in spans]
+            plan = self.plan_for(data, shifted)
+            with self.assertRaisesRegex(render.Invalid, "desfase") as caught:
+                render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+            self.assertNotIn("correlación", str(caught.exception))
+
+    def test_a_mark_between_ok_and_mark_is_reported_without_blocking(self):
+        # El medio real de `built()` no cae de forma natural entre ENVELOPE_OK (4 dB) y
+        # ENVELOPE_MARK (8 dB) sin que el desfase dispare antes (explorado con los desplazamientos de
+        # arriba: cuando la diferencia media llega a esa banda, el desfase ya superó su propia
+        # guarda), así que aquí se parchea `sound_placement` para aislar el camino de las marcas que
+        # `validate` ya tiene escrito.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            plan = self.plan_for(data, spans)
+            marked = {"punto": "inicio", "bloques": 86, "diferencia_db": 6.0, "desfase_ms": 0,
+                      "correlacion": 0.95, "modulacion_db": 20.0}
+            fine = {"punto": "fin", "bloques": 100, "diferencia_db": 0.17, "desfase_ms": 20,
+                    "correlacion": 1.0, "modulacion_db": 51.2}
+            with mock.patch.object(render, "sound_placement", return_value=[marked, fine]):
+                checks = render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+            self.assertIn("corte 1 (inicio): envolvente a 6.00 dB, escúchala", checks["marcas"])
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class CommandTest(unittest.TestCase):
+    def work(self, root):
+        source = root / "voz.mkv"
+        spoken(source)
+        trabajo = root / "trabajo"
+        trabajo.mkdir()
+        plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                           segments=[sample_segment(id=1, numero=1, title="Primera idea",
+                                                    start=0.0, end=2.58,
+                                                    spans=[[0.0, 1.08], [1.42, 2.58]],
+                                                    frames=45, samples=86400),
+                                     sample_segment(id=2, numero=2, title="Segunda idea",
+                                                    start=4.42, end=5.58, spans=[[4.42, 5.58]],
+                                                    frames=23, samples=44160)])
+        common.save(trabajo / "seleccion-v1.json", plan)
+        return source, trabajo, plan
+
+    def invoke(self, *arguments, ok=True):
+        result = subprocess.run([sys.executable, "-B", str(Path(render.__file__).parent / "video.py"),
+                                 *map(str, arguments)], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace")
+        self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+        return result
+
+    def test_the_montage_publishes_only_after_validation(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, _ = self.work(root)
+            refused = self.invoke("render", source, "--work", trabajo,
+                                  "--plan", trabajo / "seleccion-v1.json", ok=False)
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("--accept", refused.stderr)
+            self.assertFalse((trabajo / "v1").exists())
+            done = self.invoke("render", source, "--work", trabajo,
+                               "--plan", trabajo / "seleccion-v1.json",
+                               "--accept", "vale, móntalo", "--threads", "1")
+            final = trabajo / "v1" / "resumen.mp4"
+            self.assertIn(str(final), done.stdout)
+            self.assertTrue(final.is_file())
+            self.assertEqual(render.counted_frames(final), 68)
+            checks = json.loads((trabajo / "v1" / "validacion.json").read_text(encoding="utf-8"))
+            self.assertEqual(checks["fotogramas"], checks["fotogramas_esperados"])
+            self.assertEqual(checks["uniones"], [45])
+            self.assertEqual(len(list((trabajo / "v1" / "uniones").glob("union-*.jpg"))), 1)
+            self.assertIn("Primera idea", (trabajo / "v1" / "montaje.md").read_text(encoding="utf-8"))
+            published = json.loads((trabajo / "v1" / "seleccion.json").read_text(encoding="utf-8"))
+            self.assertEqual(published["version"], 1)
+            self.assertEqual(published["aceptacion"]["frase"], "vale, móntalo")
+            # The record layout belongs to common.history; only the three events are checked here.
+            log = (trabajo / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(log), 3)
+            self.assertEqual([json.loads(line)["evento"] for line in log],
+                             ["accept", "render", "verify"])
+            # The acceptance travels with its literal phrase, flat, in the accept event.
+            self.assertEqual(json.loads(log[0])["frase"], "vale, móntalo")
+            # "cortes" counts the plan's segments (2), not the passes build() mounted for them.
+            self.assertEqual(json.loads(log[1])["cortes"], 2)
+            self.assertEqual(json.loads(log[2])["ok"], True)
+            self.assertTrue(all(len(line.encode("utf-8")) < 4096 for line in log))
+            # `vN/` is published LF-only, like the seleccion-vN.json that plan.py already writes.
+            for name in ("seleccion.json", "validacion.json", "montaje.md"):
+                self.assertNotIn(b"\r\n", (trabajo / "v1" / name).read_bytes())
+            repeated = self.invoke("render", source, "--work", trabajo,
+                                   "--plan", trabajo / "seleccion-v1.json",
+                                   "--accept", "otra vez", ok=False)
+            self.assertEqual(repeated.returncode, 1)
+            self.assertIn("ya existe", repeated.stderr)
+
+    def test_a_validation_failure_leaves_no_partial_version_and_v1_stays_free(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, _ = self.work(root)
+            args = argparse.Namespace(video=str(source), work=str(trabajo),
+                                      plan=str(trabajo / "seleccion-v1.json"),
+                                      accept="vale, móntalo", directo=False, budget=None, threads=1)
+            # A `validate` that always fails still lets build() and assemble() run for real: the
+            # failure lands after `vN/` has started being assembled, not before it.
+            with mock.patch.object(render, "validate", side_effect=render.Invalid("mal colocado")):
+                with self.assertRaises(render.Invalid):
+                    render.montage(args)
+            self.assertFalse((trabajo / "v1").exists())
+            self.assertFalse((trabajo / "montaje.lock").exists())
+            fallos = list(trabajo.glob("fallo-v1-*"))
+            self.assertEqual(len(fallos), 1)
+            self.assertTrue((fallos[0] / "resumen.mp4").is_file())
+            log = [json.loads(line) for line in
+                  (trabajo / "historial.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([entry["evento"] for entry in log], ["accept", "render", "verify"])
+            self.assertEqual((log[2]["ok"], log[2]["codigo"]), (False, 4))
+            # v1 stayed free: an unmocked retry publishes it, exactly as if the first call never ran.
+            self.invoke("render", source, "--work", trabajo, "--plan", trabajo / "seleccion-v1.json",
+                        "--accept", "vale, móntalo", "--threads", "1")
+            self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
+
+    def test_an_exhausted_budget_answers_with_code_three(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, _ = self.work(root)
+            pending = self.invoke("render", source, "--work", trabajo,
+                                  "--plan", trabajo / "seleccion-v1.json",
+                                  "--accept", "vale", "--budget", "0.000001", ok=False)
+            self.assertEqual(pending.returncode, 3)
+            self.assertEqual(json.loads(pending.stdout),
+                             {"done": 1, "total": 2, "pending": 1,
+                              "bloques": ["corte 2 subcorte 1/1"]})
+            self.assertFalse((trabajo / "v1").exists())
+            self.invoke("render", source, "--work", trabajo,
+                        "--plan", trabajo / "seleccion-v1.json", "--accept", "vale", "--threads", "1")
+            self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
+
+    def test_a_new_version_reuses_the_cuts_already_rendered(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, plan = self.work(root)
+            self.invoke("render", source, "--work", trabajo, "--plan", trabajo / "seleccion-v1.json",
+                        "--accept", "vale, móntalo", "--threads", "1")
+            cortes = trabajo / "cortes"
+            before = {path.name: path.stat().st_mtime_ns for path in cortes.glob("*.mkv")}
+            self.assertEqual(len(before), 2)
+            second = dict(plan, version=2, parent=1,
+                          segments=[plan["segments"][0],
+                                    sample_segment(id=3, numero=2, title="Tercera idea", start=7.42,
+                                                   end=8.58, spans=[[7.42, 8.58]], frames=23,
+                                                   samples=44160)])
+            common.save(trabajo / "seleccion-v2.json", second)
+            self.invoke("render", source, "--work", trabajo, "--plan", trabajo / "seleccion-v2.json",
+                        "--accept", "vale", "--threads", "1")
+            after = {path.name: path.stat().st_mtime_ns for path in cortes.glob("*.mkv")}
+            # Only the new cut is rendered: the key of the untouched one does not change.
+            self.assertEqual(len(after), 3)
+            self.assertEqual({name: after[name] for name in before}, before)
+            part = render.subcuts(second["segments"][0])[0]
+            reused = f"{render.cut_key(second, part, render.ffmpeg_release())}.mkv"
+            self.assertIn(reused, before)
+            self.assertTrue((trabajo / "v2" / "resumen.mp4").is_file())
+            self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
+
+    def test_the_lock_stops_a_second_montage(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, _ = self.work(root)
+            (trabajo / "montaje.lock").write_text("12345\n", encoding="utf-8")
+            blocked = self.invoke("render", source, "--work", trabajo,
+                                  "--plan", trabajo / "seleccion-v1.json",
+                                  "--accept", "vale", ok=False)
+            self.assertEqual(blocked.returncode, 1)
+            self.assertIn("Otro proceso", blocked.stderr)
+            self.assertFalse((trabajo / "v1").exists())
+            # The acceptance is recorded inside the lock: a blocked call writes no history.
+            self.assertFalse((trabajo / "historial.jsonl").exists())
+            (trabajo / "montaje.lock").unlink()
+            self.invoke("render", source, "--work", trabajo, "--plan", trabajo / "seleccion-v1.json",
+                        "--accept", "vale", "--threads", "1")
+            self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
 
 
 if __name__ == "__main__":

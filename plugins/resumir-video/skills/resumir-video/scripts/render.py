@@ -1,6 +1,5 @@
 """Cached, resumable montage of an accepted plan: budget, assembly, blocking validation and report."""
 
-import argparse
 import array
 import hashlib
 import json
@@ -12,9 +11,10 @@ import time
 import wave
 
 from common import (BLOCKING, DEFAULT_THREADS, ENERGY_STEP, MAX_SPANS, MEMORY_PATTERNS, energy,
-                    ffmpeg, fingerprint, listing, output_interval, plan_sha256, positive, probe,
-                    publish, require_encoders, run, save, seconds, seek_margin, stream_duration,
-                    streams, timeline_start, video_stream, warning)
+                    ffmpeg, fingerprint, history, listing, lock, new_dir, output_interval,
+                    plan_sha256, positive, probe, publish, require_encoders, run, save, seconds,
+                    seek_margin, stamp, stream_duration, streams, timeline_start, video_stream,
+                    warning)
 
 
 class Refused(ValueError):
@@ -528,9 +528,202 @@ def sound_placement(data, final, spans, out_start, out_end, speed, folder, track
     return rows
 
 
+JOIN_SHEET = (5, 2)
+JOIN_WIDTH = 160
+JOIN_GAP = 4
+
+
+def sheets(final, joins, folder, cadence):
+    """One contact sheet per join, half before and half after, for the agent's visual review."""
+    columns, rows = JOIN_SHEET
+    tiles = columns * rows
+    total = counted_frames(final)
+    names = []
+    for number, join in enumerate(joins, start=1):
+        first = max(0, min(total - tiles, join - tiles // 2))
+        name = f"union-{number:02d}.jpg"
+        # Accurate input seeking: without it every join would decode the montage from the start.
+        # The tpad clone fills the grid when the montage is shorter than one sheet.
+        ffmpeg("-ss", seconds(first / cadence), "-i", final, "-map", "0:v:0",
+               "-vf", f"trim=end_frame={tiles},setpts=N/({cadence:.6f})/TB,"
+                      f"tpad=stop=-1:stop_mode=clone,trim=end_frame={tiles},"
+                      f"setpts=N/({cadence:.6f})/TB,scale={JOIN_WIDTH}:-2,"
+                      f"tile={columns}x{rows}:margin={JOIN_GAP}:padding={JOIN_GAP}:color=gray",
+               "-frames:v", "1", "-q:v", "2", folder / name)
+        names.append(name)
+    return names
+
+
+def validate(data, plan, parts, final, folder, threads):
+    """Every blocking check of §8; returns the content of validacion.json."""
+    decode_check(final, threads)
+    checks = totals_check(final, parts)
+    cadence, speed = cadence_of(plan), float(plan["settings"]["speed"])
+    placements, joins, elapsed = [], [], 0.0
+    for segment in plan["segments"]:
+        spans = [(float(start), float(end)) for start, end in segment["spans"]]
+        length = segment["frames"] / cadence
+        images = image_placement(data, final, spans, elapsed, elapsed + length, folder)
+        sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder,
+                                 f"0:{plan['audio_stream']}")
+        placements.append({"corte": segment["id"], "titulo": segment["title"],
+                           "salida_s": [round(elapsed, 3), round(elapsed + length, 3)],
+                           "imagen": images, "envolvente": sounds})
+        elapsed += length
+        joins.append(round(elapsed * cadence))
+    checks["colocacion"] = placements
+    failures, marks = [], []
+    for entry in placements:
+        for row in entry["imagen"]:
+            if row["distancia"] > IMAGE_MARK:
+                failures.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                                f"{row['distancia']:.4f} del original")
+            elif row["distancia"] > IMAGE_OK:
+                marks.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                             f"{row['distancia']:.4f}, revísala en la hoja de uniones")
+        for row in entry["envolvente"]:
+            if ENVELOPE_OK < row["diferencia_db"] <= ENVELOPE_MARK:
+                marks.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                             f"{row['diferencia_db']:.2f} dB, escúchala")
+            if row["diferencia_db"] > ENVELOPE_MARK:
+                failures.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                                f"{row['diferencia_db']:.2f} dB del original")
+            if abs(row["desfase_ms"]) > ENVELOPE_LAG * round(LEVEL_BLOCK * 1000):
+                failures.append(f"corte {entry['corte']} ({row['punto']}): desfase de "
+                                f"{row['desfase_ms']} ms")
+            if row["correlacion"] is not None and row["correlacion"] < ENVELOPE_CORRELATION:
+                failures.append(f"corte {entry['corte']} ({row['punto']}): correlación "
+                                f"{row['correlacion']:.3f}")
+    if failures:
+        raise Invalid("La colocación no coincide con el original: " + "; ".join(failures) + ".")
+    checks["marcas"] = marks
+    checks["uniones"] = joins[:-1]
+    return checks
+
+
+def report(plan, checks, avisos, cadence):
+    """The report that travels with the montage; the agent adds the editorial review."""
+    total = checks["fotogramas"] / cadence
+    lines = ["# Montaje", "",
+             f"Versión: v{plan['version']}. Cortes: {len(plan['segments'])}. "
+             f"Velocidad: ×{float(plan['settings']['speed']):g}. Cadencia: {plan['settings']['rate']}.",
+             "", f"Duración de salida: {stamp(total)} ({checks['fotogramas']} fotogramas). "
+                 f"Desfase vídeo-audio: {checks['desfase_s']:.3f} s.", "",
+             "| # | Origen | Salida | Imagen | Envolvente | Tema |",
+             "| --- | --- | --- | --- | --- | --- |"]
+    for entry, segment in zip(checks["colocacion"], plan["segments"]):
+        spans = segment["spans"]
+        origin = f"{stamp(float(spans[0][0]))}–{stamp(float(spans[-1][1]))}"
+        output = f"{stamp(entry['salida_s'][0])}–{stamp(entry['salida_s'][1])}"
+        image = max(row["distancia"] for row in entry["imagen"])
+        sound = max(row["diferencia_db"] for row in entry["envolvente"])
+        title = str(segment["title"]).replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| {entry['corte']} | {origin} | {output} | {image:.4f} | "
+                     f"{sound:.2f} dB | {title} |")
+    lines += ["", f"Hojas de uniones: `uniones/` ({len(checks['uniones'])}).", ""]
+    if checks.get("marcas"):
+        lines += ["Marcas de colocación que conviene revisar a mano:", ""]
+        lines += [f"- {text}" for text in checks["marcas"]] + [""]
+    if avisos:
+        lines += ["Avisos del montaje:", ""]
+        lines += [f"- {item['codigo']}: {item['mensaje']}" for item in avisos] + [""]
+    lines += ["Validación técnica: decodificación completa, fotogramas iguales a la suma del plan, "
+              "sincronía y colocación de cada corte contra el original.", "",
+              "Revisión editorial pendiente: completar tras revisar uniones, cobertura y documento.",
+              ""]
+    return "\n".join(lines)
+
+
+def save_lf(path, data):
+    """Like `common.save`, but with `newline="\n"` (it takes no such parameter): keeps `vN/` free of
+    the CRLF that a plain `open("x", encoding="utf-8")` would write on Windows, matching what
+    `plan.py` already publishes."""
+    with Path(path).open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def montage(args):
+    """Render, assemble, validate and publish `vN/` whole; a crash midway leaves nothing (§11)."""
+    work = Path(args.work).resolve(strict=True)
+    plan = json.loads(Path(args.plan).read_text(encoding="utf-8-sig"))
+    if not isinstance(plan, dict) or type(plan.get("version")) is not int:
+        raise Refused("El plan debe ser un objeto JSON con version entera.")
+    data = probe(args.video)
+    avisos = sources_agree(plan, args.video)
+    record = accepted(plan, args.accept, args.directo)
+    if avisos:
+        plan["source"] = {"path": str(Path(args.video).resolve()), **fingerprint(args.video)}
+    require_encoders("libx264", "aac")
+    release = ffmpeg_release()
+    published = work / f"v{plan['version']}"
+    if published.exists():
+        raise ValueError(f"La versión v{plan['version']} ya existe y no se sobrescribe: {published}")
+    cortes = work / "cortes"
+    cortes.mkdir(exist_ok=True)
+    with lock(work / "montaje.lock"):
+        # Flat payloads: the acceptance is three fields, not a nested record (§9 and common.history).
+        history(work, "accept", {"version": plan["version"], "frase": record["frase"],
+                                 "directo": record["directo"], "sha256": record["sha256"]})
+        cuts = build(data, plan, cortes, release, args.threads, args.budget)
+        # "cortes" counts the segments of the plan, not the passes `build` mounted for them.
+        history(work, "render", {"version": plan["version"], "cortes": len(plan["segments"]),
+                                 "avisos": ", ".join(a["codigo"] for a in avisos)})
+        with tempfile.TemporaryDirectory(prefix="montaje-", dir=work,
+                                         ignore_cleanup_errors=True) as temporary:
+            folder = Path(temporary)
+            for cut in cuts:
+                (folder / cut.name).write_bytes(cut.read_bytes())
+            staged = folder / "resumen.mp4"
+            assemble(folder, [folder / cut.name for cut in cuts], staged, args.threads)
+            uniones = folder / "uniones"
+            uniones.mkdir()
+            try:
+                checks = validate(data, plan, all_parts(plan), staged, folder, args.threads)
+            except Invalid as exc:
+                kept = new_dir(work / f"fallo-v{plan['version']}-{int(time.time())}")
+                staged.replace(kept / "resumen.mp4")
+                # render() only names this folder in its message because it now exists.
+                exc.evidencia = kept
+                history(work, "verify", {"version": plan["version"], "ok": False, "codigo": 4})
+                raise
+            checks["uniones_hojas"] = sheets(staged, checks["uniones"], uniones, cadence_of(plan))
+            # `vN/` is built whole here, still inside the temp folder: `publish` below is the only
+            # write that reaches `work`, so nothing under `work` is ever half-published (§11).
+            version = folder / f"v{plan['version']}"
+            version.mkdir()
+            save_lf(version / "validacion.json", checks)
+            save_lf(version / "seleccion.json", dict(plan, aceptacion=record))
+            (version / "montaje.md").write_text(report(plan, checks, avisos, cadence_of(plan)),
+                                                encoding="utf-8", newline="\n")
+            staged.replace(version / "resumen.mp4")
+            uniones.replace(version / "uniones")
+            publish(version, published)
+        history(work, "verify", {"version": plan["version"], "ok": True, "fotogramas":
+                                 checks["fotogramas"], "desfase_s": checks["desfase_s"]})
+    for aviso in avisos:
+        print(f"Aviso: {aviso['mensaje']}", file=sys.stderr)
+    print(published / "resumen.mp4")
+    return 0
+
+
 def render(args):
-    """Entry point of the subcommand; the montage itself arrives in Task 10."""
-    raise RuntimeError("render aún no está implementado")
+    """Entry point of the subcommand: maps every failure onto the exit codes of §12."""
+    try:
+        return montage(args)
+    except Pending as exc:
+        print(json.dumps(exc.state, ensure_ascii=False))
+        print("Error: presupuesto agotado; repite la misma orden para continuar.", file=sys.stderr)
+        return 3
+    except Invalid as exc:
+        evidencia = getattr(exc, "evidencia", None)
+        message = f"Error: {exc}\nNo se ha publicado nada."
+        if evidencia is not None:
+            message += f" La evidencia queda en la carpeta {evidencia.name}."
+        print(message, file=sys.stderr)
+        return 4
+    except Refused as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
 
 def register(sub):
