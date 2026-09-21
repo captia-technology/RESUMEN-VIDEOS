@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import wave
 
 import common
 import plan as planner
@@ -204,6 +205,170 @@ class KeyTest(unittest.TestCase):
         other = sample_plan()
         other["source"] = dict(other["source"], path="otra/ruta.mkv")
         self.assertEqual(base, render.cut_key(other, part, "8.0.1"))
+
+
+class FilterTest(unittest.TestCase):
+    def test_the_video_filter_carries_the_whole_verified_chain(self):
+        text = render.video_filter([(4.0, 5.0), (7.0, 8.0)], 0.0, "25/1", 1.25, 40)
+        # The reading guard closes one frame after the LAST span; without it FFmpeg decodes the
+        # whole medium, because select drops frames instead of ending the chain.
+        self.assertTrue(text.startswith("fps=25/1:start_time=4.000000,trim=end=8.040000,select='"))
+        self.assertIn("(gte(t,4.000000)*lt(t,5.000000))+(gte(t,7.000000)*lt(t,8.000000))", text)
+        # The leading fps is what keeps a held frame alive; tpad needs stop=-1 to clone up to N.
+        self.assertIn("settb=AVTB,setpts=N/(25/1)/1.250000/TB,fps=25/1", text)
+        self.assertIn("tpad=stop=-1:stop_mode=clone,trim=end_frame=40", text)
+        self.assertTrue(text.endswith("setpts=N/(25/1)/TB,pad=ceil(iw/2)*2:ceil(ih/2)*2"))
+
+    def test_the_container_offset_moves_every_boundary(self):
+        text = render.video_filter([(4.0, 5.0)], 12.5, "25/1", 1.0, 25)
+        self.assertIn("fps=25/1:start_time=16.500000,trim=end=17.540000", text)
+        self.assertIn("(gte(t,16.500000)*lt(t,17.500000))", text)
+
+    def test_the_audio_filter_forces_the_exact_sample_count(self):
+        text = render.audio_filter([(4.0, 5.0), (7.0, 8.0)], 0.0, 1.25, 76800)
+        # §8 opens the audio chain with aresample; it changes neither N nor M (measured).
+        self.assertTrue(text.startswith("[0:a]aresample=async=1:first_pts=0,asplit=2[s0][s1];"))
+        self.assertIn("[s0]atrim=start=4.000000:end=5.000000,asetpts=N/SR/TB[t0];", text)
+        self.assertIn("[s1]atrim=start=7.000000:end=8.000000,asetpts=N/SR/TB[t1];", text)
+        self.assertIn("[t0][t1]concat=n=2:v=0:a=1,atempo=1.250000,", text)
+        self.assertTrue(text.endswith("apad=whole_len=76800,atrim=end_sample=76800[a]"))
+
+    def test_speed_one_leaves_no_atempo(self):
+        self.assertNotIn("atempo", render.audio_filter([(0.0, 1.0)], 0.0, 1.0, 48000))
+
+    def test_the_chosen_track_replaces_the_default_label(self):
+        text = render.audio_filter([(0.0, 1.0)], 0.0, 1.0, 48000, label="0:3")
+        self.assertTrue(text.startswith("[0:3]aresample=async=1:first_pts=0,asplit=1[s0];"))
+
+
+def coded(path, length=10, rate=25):
+    """Source whose luminance is the frame index and whose audio ramps with time."""
+    common.ffmpeg("-f", "lavfi", "-i", f"color=c=black:s=320x180:r={rate}:d={length}",
+                  "-f", "lavfi", "-i", f"aevalsrc=exprs='t/{length}':sample_rate=48000:"
+                                       f"duration={length}",
+                  "-vf", "geq=lum='N':cb=128:cr=128,format=yuv420p",
+                  "-c:v", "libx264", "-crf", "12", "-preset", "ultrafast", "-bf", "0",
+                  "-c:a", "pcm_s16le", path)
+
+
+def held(path):
+    """Variable-rate recording: 25 fps until 2 s, one frame held until 8 s, then 25 fps again."""
+    common.ffmpeg("-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=10",
+                  "-f", "lavfi", "-i", "aevalsrc=exprs='t/10':sample_rate=48000:duration=10",
+                  "-vf", r"geq=lum='N':cb=128:cr=128,format=yuv420p,"
+                         r"select='lt(t\,2)+eq(n\,50)+gte(t\,8)'",
+                  "-fps_mode", "vfr", "-c:v", "libx264", "-crf", "12", "-preset", "ultrafast",
+                  "-bf", "0", "-c:a", "pcm_s16le", path)
+
+
+def shifted(path, source, ahead=7):
+    """Copy whose container starts at `ahead` seconds, like a real recording with an offset."""
+    common.ffmpeg("-i", source, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
+                  "-output_ts_offset", str(ahead), "-muxdelay", "0", "-muxpreload", "0", path)
+
+
+def luminances(path, width=320, height=180):
+    """Top-left luminance sample of every frame, read straight from the Y plane."""
+    with tempfile.TemporaryDirectory(prefix="resumir-video-y-") as folder:
+        plane = Path(folder) / "y.raw"
+        common.ffmpeg("-i", path, "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "yuv420p", plane)
+        data = plane.read_bytes()
+    size = width * height * 3 // 2
+    return [data[index * size] for index in range(len(data) // size)]
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class FilterOnMediaTest(unittest.TestCase):
+    def test_the_cut_holds_only_its_spans_at_the_asked_speed(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "fuente.mkv"
+            coded(source)
+            clip = root / "corte.mkv"
+            common.ffmpeg("-ss", "1.000000", "-noaccurate_seek", "-copyts",
+                          "-i", source, "-map", "0:v:0", "-an", "-sn", "-dn",
+                          "-map_metadata", "-1", "-map_chapters", "-1",
+                          "-vf", render.video_filter([(4.0, 5.0), (7.0, 8.0)], 0.0, "25/1", 1.25, 40),
+                          *render.ENCODER, clip)
+            values = luminances(clip)
+            self.assertEqual(len(values), 40)
+            # Frame 100 is second 4.0 and frame 175 is second 7.0 of the source.
+            self.assertEqual(values[:2], [100, 101])
+            self.assertEqual(values[20:22], [175, 176])
+            self.assertEqual(values[-1], 199)
+            self.assertTrue(all(100 <= value <= 124 for value in values[:20]))
+            self.assertTrue(all(175 <= value <= 199 for value in values[20:]))
+
+    def test_without_the_leading_fps_a_held_frame_disappears(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "pantalla.mkv"
+            held(source)
+            good, bad = root / "bien.mkv", root / "mal.mkv"
+            chain = render.video_filter([(3.0, 5.0), (8.2, 9.0)], 0.0, "25/1", 1.0, 70)
+            common.ffmpeg("-ss", "0", "-noaccurate_seek", "-copyts", "-i", source,
+                          "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", chain, *render.ENCODER, good)
+            # Drop only the leading fps, keeping the reading guard that follows it.
+            common.ffmpeg("-ss", "0", "-noaccurate_seek", "-copyts", "-i", source,
+                          "-map", "0:v:0", "-an", "-sn", "-dn",
+                          "-vf", chain.split(",", 1)[1], *render.ENCODER, bad)
+            kept, lost = luminances(good), luminances(bad)
+            self.assertEqual(len(kept), 70)
+            # The slide held from 2 s to 8 s is frame 50 and must fill the first 50 output frames.
+            self.assertEqual(set(kept[:50]), {50})
+            self.assertEqual(kept[50], 205)
+            self.assertNotIn(50, lost)
+
+    def test_a_shifted_container_keeps_the_absolute_times(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, moved = root / "fuente.mkv", root / "desfasada.mkv"
+            coded(source)
+            shifted(moved, source)
+            data = common.probe(moved)
+            base = common.timeline_start(data)
+            self.assertAlmostEqual(base, 7.0, places=3)
+            clip = root / "corte.mkv"
+            common.ffmpeg("-ss", "0.000000", "-noaccurate_seek", "-copyts", "-i", moved,
+                          "-map", "0:v:0", "-an", "-sn", "-dn",
+                          "-map_metadata", "-1", "-map_chapters", "-1",
+                          "-vf", render.video_filter([(3.0, 4.0)], base, "25/1", 1.0, 25),
+                          *render.ENCODER, clip)
+            # s = 3.0 of the medium is frame 75: the container offset must not move the content.
+            self.assertEqual(luminances(clip), list(range(75, 100)))
+
+    def test_the_reference_cut_keeps_exactly_143_frames_and_274560_samples(self):
+        # Reference cut of the measurements: 7.16 s of source at x1.25 are N = 143 and M = 274560.
+        spans = [(2.0, 5.08), (5.92, 10.0)]
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "fuente.mkv"
+            coded(source)
+            picture = root / "corte.mkv"
+            common.ffmpeg("-ss", "0.000000", "-noaccurate_seek", "-copyts", "-i", source,
+                          "-map", "0:v:0", "-an", "-sn", "-dn",
+                          "-vf", render.video_filter(spans, 0.0, "25/1", 1.25, 143),
+                          *render.ENCODER, picture)
+            self.assertEqual(len(luminances(picture)), 143)
+
+            def samples(chain, name):
+                target = root / name
+                common.ffmpeg("-ss", "0.000000", "-noaccurate_seek", "-copyts", "-i", source,
+                              "-filter_complex", chain, "-map", "[a]", "-vn", "-c:a", "pcm_s16le",
+                              target)
+                with wave.open(str(target)) as stream:
+                    first = int.from_bytes(stream.readframes(1), "little", signed=True)
+                    return stream.getnframes(), first
+
+            chain = render.audio_filter(spans, 0.0, 1.25, 274560)
+            self.assertTrue(chain.startswith("[0:a]aresample=async=1:first_pts=0,"))
+            count, first = samples(chain, "con.wav")
+            self.assertEqual(count, 274560)
+            # The ramp is t/10 of full scale: the first sample is the source at 2.0 s.
+            self.assertLessEqual(abs(first - round(0.2 * 32768)), 4)
+            # aresample at the head neither adds nor removes a sample (measured).
+            plain = chain.replace("aresample=async=1:first_pts=0,", "")
+            self.assertEqual(samples(plain, "sin.wav"), (count, first))
 
 
 if __name__ == "__main__":

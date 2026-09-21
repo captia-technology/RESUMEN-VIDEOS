@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, fingerprint, output_interval, plan_sha256,
-                    positive, run, warning)
+                    positive, run, seconds, warning)
 
 
 class Refused(ValueError):
@@ -125,6 +125,45 @@ def cut_key(plan, part, release):
                 "ffmpeg": release}
     text = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
+def video_filter(spans, base, rate, speed, n_frames):
+    """One pass per cut on the container's own timeline; every piece was measured on FFmpeg 8.0.1."""
+    select = "+".join(f"(gte(t,{seconds(base + start)})*lt(t,{seconds(base + end)}))"
+                      for start, end in spans)
+    # Reading guard: `select` drops the frames past the cut instead of closing the chain, so
+    # trim=end_frame never receives the frame N+1 that would end the pass and FFmpeg decodes the
+    # medium whole (measured: 1000 of 1000 frames; 153 with this trim, same output). It cannot be
+    # done with -t or -to: next to -copyts both count from the first packet read and leave the
+    # chain at zero frames (measured). One frame of slack keeps everything the select needs.
+    stop = seconds(base + spans[-1][1] + output_interval(rate))
+    # The leading fps rebuilds held frames of variable-rate sources (without it the removed pause
+    # freezes and the cut loses its tail); tpad needs stop=-1 to clone up to exactly N frames.
+    return (f"fps={rate}:start_time={seconds(base + spans[0][0])},trim=end={stop},"
+            f"select='{select}',settb=AVTB,"
+            f"setpts=N/({rate})/{speed:.6f}/TB,fps={rate},tpad=stop=-1:stop_mode=clone,"
+            f"trim=end_frame={n_frames},setpts=N/({rate})/TB,pad=ceil(iw/2)*2:ceil(ih/2)*2")
+
+
+def audio_filter(spans, base, speed, m_samples, label="0:a"):
+    """Same spans on the chosen track; aselect is useless here because it drops no samples."""
+    # No reading guard here: the per-span `atrim=start=…:end=…` do end their branches and concat
+    # closes the graph (measured: 8.02 s read of a 300 s medium), unlike the video `select`.
+    count = len(spans)
+    # §8 opens the chain with aresample. Measured on FFmpeg 8.0.1: the output is byte for byte the
+    # same as without it (N and M included), because the atrim times are absolute; the only price
+    # is that first_pts=0 pads with silence from 0 to the first instant read, so the pass takes
+    # longer the further into the medium the cut is (1.35 s against 0.14 s at 3000 s).
+    chain = [f"[{label}]aresample=async=1:first_pts=0,asplit={count}"
+             + "".join(f"[s{i}]" for i in range(count))]
+    for index, (start, end) in enumerate(spans):
+        chain.append(f"[s{index}]atrim=start={seconds(base + start)}:end={seconds(base + end)},"
+                     f"asetpts=N/SR/TB[t{index}]")
+    tempo = "".join(f"atempo={factor:.6f}," for factor in tempo_factors(speed))
+    chain.append("".join(f"[t{i}]" for i in range(count)) +
+                 f"concat=n={count}:v=0:a=1,{tempo}apad=whole_len={m_samples},"
+                 f"atrim=end_sample={m_samples}[a]")
+    return ";".join(chain)
 
 
 def render(args):
