@@ -1173,7 +1173,8 @@ class CommandTest(unittest.TestCase):
             source, trabajo, _ = self.work(root)
             args = argparse.Namespace(video=str(source), work=str(trabajo),
                                       plan=str(trabajo / "seleccion-v1.json"),
-                                      accept="vale, móntalo", directo=False, budget=None, threads=1)
+                                      accept="vale, móntalo", directo=False, budget=None, threads=1,
+                                      dry_run=False)
             # A `validate` that always fails still lets build() and assemble() run for real: the
             # failure lands after `vN/` has started being assembled, not before it.
             with mock.patch.object(render, "validate", side_effect=render.Invalid("mal colocado")):
@@ -1253,6 +1254,74 @@ class CommandTest(unittest.TestCase):
             self.invoke("render", source, "--work", trabajo, "--plan", trabajo / "seleccion-v1.json",
                         "--accept", "vale", "--threads", "1")
             self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
+
+    def test_a_dry_run_estimates_the_cost_without_touching_anything(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, _ = self.work(root)
+            # No acceptance is asked for: the proposal needs the cost before the user answers.
+            first = json.loads(self.invoke("render", source, "--work", trabajo,
+                                           "--plan", trabajo / "seleccion-v1.json",
+                                           "--dry-run").stdout)
+            self.assertEqual((first["reused"], first["new"]), (0, 2))
+            self.assertGreater(first["eta_s"], 0)
+            self.assertFalse((trabajo / "cortes").exists())
+            self.assertFalse((trabajo / "v1").exists())
+            self.assertFalse((trabajo / "historial.jsonl").exists())
+            self.invoke("render", source, "--work", trabajo, "--plan", trabajo / "seleccion-v1.json",
+                        "--accept", "vale, móntalo", "--threads", "1")
+            after = json.loads(self.invoke("render", source, "--work", trabajo,
+                                           "--plan", trabajo / "seleccion-v1.json",
+                                           "--dry-run").stdout)
+            # Everything is cached now: a montage of the same plan would only assemble and validate.
+            self.assertEqual((after["reused"], after["new"]), (2, 0))
+            self.assertLess(after["eta_s"], first["eta_s"])
+            # The estimate is now measured, not guessed: the notes carry the seconds they cost.
+            notas = [json.loads(path.read_text(encoding="utf-8"))
+                     for path in (trabajo / "cortes").glob("*.json")]
+            self.assertTrue(all(nota["segundos"] > 0 for nota in notas), notas)
+
+
+class CostTest(unittest.TestCase):
+    def test_the_cost_per_frame_comes_from_the_notes_the_cache_already_has(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary)
+            self.assertIsNone(render.cut_cost(cortes))
+            common.save(cortes / "uno.json", {"frames": 40, "samples": 76800, "segundos": 8.0})
+            common.save(cortes / "dos.json", {"frames": 60, "samples": 115200, "segundos": 12.0})
+            self.assertAlmostEqual(render.cut_cost(cortes), 0.2)
+            # A note from an older cache, without its seconds, neither counts nor breaks the mean.
+            common.save(cortes / "tres.json", {"frames": 25, "samples": 48000})
+            self.assertAlmostEqual(render.cut_cost(cortes), 0.2)
+
+    def test_the_estimate_separates_the_cached_passes_from_the_new_ones(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary) / "cortes"
+            cortes.mkdir()
+            plan = sample_plan(segments=[sample_segment(id=1, numero=1, title="A",
+                                                        spans=[[1.0, 3.0]], frames=40,
+                                                        samples=76800),
+                                         sample_segment(id=2, numero=2, title="B", start=5.0,
+                                                        end=7.0, spans=[[5.0, 7.0]], frames=40,
+                                                        samples=76800)])
+            part = render.subcuts(plan["segments"][0])[0]
+            key = render.cut_key(plan, part, "8.0.1")
+            (cortes / f"{key}.mkv").write_bytes(b"")
+            common.save(cortes / f"{key}.json", {"frames": 40, "samples": 76800, "segundos": 10.0})
+            report = render.estimate(plan, cortes, "8.0.1")
+            self.assertEqual(sorted(report), ["eta_s", "new", "reused"])
+            self.assertEqual((report["reused"], report["new"]), (1, 1))
+            # 40 new frames at the measured 0.25 s each, plus the assembly over the whole montage.
+            self.assertAlmostEqual(report["eta_s"],
+                                   round(40 * 0.25 + 80 / 25.0 * render.ASSEMBLY_SHARE, 1))
+
+    def test_without_a_measured_cache_the_provisional_cost_is_used(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary) / "cortes"          # the folder does not even exist yet
+            report = render.estimate(sample_plan(), cortes, "8.0.1")
+            self.assertEqual((report["reused"], report["new"]), (0, 1))
+            self.assertAlmostEqual(report["eta_s"],
+                                   round(40 / 25.0 * (render.COST_GUESS + render.ASSEMBLY_SHARE), 1))
 
 
 if __name__ == "__main__":

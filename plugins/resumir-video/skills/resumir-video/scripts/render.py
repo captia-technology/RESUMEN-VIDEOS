@@ -226,11 +226,14 @@ def render_part(data, plan, part, target, threads):
         publish(staged, target)
 
 
-def cut_note(part, release):
-    """What travels beside a cached cut: its numbers, so a later call can trust the file."""
-    return {"cut": part["cut"], "index": part["index"], "total": part["total"],
+def cut_note(part, release, seconds=None):
+    """What travels beside a cached cut: its numbers and, when known, what it cost to render."""
+    note = {"cut": part["cut"], "index": part["index"], "total": part["total"],
             "spans": [[round(start, 3), round(end, 3)] for start, end in part["spans"]],
             "frames": part["frames"], "samples": part["samples"], "ffmpeg": release}
+    if seconds is not None:
+        note["segundos"] = round(float(seconds), 3)
+    return note
 
 
 def is_cached(plan, part, cortes, release):
@@ -257,13 +260,45 @@ def cached_part(data, plan, part, cortes, release, threads):
     for path in (target, note):
         if path.exists():
             path.replace(path.with_suffix(path.suffix + ".parcial"))
+    started = time.monotonic()
     render_part(data, plan, part, target, threads)
-    save(note, cut_note(part, release))
+    save(note, cut_note(part, release, time.monotonic() - started))
     for path in (target, note):
         leftover = path.with_suffix(path.suffix + ".parcial")
         if leftover.exists():
             leftover.unlink()
     return target
+
+
+# Provisional, hasta que la caché de la máquina lo mida: segundos de montaje por segundo de salida.
+COST_GUESS = 0.5
+# El ensamblado y la validación recorren el montaje entero, también los cortes reutilizados.
+ASSEMBLY_SHARE = 0.25
+
+
+def cut_cost(cortes):
+    """Seconds of montage per output frame, measured over the notes already in the cache."""
+    spent, frames = 0.0, 0
+    for note in sorted(Path(cortes).glob("*.json")):
+        try:
+            kept = json.loads(note.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(kept.get("segundos"), (int, float)) and kept.get("frames"):
+            spent, frames = spent + float(kept["segundos"]), frames + int(kept["frames"])
+    return spent / frames if frames and spent > 0 else None
+
+
+def estimate(plan, cortes, release):
+    """What `render --dry-run` answers: cached passes, new ones and the seconds they will cost."""
+    cadence, cortes = cadence_of(plan), Path(cortes)
+    parts = all_parts(plan)
+    per_frame = cut_cost(cortes) or COST_GUESS / cadence
+    # The very criterion `build` mounts by: a cut whose note disagrees is counted as new.
+    fresh = [part for part in parts if not is_cached(plan, part, cortes, release)]
+    total = sum(part["frames"] for part in parts)
+    seconds = sum(part["frames"] for part in fresh) * per_frame + total / cadence * ASSEMBLY_SHARE
+    return {"reused": len(parts) - len(fresh), "new": len(fresh), "eta_s": round(seconds, 1)}
 
 
 # The numeric half of §11's five memory cases; `common.MEMORY_PATTERNS` holds the three strings.
@@ -650,6 +685,14 @@ def montage(args):
         raise Refused("El plan debe ser un objeto JSON con version entera.")
     data = probe(args.video)
     avisos = sources_agree(plan, args.video)
+    if args.dry_run:
+        # Nothing is written, nothing is locked and no acceptance is required: this is what the
+        # proposal of §9 quotes as the montage cost before the user has answered. The warnings still
+        # go out before this returns, exactly as a real montage would print them at the end.
+        for aviso in avisos:
+            print(f"Aviso: {aviso['mensaje']}", file=sys.stderr)
+        print(json.dumps(estimate(plan, work / "cortes", ffmpeg_release()), ensure_ascii=False))
+        return 0
     record = accepted(plan, args.accept, args.directo)
     if avisos:
         plan["source"] = {"path": str(Path(args.video).resolve()), **fingerprint(args.video)}
@@ -737,6 +780,8 @@ def register(sub):
                         help="Monta sin revisión previa; no anula los avisos bloqueantes.")
     parser.add_argument("--budget", type=float,
                         help="Segundos de montaje por llamada; al agotarse devuelve 3 y se reanuda.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Solo estima: cortes reutilizados, nuevos y segundos; no monta nada.")
     parser.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
                         help=f"Hilos de codificación (por defecto {DEFAULT_THREADS}).")
     parser.set_defaults(run=render)
