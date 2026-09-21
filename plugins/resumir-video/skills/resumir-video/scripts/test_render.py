@@ -703,5 +703,89 @@ class AssemblyTest(unittest.TestCase):
             self.assertEqual((values[0], values[20], values[40], values[-1]), (25, 100, 175, 211))
 
 
+def assembled(root):
+    """Two cuts of the coded source, already rendered and assembled; reused by several checks."""
+    source = root / "fuente.mkv"
+    coded(source)
+    plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                       segments=[sample_segment(id=1, numero=1, title="A", start=1.0, end=5.0,
+                                                spans=[[1.0, 2.0], [4.0, 5.0]],
+                                                frames=40, samples=76800),
+                                 sample_segment(id=2, numero=2, title="B", start=7.0, end=8.5,
+                                                spans=[[7.0, 8.5]], frames=30, samples=57600)])
+    plan["audio_stream"] = 1
+    data = common.probe(source)
+    cortes = root / "cortes"
+    cortes.mkdir()
+    cuts = render.build(data, plan, cortes, render.ffmpeg_release(), 1, None)
+    staged = cortes / "resumen.mp4"
+    render.assemble(cortes, cuts, staged, 1)
+    return source, plan, data, staged
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class TotalsTest(unittest.TestCase):
+    def test_the_totals_match_the_plan(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            _, plan, _, staged = assembled(root)
+            render.decode_check(staged, 1)
+            report = render.totals_check(staged, render.all_parts(plan))
+            self.assertEqual(report["fotogramas"], 70)
+            self.assertEqual(report["fotogramas_esperados"], 70)
+            self.assertLessEqual(report["desfase_s"], render.SYNC)
+
+    def test_a_montage_short_of_frames_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            _, plan, _, staged = assembled(root)
+            parts = render.all_parts(plan)
+            parts[0] = dict(parts[0], frames=parts[0]["frames"] + 5)
+            with self.assertRaisesRegex(render.Invalid, "75"):
+                render.totals_check(staged, parts)
+
+    def test_a_truncated_file_fails_the_decoding(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            _, _, _, staged = assembled(root)
+            broken = root / "roto.mp4"
+            broken.write_bytes(staged.read_bytes()[: staged.stat().st_size // 3])
+            with self.assertRaises(render.Invalid):
+                render.decode_check(broken, 1)
+
+    def test_short_cuts_leave_no_packet_under_a_millisecond(self):
+        # The check that `test_short_cuts_are_not_truncated_by_the_concatenation` used to make in
+        # test_video.py: one-frame cuts next to longer ones must not squash the muxed timeline.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "fuente.mkv"
+            coded(source)
+            plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                               segments=[sample_segment(id=1, numero=1, title="Breve", start=1.0,
+                                                        end=1.04, spans=[[1.0, 1.04]],
+                                                        frames=1, samples=1920),
+                                         sample_segment(id=2, numero=2, title="Larga", start=3.0,
+                                                        end=3.6, spans=[[3.0, 3.6]],
+                                                        frames=15, samples=28800),
+                                         sample_segment(id=3, numero=3, title="Otra breve",
+                                                        start=5.0, end=5.04, spans=[[5.0, 5.04]],
+                                                        frames=1, samples=1920)])
+            plan["settings"]["speed"] = 1.0
+            plan["audio_stream"] = 1
+            data = common.probe(source)
+            cortes = root / "cortes"
+            cortes.mkdir()
+            cuts = render.build(data, plan, cortes, render.ffmpeg_release(), 1, None)
+            staged = cortes / "resumen.mp4"
+            render.assemble(cortes, cuts, staged, 1)
+            report = render.totals_check(staged, render.all_parts(plan))
+            self.assertEqual(report["fotogramas"], 17)
+            packets = json.loads(common.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                             "-show_packets", "-show_entries",
+                                             "packet=duration_time", "-of", "json", str(staged)]))
+            self.assertFalse([item for item in packets["packets"]
+                              if float(item["duration_time"]) < 0.001])
+
+
 if __name__ == "__main__":
     unittest.main()

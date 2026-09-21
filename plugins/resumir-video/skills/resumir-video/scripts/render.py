@@ -11,8 +11,9 @@ import time
 import wave
 
 from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, MEMORY_PATTERNS, ffmpeg, fingerprint,
-                    listing, output_interval, plan_sha256, positive, publish, require_encoders,
-                    run, save, seconds, seek_margin, timeline_start, video_stream, warning)
+                    listing, output_interval, plan_sha256, positive, probe, publish,
+                    require_encoders, run, save, seconds, seek_margin, stream_duration, streams,
+                    timeline_start, video_stream, warning)
 
 
 class Refused(ValueError):
@@ -341,6 +342,36 @@ def assemble(folder, cuts, staged, threads):
            "-c:a", "aac", "-b:a", "192k", "-threads", str(threads),
            "-movflags", "+faststart", staged.name, cwd=folder)
     (folder / "cortes.txt").unlink()
+
+
+SYNC = 0.1
+
+
+def decode_check(path, threads):
+    """Full decoding with -xerror: a montage that cannot be played whole is never published."""
+    try:
+        ffmpeg("-xerror", "-threads", str(threads), "-i", path,
+               "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-")
+    except ValueError as exc:
+        raise Invalid(f"El montaje no se decodifica completo: {exc}") from exc
+
+
+def totals_check(path, parts):
+    """Frames equal to Σ N and audio within 0.1 s of the video, both blocking in §8."""
+    expected = sum(part["frames"] for part in parts)
+    counted = counted_frames(path)
+    data = probe(path)
+    picture, sound = streams(data)
+    lengths = (stream_duration(data, picture), stream_duration(data, sound))
+    drift = abs(lengths[0] - lengths[1])
+    if counted != expected:
+        raise Invalid(f"El montaje tiene {counted} fotogramas y el plan suma {expected}.")
+    if drift > SYNC:
+        raise Invalid(f"Vídeo y audio difieren {drift:.3f} s (máximo {SYNC} s): "
+                      f"vídeo {lengths[0]:.3f} s, audio {lengths[1]:.3f} s.")
+    return {"fotogramas_esperados": expected, "fotogramas": counted,
+            "video_s": round(lengths[0], 3), "audio_s": round(lengths[1], 3),
+            "desfase_s": round(drift, 3)}
 
 
 def render(args):
