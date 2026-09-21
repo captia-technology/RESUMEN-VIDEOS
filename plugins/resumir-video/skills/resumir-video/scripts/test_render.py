@@ -787,5 +787,38 @@ class TotalsTest(unittest.TestCase):
                               if float(item["duration_time"]) < 0.001])
 
 
+class ImageDistanceTest(unittest.TestCase):
+    def test_the_distance_is_normalised_and_symmetric(self):
+        black, white = bytes(4096), bytes([255]) * 4096
+        self.assertEqual(render.image_distance(black, black), 0.0)
+        self.assertEqual(render.image_distance(black, white), 1.0)
+        self.assertEqual(render.image_distance(white, black), 1.0)
+        half = bytes([128]) * 4096
+        self.assertAlmostEqual(render.image_distance(black, half), 128 / 255)
+
+    def test_frames_of_different_sizes_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "tamaño"):
+            render.image_distance(bytes(4096), bytes(16))
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class ImagePlacementTest(unittest.TestCase):
+    def test_the_first_and_last_frame_of_every_cut_match_the_source(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            _, _, data, staged = assembled(root)
+            rows = render.image_placement(data, staged, [(1.0, 2.0), (4.0, 5.0)], 0.0, 1.6, root)
+            self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
+            self.assertTrue(all(row["distancia"] <= render.IMAGE_OK for row in rows), rows)
+
+    def test_a_displaced_map_is_detected(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            _, _, data, staged = assembled(root)
+            # Same cut, wrong source times: the montage holds seconds 1 and 4, not 6 and 9.
+            rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root)
+            self.assertTrue(any(row["distancia"] > render.IMAGE_MARK for row in rows), rows)
+
+
 if __name__ == "__main__":
     unittest.main()

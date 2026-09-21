@@ -374,6 +374,47 @@ def totals_check(path, parts):
             "desfase_s": round(drift, 3)}
 
 
+IMAGE_SIDE = 64
+IMAGE_OK, IMAGE_MARK = 0.08, 0.15
+
+
+def gray_frame(path, instant, base, margin, target, track="0:v:0"):
+    """The frame on screen at `instant`, reduced to IMAGE_SIDE² luminance samples."""
+    ffmpeg("-ss", seconds(max(0.0, instant - margin)), "-noaccurate_seek", "-copyts", "-i", path,
+           "-map", track, "-frames:v", "1",
+           "-vf", f"fps=1000:start_time={seconds(base + instant)},"
+                  f"scale={IMAGE_SIDE}:{IMAGE_SIDE},format=gray",
+           "-f", "rawvideo", target)
+    return Path(target).read_bytes()
+
+
+def image_distance(left, right):
+    """Mean absolute luminance difference, normalised to 0…1."""
+    if len(left) != len(right) or not left:
+        raise ValueError(f"Las imágenes deben tener el mismo tamaño ({len(left)} y {len(right)}).")
+    return sum(abs(one - two) for one, two in zip(left, right)) / (len(left) * 255)
+
+
+def image_placement(data, final, spans, out_start, out_end, folder):
+    """Compare the first and last frame of the cut against the source it claims to come from."""
+    source, base = data["source"]["path"], timeline_start(data)
+    margin = seek_margin(data)
+    # `final` always carries a single video stream (assemble maps it to output 0), but the source
+    # may not: pick the same track render_part read, never a stray attached_pic (§8, hallazgo 5).
+    origin_track = f"0:{video_stream(data)['index']}"
+    points = (("inicio", out_start, spans[0][0]), ("fin", max(out_start, out_end - 1e-3),
+                                                   max(spans[-1][0], spans[-1][1] - 1e-3)))
+    rows = []
+    with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder) as temporary:
+        for name, moment, origin in points:
+            produced = gray_frame(final, moment, 0.0, margin, Path(temporary) / f"{name}-s.gray")
+            expected = gray_frame(source, origin, base, margin, Path(temporary) / f"{name}-o.gray",
+                                  origin_track)
+            rows.append({"punto": name, "salida_s": round(moment, 3), "origen_s": round(origin, 3),
+                         "distancia": round(image_distance(produced, expected), 4)})
+    return rows
+
+
 def render(args):
     """Entry point of the subcommand; the montage itself arrives in Task 10."""
     raise RuntimeError("render aún no está implementado")
