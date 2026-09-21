@@ -1,5 +1,7 @@
 """Checks for the montage: fast ones first, then integration over generated media."""
 
+import contextlib
+import io
 import json
 from pathlib import Path
 import re
@@ -7,7 +9,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 import wave
 
 import common
@@ -477,6 +481,192 @@ class PartTest(unittest.TestCase):
             kept = json.loads(fourth.with_suffix(".json").read_text(encoding="utf-8"))
             self.assertEqual((kept["frames"], kept["samples"]), (40, 76800))
             self.assertFalse(list(cortes.glob("*.parcial")))
+
+
+MEMORY_FAILURE = "ffmpeg falló (código 1):\nCannot allocate memory"
+
+
+def cuts_plan(count):
+    """A plan of `count` one-pass cuts of 40 frames, enough for the cache without any FFmpeg."""
+    return sample_plan(segments=[sample_segment(id=n, numero=n, title=f"C{n}", start=2.0 * n,
+                                                end=2.0 * n + 2.0,
+                                                spans=[[2.0 * n, 2.0 * n + 2.0]],
+                                                frames=40, samples=76800)
+                                 for n in range(1, count + 1)])
+
+
+def stub_render(calls, failures=()):
+    """Stands in for `render_part`: records the threads, fails as told, then leaves a cut."""
+    def stub(data, plan, part, target, threads):
+        calls.append(threads)
+        time.sleep(0.03)                # longer than the tick of the monotonic clock on Windows
+        if len(calls) <= len(failures):
+            raise ValueError(failures[len(calls) - 1])
+        target.write_bytes(b"corte")
+    return stub
+
+
+class BudgetTest(unittest.TestCase):
+    def test_only_recognised_memory_failures_are_retried(self):
+        for text in ("ffmpeg falló (código 1):\nCannot allocate memory",
+                     "ffmpeg falló (código 1):\nOut of memory",
+                     "ffmpeg falló (código 1):\nav_buffer_alloc() failed",
+                     "ffmpeg falló (código 137):\nmatado",
+                     "ffmpeg falló (código 3221225495):\n",
+                     "ffmpeg falló (código -9):\n"):
+            with self.subTest(text=text):
+                self.assertTrue(render.retryable(text))
+        for text in ("ffmpeg falló (código 1):\nInvalid data found when processing input",
+                     "ffmpeg falló (código 2):\nNo such file or directory",
+                     # The code is read as a number from the head, never as a substring of stderr.
+                     "ffmpeg falló (código 1):\nframe 137 duplicado (código 137)",
+                     "ffmpeg falló (código 1370):\n"):
+            with self.subTest(text=text):
+                self.assertFalse(render.retryable(text))
+
+    def test_the_pending_state_counts_what_is_done(self):
+        pending = render.Pending(4, 11, ["corte 5 subcorte 1/1", "corte 6 subcorte 1/2"])
+        self.assertEqual(pending.state, {"done": 4, "total": 11, "pending": 7,
+                                         "bloques": ["corte 5 subcorte 1/1",
+                                                     "corte 6 subcorte 1/2"]})
+        # `pending` is always an integer and `bloques` always a list, even without detail (§12).
+        self.assertIsInstance(render.Pending(0, 2).state["pending"], int)
+        self.assertEqual(render.Pending(0, 2).state["bloques"], [])
+
+    def test_all_parts_expands_every_cut_in_order(self):
+        plan = sample_plan(segments=[sample_segment(id=1, numero=1, title="A", start=1.0, end=3.0,
+                                                    spans=[[1.0, 3.0]], frames=40, samples=76800),
+                                     sample_segment(id=4, numero=2, title="B", start=5.0, end=9.0,
+                                                    spans=[[5.0, 6.0], [8.0, 9.0]],
+                                                    frames=40, samples=76800)])
+        parts = render.all_parts(plan)
+        self.assertEqual([part["cut"] for part in parts], [1, 4])
+        self.assertEqual(sum(part["frames"] for part in parts), 80)
+
+    def test_a_plan_whose_estimate_disagrees_is_refused(self):
+        published = [{"spans": [[1.0, 3.0]], "frames": 40, "samples": 76800}]
+        plan = sample_plan(segments=[sample_segment(spans=[[1.0, 3.0]], frames=41, samples=76800,
+                                                    subcuts=published)])
+        with self.assertRaisesRegex(render.Refused, "41"):
+            render.all_parts(plan)
+        # The subcuts must add up to the cut's own spans, not just to its totals.
+        moved = sample_plan(segments=[sample_segment(
+            spans=[[1.0, 3.0]], frames=40, samples=76800,
+            subcuts=[{"spans": [[1.0, 2.0]], "frames": 20, "samples": 38400},
+                     {"spans": [[2.0, 3.0]], "frames": 20, "samples": 38400}])])
+        with self.assertRaisesRegex(render.Refused, "subcortes"):
+            render.all_parts(moved)
+
+    def test_one_criterion_says_what_is_already_cached(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary)
+            plan = cuts_plan(1)
+            part = render.subcuts(plan["segments"][0])[0]
+            target = cortes / f"{render.cut_key(plan, part, '8.0.1')}.mkv"
+            note = target.with_suffix(".json")
+            self.assertFalse(render.is_cached(plan, part, cortes, "8.0.1"))
+            target.write_bytes(b"corte")
+            self.assertFalse(render.is_cached(plan, part, cortes, "8.0.1"))       # no note
+            common.save(note, render.cut_note(part, "8.0.1"))
+            self.assertTrue(render.is_cached(plan, part, cortes, "8.0.1"))
+            for damaged in (dict(render.cut_note(part, "8.0.1"), frames=41), [], "{"):
+                note.unlink()
+                if isinstance(damaged, str):
+                    note.write_text(damaged, encoding="utf-8")
+                else:
+                    common.save(note, damaged)
+                with self.subTest(note=damaged):
+                    self.assertFalse(render.is_cached(plan, part, cortes, "8.0.1"))
+
+    def test_a_memory_failure_is_retried_once_with_one_thread_and_leaves_no_debris(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary)
+            plan = cuts_plan(2)
+            first = render.subcuts(plan["segments"][0])[0]
+            key = render.cut_key(plan, first, "8.0.1")
+            (cortes / f"{key}.mkv").write_bytes(b"roto")       # damaged: set aside as `.parcial`
+            calls = []
+            with mock.patch.object(render, "render_part", stub_render(calls, [MEMORY_FAILURE])), \
+                    contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                cuts = render.build(None, plan, cortes, "8.0.1", 4, None)
+            # The first pass fails with 4 threads and is repeated once with 1; the second is
+            # mounted normally: the retry does not change the threads of what follows.
+            self.assertEqual(calls, [4, 1, 4])
+            self.assertEqual(len(cuts), 2)
+            self.assertFalse(list(cortes.glob("*.parcial")))
+            note = json.loads((cortes / f"{key}.json").read_text(encoding="utf-8"))
+            note.pop("segundos", None)          # the seconds it cost arrive with Tarea 11
+            self.assertEqual(note, render.cut_note(first, "8.0.1"))
+            # Progress goes to stderr; stdout stays clean for the JSON state of code 3.
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("Corte 2/2", err.getvalue())
+
+    def test_only_memory_failures_get_a_retry_and_only_one(self):
+        cases = (("Invalid argument", ["ffmpeg falló (código 1):\nInvalid argument"], [4]),
+                 ("second memory failure", [MEMORY_FAILURE, MEMORY_FAILURE], [4, 1]))
+        for name, failures, expected in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory(prefix="rv-") as temporary:
+                cortes, calls = Path(temporary), []
+                with mock.patch.object(render, "render_part", stub_render(calls, failures)), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(ValueError):
+                        render.build(None, cuts_plan(1), cortes, "8.0.1", 4, None)
+                self.assertEqual(calls, expected)
+                self.assertFalse(list(cortes.glob("*.parcial")))
+
+    def test_a_resumption_mounts_at_least_one_cut_before_it_stops(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary)
+            plan = cuts_plan(3)
+            first = render.subcuts(plan["segments"][0])[0]
+            target = cortes / f"{render.cut_key(plan, first, '8.0.1')}.mkv"
+            target.write_bytes(b"corte")                        # the first cut is already cached
+            common.save(target.with_suffix(".json"), render.cut_note(first, "8.0.1"))
+            calls = []
+            with mock.patch.object(render, "render_part", stub_render(calls)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(render.Pending) as caught:
+                    render.build(None, plan, cortes, "8.0.1", 1, 0.01)
+                # `done` and `total` count what this call mounts: the cached cut is neither, so
+                # the resumption advanced by one and one is left.
+                self.assertEqual(calls, [1])
+                self.assertEqual(caught.exception.state,
+                                 {"done": 1, "total": 2, "pending": 1,
+                                  "bloques": ["corte 3 subcorte 1/1"]})
+                self.assertEqual(len(render.build(None, plan, cortes, "8.0.1", 1, None)), 3)
+                self.assertEqual(calls, [1, 1])
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class ResumeTest(unittest.TestCase):
+    def test_an_exhausted_budget_leaves_the_done_cuts_in_the_cache(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "fuente.mkv"
+            coded(source)
+            plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                               segments=[sample_segment(id=1, numero=1, title="A", start=1.0,
+                                                        end=3.0, spans=[[1.0, 3.0]],
+                                                        frames=40, samples=76800),
+                                         sample_segment(id=2, numero=2, title="B", start=5.0,
+                                                        end=7.0, spans=[[5.0, 7.0]],
+                                                        frames=40, samples=76800)])
+            plan["audio_stream"] = 1
+            data = common.probe(source)
+            cortes = root / "cortes"
+            cortes.mkdir()
+            release = render.ffmpeg_release()
+            with self.assertRaises(render.Pending) as caught:
+                # A microscopic budget still renders the first part and stops before the second.
+                render.build(data, plan, cortes, release, 1, 1e-9)
+            self.assertEqual(caught.exception.state, {"done": 1, "total": 2, "pending": 1,
+                                                      "bloques": ["corte 2 subcorte 1/1"]})
+            self.assertEqual(len(list(cortes.glob("*.mkv"))), 1)
+            cuts = render.build(data, plan, cortes, release, 1, None)
+            self.assertEqual(len(cuts), 2)
+            self.assertEqual(len(list(cortes.glob("*.mkv"))), 2)
+            self.assertTrue(all(render.counted_frames(cut) == 40 for cut in cuts))
 
 
 if __name__ == "__main__":

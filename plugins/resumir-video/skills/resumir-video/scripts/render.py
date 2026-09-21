@@ -7,11 +7,12 @@ import math
 from pathlib import Path
 import sys
 import tempfile
+import time
 import wave
 
-from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, ffmpeg, fingerprint, output_interval,
-                    plan_sha256, positive, publish, run, save, seconds, seek_margin,
-                    timeline_start, video_stream, warning)
+from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, MEMORY_PATTERNS, ffmpeg, fingerprint,
+                    output_interval, plan_sha256, positive, publish, run, save, seconds,
+                    seek_margin, timeline_start, video_stream, warning)
 
 
 class Refused(ValueError):
@@ -261,6 +262,70 @@ def cached_part(data, plan, part, cortes, release, threads):
         if leftover.exists():
             leftover.unlink()
     return target
+
+
+# The numeric half of §11's five memory cases; `common.MEMORY_PATTERNS` holds the three strings.
+# Windows reports STATUS_NO_MEMORY (0xC0000017) as 3221225495, the OOM killer gives 137 and, on
+# POSIX, a SIGKILLed child is -9.
+MEMORY_CODES = (137, 3221225495, -9)
+
+
+def exit_code(message):
+    """The returncode that `common.run` writes at the head of its error as «(código N)»."""
+    head, found, tail = message.partition("(código ")
+    try:
+        return int(tail.partition(")")[0]) if found else None
+    except ValueError:
+        return None
+
+
+def retryable(message):
+    """Only the memory failures listed in §11 deserve the single retry; an AVERROR does not."""
+    return (any(pattern in message for pattern in MEMORY_PATTERNS)
+            or exit_code(message) in MEMORY_CODES)
+
+
+def part_label(part):
+    """How a pass still to render is named in the resumable state of code 3."""
+    return f"corte {part['cut']} subcorte {part['index'] + 1}/{part['total']}"
+
+
+def all_parts(plan):
+    """Every pass the plan needs, in order; `subcuts` refuses a cut whose numbers do not add up."""
+    parts = []
+    for segment in plan["segments"]:
+        parts.extend(subcuts(segment))
+    return parts
+
+
+def build(data, plan, cortes, release, threads, budget):
+    """Render every missing part, one retry on memory failures, honouring the time budget (§11)."""
+    parts = all_parts(plan)
+    fresh = [not is_cached(plan, part, cortes, release) for part in parts]
+    # `done` and `total` count only what this call mounts: what was cached is neither.
+    started, done, total, cuts = time.monotonic(), 0, sum(fresh), []
+    for index, part in enumerate(parts):
+        # `done` guards the first pass: a resumption always mounts one cut before it stops.
+        if fresh[index] and budget and done and time.monotonic() - started >= budget:
+            raise Pending(done, total, [part_label(item) for item, missing
+                                        in zip(parts[index:], fresh[index:]) if missing])
+        try:
+            cuts.append(cached_part(data, plan, part, cortes, release, threads))
+        except ValueError as exc:
+            if not retryable(str(exc)):
+                raise
+            print(f"Falta de memoria en el {part_label(part)}; se repite con un solo hilo.",
+                  file=sys.stderr, flush=True)
+            # The one retry allowed by §11: -threads 1 and -filter_threads 1. A second failure
+            # propagates. What the failed attempt set aside as `.parcial` goes before the retry.
+            for leftover in cortes.glob(f"{cut_key(plan, part, release)}.*.parcial"):
+                leftover.unlink()
+            cuts.append(cached_part(data, plan, part, cortes, release, 1))
+        if fresh[index]:
+            done += 1
+            # Stderr: stdout carries only the JSON state of code 3 (§12), never progress lines.
+            print(f"Corte {done}/{total}", file=sys.stderr, flush=True)
+    return cuts
 
 
 def render(args):
