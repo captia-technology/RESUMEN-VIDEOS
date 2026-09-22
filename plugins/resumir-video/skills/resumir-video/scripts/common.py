@@ -215,6 +215,24 @@ def output_interval(rate):
     return float(den or 1) / float(num)
 
 
+def pictures(data):
+    """Picture tracks that are real video: cover art is metadata, not footage."""
+    return [s for s in data["streams"] if s["codec_type"] == "video"
+            and not s.get("disposition", {}).get("attached_pic")]
+
+
+def kind(data):
+    """`video` (one picture track and audio) or `audio` (no picture track and audio)."""
+    videos = pictures(data)
+    if not any(s["codec_type"] == "audio" for s in data["streams"]):
+        raise ValueError("El medio no tiene pista de audio: una grabación muda no se puede resumir "
+                         "con este flujo; extrae fotogramas aparte o aporta el audio.")
+    if len(videos) > 1:
+        raise ValueError(f"El medio tiene {len(videos)} pistas de vídeo; normaliza la fuente a una sola "
+                         "antes de resumirla.")
+    return "video" if videos else "audio"
+
+
 def video_stream(data):
     videos = [s for s in data["streams"] if s["codec_type"] == "video"
               and not s.get("disposition", {}).get("attached_pic")]

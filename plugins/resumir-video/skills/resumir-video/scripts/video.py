@@ -60,17 +60,80 @@ def check(args):
 
 
 def prepare(args):
-    data = probe(args.video)
-    _, audio = streams(data, args.audio_stream)
-    out = new_dir(args.work)
+    data = common.probe(args.video)
+    data["kind"] = common.kind(data)
+    common.duration(data)
+    if data["kind"] == "video":
+        reject_hdr(common.pictures(data)[0])
+    sounds = [s for s in data["streams"] if s["codec_type"] == "audio"]
+    if args.audio_stream is not None:
+        sounds = [s for s in sounds if s["index"] == args.audio_stream]
+        if not sounds:
+            raise ValueError(f"No hay una pista de audio con el índice global {args.audio_stream}; "
+                             "consulta probe.")
+    audio = sounds[0]
+    data["audio_stream"] = audio["index"]
+    # Identity and fingerprint live together in `source`, the shape the published plan carries.
+    data["source"] = {**data["source"], **common.fingerprint(data["source"]["path"])}
+    # common.timeline answers both modes; in audio it leaves rate, fps and interval at null.
+    data["timeline"] = common.timeline(data)
+    if data["timeline"]["sample_rate"] <= 0:
+        raise ValueError(f"La pista de audio {audio['index']} no declara una frecuencia de muestreo "
+                         "válida; consulta probe y elige otra con --audio-stream.")
+    data["avisos"] = packet_warnings(data)
+    out = common.new_dir(args.work)
     # Job folders hold confidential frames and transcripts: keep them out of version control.
     (out / ".gitignore").write_text("*\n", encoding="utf-8")
-    data["audio_stream"] = audio["index"]
-    save(out / "metadata.json", data)
-    ffmpeg("-i", data["source"]["path"], "-map", f"0:{audio['index']}",
-           "-vn", "-af", "aresample=16000:async=1:first_pts=0", "-ac", "1",
-           "-c:a", "pcm_s16le", out / "audio.wav")
+    common.save(out / "metadata.json", data)
+    common.ffmpeg("-i", data["source"]["path"], "-map", f"0:{audio['index']}",
+                  "-vn", "-af", "aresample=16000:async=1:first_pts=0", "-ac", "1",
+                  "-c:a", "pcm_s16le", out / "audio.wav")
+    common.energy(out / "audio.wav", out / "energia.f32")
     print(out)
+
+
+PACKETS = 600
+GAP_FACTOR = 1.5
+
+
+def reject_hdr(picture):
+    """HDR needs its own colour path: the standard montage would wash the picture out (section 12)."""
+    transfer = picture.get("color_transfer")
+    if transfer in common.HDR_TRANSFERS:
+        raise ValueError(f"Fuente HDR ({transfer}): el montaje estándar no conserva su curva de "
+                         "color. Convierte el original a SDR antes de resumirlo.")
+
+
+def packet_times(path, index):
+    """Presentation stamps of the first PACKETS packets of one track; the probe stops there."""
+    report = json.loads(common.run(
+        ["ffprobe", "-v", "error", "-select_streams", str(index), "-show_entries", "packet=pts_time",
+         "-read_intervals", f"%+#{PACKETS}", "-of", "json", str(path)]))
+    return sorted(float(packet["pts_time"]) for packet in report.get("packets") or []
+                  if packet.get("pts_time") not in (None, "N/A"))
+
+
+def packet_warnings(data):
+    """Variable cadence and PTS gaps of the picture track, probed once and carried in metadata."""
+    if data["kind"] == "audio":
+        return []
+    picture = common.pictures(data)[0]
+    avisos = []
+    if picture.get("avg_frame_rate") != picture.get("r_frame_rate"):
+        avisos.append(common.warning(
+            "fuente_vfr", f"La cadencia declarada no es constante (r_frame_rate "
+            f"{picture.get('r_frame_rate')}, avg_frame_rate {picture.get('avg_frame_rate')}): el "
+            "montaje fija F y normaliza con el filtro fps."))
+    interval = data["timeline"]["interval"]
+    times = packet_times(data["source"]["path"], picture["index"])
+    # A gap of one interval is the normal spacing; 1,5 absorbs the rounding of the container.
+    gaps = [round(b - a, 6) for a, b in zip(times, times[1:]) if b - a > GAP_FACTOR * interval]
+    if gaps:
+        avisos.append(common.warning(
+            "huecos_pts", f"El sondeo de los primeros {len(times)} paquetes encuentra {len(gaps)} "
+            f"saltos mayores de un fotograma (el mayor, {max(gaps):.3f} s): puede faltar imagen en "
+            "el original."))
+    return avisos
 
 
 def frames(args):

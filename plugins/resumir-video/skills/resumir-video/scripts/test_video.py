@@ -144,6 +144,81 @@ class VideoTest(unittest.TestCase):
         self.assertEqual(result.returncode == 0, report["ok"])
         self.assertEqual(report["version"], video.__version__)
 
+    def test_prepare_classifies_the_medium_and_records_the_timeline(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            synthetic(root / "con-voz.mp4", 5)
+            invoke(self, "prepare", root / "con-voz.mp4", "--work", root / "t-video")
+            data = json.loads((root / "t-video/metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["kind"], "video")
+            self.assertEqual(data["timeline"]["fps"], 25.0)
+            self.assertEqual(data["timeline"]["rate"], "25/1")
+            self.assertAlmostEqual(data["timeline"]["interval"], 0.04)
+            self.assertEqual(data["timeline"]["sample_rate"], 48000)
+            self.assertEqual(len(data["source"]["sha256"]), 64)
+            self.assertEqual(data["avisos"], [])
+            self.assertEqual((root / "t-video/energia.f32").stat().st_size % 4, 0)
+            self.assertAlmostEqual((root / "t-video/energia.f32").stat().st_size / 4, 500, delta=10)
+
+    def test_prepare_takes_every_audio_container_and_refuses_a_mute_video(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            tone = "sine=frequency=440:sample_rate=48000:duration=5"
+            common.ffmpeg("-f", "lavfi", "-i", tone, "-c:a", "pcm_s16le", root / "solo.wav")
+            common.ffmpeg("-f", "lavfi", "-i", tone, "-c:a", "aac", root / "solo.m4a")
+            common.ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1", "-frames:v", "1",
+                          root / "caratula.png")
+            common.ffmpeg("-i", root / "solo.wav", "-i", root / "caratula.png", "-map", "0:a",
+                          "-map", "1:v", "-c:a", "aac", "-c:v", "png",
+                          "-disposition:v", "attached_pic", root / "con-caratula.m4a")
+            names = ["solo.wav", "solo.m4a", "con-caratula.m4a"]
+            if "libmp3lame" in common.encoders():
+                common.ffmpeg("-f", "lavfi", "-i", tone, "-c:a", "libmp3lame", root / "solo.mp3")
+                names.append("solo.mp3")
+            for name in names:
+                with self.subTest(name=name):
+                    work = root / f"t-{name}"
+                    invoke(self, "prepare", root / name, "--work", work)
+                    data = json.loads((work / "metadata.json").read_text(encoding="utf-8"))
+                    self.assertEqual(data["kind"], "audio")
+                    self.assertIsNone(data["timeline"]["fps"])
+                    self.assertIsNone(data["timeline"]["rate"])
+                    self.assertEqual(data["timeline"]["origin"], 0.0)
+                    self.assertEqual(data["timeline"]["sample_rate"], 48000)
+                    self.assertEqual(data["avisos"], [])
+                    self.assertTrue((work / "audio.wav").is_file())
+                    self.assertTrue((work / "energia.f32").is_file())
+            common.ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=5",
+                          "-c:v", "libx264", "-preset", "ultrafast", root / "mudo.mp4")
+            error = invoke(self, "prepare", root / "mudo.mp4", "--work", root / "t-mudo",
+                           ok=False).stderr
+            self.assertIn("no tiene pista de audio", error)
+            self.assertFalse((root / "t-mudo").exists())
+
+    def test_hdr_is_refused_and_pts_gaps_are_recorded(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            common.ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=2",
+                          "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+                          "-c:v", "libx264", "-preset", "ultrafast", "-x264-params",
+                          "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+                          "-c:a", "aac", root / "hdr.mp4")
+            error = invoke(self, "prepare", root / "hdr.mp4", "--work", root / "t-hdr",
+                           ok=False).stderr
+            self.assertIn("HDR", error)
+            self.assertFalse((root / "t-hdr").exists())
+
+            synthetic(root / "entera.mp4", 3)
+            common.ffmpeg("-i", root / "entera.mp4", "-vf", "select='not(between(n,25,49))'",
+                          "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy",
+                          root / "hueco.mp4")
+            invoke(self, "prepare", root / "hueco.mp4", "--work", root / "t-hueco")
+            avisos = json.loads(
+                (root / "t-hueco/metadata.json").read_text(encoding="utf-8"))["avisos"]
+            self.assertIn("huecos_pts", [aviso["codigo"] for aviso in avisos])
+            self.assertFalse(any(aviso["bloquea"] for aviso in avisos))
+            self.assertEqual({aviso["corte"] for aviso in avisos}, {None})
+
 
 class PlanTest(unittest.TestCase):
     def test_missing_encoders_are_reported_before_rendering(self):
@@ -201,6 +276,19 @@ class PlanTest(unittest.TestCase):
         self.assertIs(parser.parse_args(["frames", "v.mp4", "--out", "o"]).run, video.frames)
         self.assertIs(parser.parse_args(["transcribe", "a.wav", "--out", "o.json"]).run,
                       video.transcribe)
+
+    def test_kind_accepts_video_and_audio_and_refuses_the_rest(self):
+        picture = {"index": 0, "codec_type": "video"}
+        sound = {"index": 1, "codec_type": "audio"}
+        cover = {"index": 2, "codec_type": "video", "disposition": {"attached_pic": 1}}
+        self.assertEqual(common.kind({"streams": [picture, sound]}), "video")
+        self.assertEqual(common.kind({"streams": [sound]}), "audio")
+        self.assertEqual(common.kind({"streams": [sound, cover]}), "audio")
+        with self.assertRaisesRegex(ValueError, "pista de audio"):
+            common.kind({"streams": [picture]})
+        with self.assertRaisesRegex(ValueError, "2 pistas de vídeo"):
+            common.kind({"streams": [picture, dict(picture, index=3), sound]})
+        self.assertEqual([s["index"] for s in common.pictures({"streams": [picture, cover]})], [0])
 
 
 if __name__ == "__main__":
