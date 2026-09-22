@@ -22,6 +22,9 @@ ABSOLUTE = re.compile("|".join((r"(?<![A-Za-z])[A-Za-z]:[\\/]", *HOMES, r"\\\\[A
 PENDING = re.compile(r"\bTBD\b|\bTODO\b|\bFIXME\b|\bXXX\b|\(pendiente de completar\)"
                      r"|\[completar\]|<completar>", re.IGNORECASE)
 WIDTH = 48
+EPSILON = 0.02
+LOW_MEAN = 0.9
+LOW_CUT = 0.85
 
 
 def stretches_of(cut):
@@ -35,6 +38,50 @@ def stretches_of(cut):
 def bounds_of(cut, pieces):
     """The published plan carries start and end; a hand-written one leaves its spans to say so."""
     return float(cut.get("start", pieces[0][0])), float(cut.get("end", pieces[-1][1]))
+
+
+def words_of(data):
+    """Every word with its own marks; a segment without them counts as a single unit."""
+    rows = []
+    for segment in data.get("segments") or []:
+        marks = segment.get("words") or []
+        if marks:
+            rows += [(float(w["start"]), float(w["end"]), str(w.get("text", "")).strip())
+                     for w in marks if str(w.get("text", "")).strip()]
+        elif str(segment.get("text", "")).strip():
+            rows.append((float(segment["start"]), float(segment["end"]),
+                         str(segment["text"]).strip()))
+    return sorted(rows)
+
+
+def coverage(segments, words):
+    """Share of the words of each cut that survive whole inside its kept stretches."""
+    rows = []
+    for cut in segments:
+        pieces = stretches_of(cut)
+        first, last = bounds_of(cut, pieces)
+        total, lost = 0, []
+        for start, end, text in words:
+            if end <= first or start >= last:
+                continue
+            total += 1
+            if not any(a - EPSILON <= start and end <= b + EPSILON for a, b in pieces):
+                lost.append(text)
+        rows.append({"corte": cut["id"], "palabras": total, "cubiertas": total - len(lost),
+                     "cobertura": round((total - len(lost)) / total, 3) if total else 1.0,
+                     "perdidas": lost[:10]})
+    palabras = sum(row["palabras"] for row in rows)
+    cubiertas = sum(row["cubiertas"] for row in rows)
+    media = round(cubiertas / palabras, 3) if palabras else 1.0
+    minimo = min((row["cobertura"] for row in rows), default=1.0)
+    avisos = []
+    if media < LOW_MEAN or minimo < LOW_CUT:
+        avisos.append(common.warning(
+            "cobertura_baja",
+            f"Cobertura media {media:.2f} y mínima {minimo:.2f}: revisa los bordes de los cortes "
+            "marcados o declara la pérdida en las limitaciones del documento."))
+    return {"media": media, "minimo": minimo, "palabras": palabras, "cubiertas": cubiertas,
+            "cortes": rows, "avisos": avisos}
 
 
 def placements(segments, speed, rate):
@@ -487,6 +534,37 @@ def document(args):
     return 0
 
 
+def compare(args):
+    """Word coverage of the mounted cuts against the transcription: informative, never blocks."""
+    work = Path(args.work).resolve()
+    metadata = read_json(work / "metadata.json")
+    if metadata.get("kind") != "video":
+        raise ValueError("compare solo se aplica al modo vídeo: en audio no hay montaje que "
+                         "contrastar con la transcripción.")
+    out = work / f"v{args.version}"
+    published = out / "cobertura.json"
+    if published.is_file():
+        # A published version is immutable, and running compare twice is not a mistake:
+        # report what is already there and change nothing.
+        print(f"Aviso: {out.name}/cobertura.json ya está publicado; no se reescribe.",
+              file=sys.stderr)
+        print(published.read_text(encoding="utf-8-sig"), end="")
+        return 0
+    plan = read_json(out / "seleccion.json")
+    transcription = work / "transcripcion.json"
+    if not transcription.is_file():
+        report = {"version": args.version, "disponible": False,
+                  "motivo": "No hay transcripcion.json: la cobertura de palabras no se puede medir."}
+    else:
+        report = {"version": args.version, "disponible": True,
+                  **coverage(plan["segments"], words_of(read_json(transcription)))}
+    common.save(published, report)
+    common.history(work, "verify", {"tipo": "cobertura", "version": args.version,
+                                    "media": report.get("media"), "minimo": report.get("minimo")})
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def register(sub):
     p = sub.add_parser("doc", help="Expande las marcas del documento y publica Markdown y DOCX.")
     p.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
@@ -497,6 +575,12 @@ def register(sub):
     p.add_argument("--revision", help="Motivo de la revisión; publica resumen-rM junto a la anterior.")
     p.add_argument("--no-docx", action="store_true", help="Entrega solo Markdown, sin convertir.")
     p.set_defaults(run=document)
+
+    p = sub.add_parser("compare", help="Cobertura de palabras del resumen frente al original "
+                                       "(informativo, nunca bloquea).")
+    p.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
+    p.add_argument("--version", type=common.positive, required=True, help="Versión montada (vN).")
+    p.set_defaults(run=compare)
 
 
 def render_docx(markdown, target, base):

@@ -458,5 +458,77 @@ class AudioDocumentTest(unittest.TestCase):
             self.assertFalse((work / "documento-v1").exists())
 
 
+WORDS = {"segments": [
+    {"start": 3.0, "end": 9.0, "text": "", "words": [
+        {"start": 3.1, "end": 3.3, "text": "La"}, {"start": 3.3, "end": 4.0, "text": "atmósfera"},
+        {"start": 4.0, "end": 4.6, "text": "ATEX"}, {"start": 5.1, "end": 5.6, "text": "exige"},
+        {"start": 5.6, "end": 6.1, "text": "un"}, {"start": 6.1, "end": 7.0, "text": "equipo"}]},
+    {"start": 9.0, "end": 12.0, "text": "Sin permiso no se entra", "words": [
+        {"start": 9.1, "end": 9.5, "text": "Sin"}, {"start": 9.5, "end": 9.9, "text": "permiso"},
+        {"start": 10.2, "end": 11.0, "text": "no"}, {"start": 11.0, "end": 11.8, "text": "se"}]}]}
+CUTS = [{"id": 1, "start": 3.0, "end": 9.0, "spans": [[3.0, 5.0], [5.5, 9.0]]},
+        {"id": 2, "start": 9.0, "end": 12.0, "spans": [[9.0, 10.0]]}]
+
+
+class CoverageTest(unittest.TestCase):
+    def test_words_lost_to_a_removed_pause_are_counted(self):
+        result = doc.coverage(CUTS, doc.words_of(WORDS))
+        self.assertEqual(result["palabras"], 10)
+        self.assertEqual(result["cubiertas"], 7)
+        self.assertEqual(result["media"], 0.7)
+        self.assertEqual(result["minimo"], 0.5)
+        self.assertEqual(result["cortes"][0]["perdidas"], ["exige"])
+        self.assertEqual(result["cortes"][1]["perdidas"], ["no", "se"])
+        self.assertEqual([w["codigo"] for w in result["avisos"]], ["cobertura_baja"])
+        self.assertFalse(result["avisos"][0]["bloquea"])
+
+    def test_a_clean_cut_covers_everything_and_warns_about_nothing(self):
+        whole = [{"id": 1, "start": 3.0, "end": 9.0, "spans": [[3.0, 9.0]]}]
+        result = doc.coverage(whole, doc.words_of(WORDS))
+        self.assertEqual((result["media"], result["minimo"]), (1.0, 1.0))
+        self.assertEqual(result["avisos"], [])
+
+    def test_compare_writes_the_report_and_returns_zero(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            (work / "transcripcion.json").write_text(json.dumps(
+                {"language": "es", "settings": {"model": "small"},
+                 "segments": [{"start": 10.0, "end": 20.0, "text": "uno", "words": [
+                     {"start": 10.0, "end": 10.4, "text": "uno"},
+                     {"start": 13.5, "end": 14.2, "text": "dos"}]}]}), encoding="utf-8")
+            self.assertEqual(doc.compare(doc.arguments(work=work, version=1)), 0)
+            report = json.loads((work / "v1/cobertura.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["version"], 1)
+            self.assertTrue(report["disponible"])
+            self.assertEqual(report["cortes"][0]["perdidas"], ["dos"])
+            self.assertEqual([w["codigo"] for w in report["avisos"]], ["cobertura_baja"])
+            record = json.loads((work / "historial.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual((record["evento"], record["tipo"]), ("verify", "cobertura"))
+
+    def test_compare_can_be_run_again_without_touching_the_published_report(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            self.assertEqual(doc.compare(doc.arguments(work=work, version=1)), 0)
+            before = (work / "v1/cobertura.json").read_bytes()
+            self.assertEqual(doc.compare(doc.arguments(work=work, version=1)), 0)
+            self.assertEqual((work / "v1/cobertura.json").read_bytes(), before)
+            lines = (work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+
+    def test_compare_without_a_transcription_says_so(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            (work / "transcripcion.json").unlink()
+            self.assertEqual(doc.compare(doc.arguments(work=work, version=1)), 0)
+            report = json.loads((work / "v1/cobertura.json").read_text(encoding="utf-8"))
+            self.assertFalse(report["disponible"])
+
+    def test_compare_refuses_an_audio_job(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = audio_workspace(temporary)
+            with self.assertRaisesRegex(ValueError, "solo se aplica al modo vídeo"):
+                doc.compare(doc.arguments(work=work, version=1))
+
+
 if __name__ == "__main__":
     unittest.main()
