@@ -339,7 +339,8 @@ def accepted(plan, accept, directo):
     """The plan only renders with a literal acceptance; blocking warnings stop --directo too (§9)."""
     blocking = [item for item in plan.get("warnings", []) if item.get("codigo") in BLOCKING]
     if blocking:
-        detail = "; ".join(f"{item['codigo']}: {item['mensaje']}" for item in blocking)
+        detail = "; ".join(f"{item.get('codigo', '?')}: {item.get('mensaje', '(sin mensaje)')}"
+                           for item in blocking)
         cuts = sorted({str(item["corte"]) for item in blocking if item.get("corte") is not None})
         where = f" Cortes afectados: {', '.join(cuts)}." if cuts else ""
         raise Refused(f"El plan tiene avisos bloqueantes ({detail}).{where} Corrige el plan con "
@@ -348,8 +349,12 @@ def accepted(plan, accept, directo):
         raise Refused('El plan requiere aceptación: repite con --accept "frase literal del usuario" '
                       "o con --directo.")
     return {"frase": accept, "directo": bool(directo), "sha256": plan_sha256(plan)}
+```
 
+`item.get('codigo', '?')` y `item.get('mensaje', '(sin mensaje)')` evitan un `KeyError` sin control
+—código 1 en vez del 2 que exige §12— si el plan trae un aviso bloqueante corrupto sin esas claves.
 
+```python
 def sources_agree(plan, video):
     """Same fingerprint: the plan is valid even if the file moved (§6). A different one is an error."""
     planned = plan.get("source")
@@ -679,6 +684,9 @@ def subcuts(segment, limit=MAX_SPANS):
                       f"replanifica (aviso corte_vacio).")
     parts, joined = [], []
     for index, item in enumerate(declared):
+        if not {"spans", "frames", "samples"} <= item.keys():
+            raise Refused(f"El corte {segment['id']} tiene un subcorte publicado incompleto: "
+                          "replanifica.")
         spans = [(float(start), float(end)) for start, end in item["spans"]]
         frames, samples = item["frames"], item["samples"]
         where = f"El corte {segment['id']} en el subcorte {index + 1}/{len(declared)}"
@@ -1144,7 +1152,8 @@ def counted_frames(path):
 
 def counted_samples(path, sample_rate, folder):
     """Samples of the audio track: ffprobe gives none for PCM in Matroska, so it is decoded."""
-    with tempfile.TemporaryDirectory(prefix="muestras-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="muestras-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         # 24-bit PCM is WAVE_FORMAT_EXTENSIBLE and `wave` refuses it: decode to 16 bits first.
         copy = Path(temporary) / "cuenta.wav"
         ffmpeg("-i", path, "-map", "0:a:0", "-ac", "1", "-ar", str(sample_rate),
@@ -1851,12 +1860,14 @@ git commit -m "feat(render): validación bloqueante de decodificación, fotogram
   (ninguna función de esta tarea usa `render.Invalid`: la distancia se limita a devolver el número,
   es `validate`, en la Tarea 10, quien decide si bloquea).
 - Produces: `render.IMAGE_SIDE = 64`, `render.IMAGE_OK = 0.08`, `render.IMAGE_MARK = 0.15`;
-  `render.gray_frame(path, instant, base, margin, target, track="0:v:0") -> bytes`, con `track`
-  para elegir la pista cuando el vídeo no es la primera de su tipo (§8: la validación compara contra
-  la pista que de verdad se montó, no siempre `common.video_stream(data)`);
+  `render.gray_frame(path, instant, base, margin, target, threads, track="0:v:0") -> bytes`, con
+  `threads` para `-threads`/`-filter_threads` (revisión de rama, hallazgo N2: `--threads` debe llegar
+  a toda llamada de FFmpeg de la validación, no solo a `render_part`) y `track` para elegir la pista
+  cuando el vídeo no es la primera de su tipo (§8: la validación compara contra la pista que de verdad
+  se montó, no siempre `common.video_stream(data)`);
   `render.image_distance(left, right) -> float`;
-  `render.image_placement(data, final, spans, out_start, out_end, folder) -> list[dict]` con un
-  registro `{"punto", "salida_s", "origen_s", "distancia"}` por ventana; compara siempre el montaje
+  `render.image_placement(data, final, spans, out_start, out_end, folder, threads) -> list[dict]` con
+  un registro `{"punto", "salida_s", "origen_s", "distancia"}` por ventana; compara siempre el montaje
   (pista por defecto) contra `common.video_stream(data)["index"]` del original, que excluye la
   carátula (`attached_pic`) cuando la hay.
 
@@ -1893,9 +1904,10 @@ IMAGE_SIDE = 64
 IMAGE_OK, IMAGE_MARK = 0.08, 0.15
 
 
-def gray_frame(path, instant, base, margin, target, track="0:v:0"):
+def gray_frame(path, instant, base, margin, target, threads, track="0:v:0"):
     """The frame on screen at `instant`, reduced to IMAGE_SIDE² luminance samples."""
-    ffmpeg("-ss", seconds(max(0.0, instant - margin)), "-noaccurate_seek", "-copyts", "-i", path,
+    ffmpeg("-threads", str(threads), "-filter_threads", str(threads),
+           "-ss", seconds(max(0.0, instant - margin)), "-noaccurate_seek", "-copyts", "-i", path,
            "-map", track, "-frames:v", "1",
            "-vf", f"fps=1000:start_time={seconds(base + instant)},"
                   f"scale={IMAGE_SIDE}:{IMAGE_SIDE},format=gray",
@@ -1926,7 +1938,7 @@ class ImagePlacementTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             _, _, data, staged = assembled(root)
-            rows = render.image_placement(data, staged, [(1.0, 2.0), (4.0, 5.0)], 0.0, 1.6, root)
+            rows = render.image_placement(data, staged, [(1.0, 2.0), (4.0, 5.0)], 0.0, 1.6, root, 1)
             self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
             self.assertTrue(all(row["distancia"] <= render.IMAGE_OK for row in rows), rows)
 
@@ -1935,7 +1947,7 @@ class ImagePlacementTest(unittest.TestCase):
             root = Path(temporary)
             _, _, data, staged = assembled(root)
             # Same cut, wrong source times: the montage holds seconds 1 and 4, not 6 and 9.
-            rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root)
+            rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root, 1)
             self.assertTrue(any(row["distancia"] > render.IMAGE_MARK for row in rows), rows)
 ```
 
@@ -1944,7 +1956,7 @@ class ImagePlacementTest(unittest.TestCase):
 En `render.py`, añade:
 
 ```python
-def image_placement(data, final, spans, out_start, out_end, folder):
+def image_placement(data, final, spans, out_start, out_end, folder, threads):
     """Compare the first and last frame of the cut against the source it claims to come from."""
     source, base = data["source"]["path"], timeline_start(data)
     margin = seek_margin(data)
@@ -1954,11 +1966,13 @@ def image_placement(data, final, spans, out_start, out_end, folder):
     points = (("inicio", out_start, spans[0][0]), ("fin", max(out_start, out_end - 1e-3),
                                                    max(spans[-1][0], spans[-1][1] - 1e-3)))
     rows = []
-    with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         for name, moment, origin in points:
-            produced = gray_frame(final, moment, 0.0, margin, Path(temporary) / f"{name}-s.gray")
+            produced = gray_frame(final, moment, 0.0, margin, Path(temporary) / f"{name}-s.gray",
+                                  threads)
             expected = gray_frame(source, origin, base, margin, Path(temporary) / f"{name}-o.gray",
-                                  origin_track)
+                                  threads, origin_track)
             rows.append({"punto": name, "salida_s": round(moment, 3), "origen_s": round(origin, 3),
                          "distancia": round(image_distance(produced, expected), 4)})
     return rows
@@ -2002,18 +2016,21 @@ git commit -m "feat(render): valida por imagen la colocación de cada corte cont
   provisionales que se declaran al final de este plan y que el Plan 4 escribe en
   `docs/requisitos.md`: 40 ms de desfase, 6 dB de guarda de modulación, 8 dB de bloqueo y 4 dB de
   guarda antes de exigir correlación;
-  `render.window_levels(path, start, length, folder, name, track="0:a:0") -> array('f')`, con `track`
-  para leer la pista que de verdad se montó (§8, hallazgo de pista: sin `-copyts` el `-ss` de entrada
-  se mide desde el inicio real del contenido, así que aquí nunca se suma `base`);
+  `render.window_levels(path, start, length, folder, name, threads, track="0:a:0") -> array('f')`,
+  con `threads` para `-threads` (sin `-filter_threads`: a diferencia de `gray_frame` y `sheets`, esta
+  llamada no lleva grafo `-vf`/`-af`; revisión de rama, hallazgo N2) y `track` para leer la pista que
+  de verdad se montó (§8, hallazgo de pista: sin `-copyts` el `-ss` de entrada se mide desde el inicio
+  real del contenido, así que aquí nunca se suma `base`);
   `render.stretched(levels, speed, count) -> array('f')`;
   `render.correlation(left, right) -> float`; `render.spread(levels) -> float`;
   `render.align(produced, reference) -> tuple[float, int, float]` → `(diferencia_db, desfase_bloques,
   correlación)`, con `desfase_bloques` positivo cuando lo producido llega más tarde que la referencia
   y negativo cuando llega antes; `validate` solo lee `abs(desfase_bloques)`, así que el signo no
   cambia qué se acepta;
-  `render.sound_placement(data, final, spans, out_start, out_end, speed, folder, track="0:a:0") ->
-  list[dict]`, con `track` para la pista de origen (`plan["audio_stream"]`; el montaje siempre
-  responde en `"0:a:0"`, que es el valor por defecto para su propia lectura).
+  `render.sound_placement(data, final, spans, out_start, out_end, speed, folder, threads,
+  track="0:a:0") -> list[dict]`, con `threads` (N2) y `track` para la pista de origen
+  (`plan["audio_stream"]`; el montaje siempre responde en `"0:a:0"`, que es el valor por defecto para
+  su propia lectura).
 
 - [ ] **Paso 1: Escribe la prueba rápida que falla**
 
@@ -2101,15 +2118,16 @@ ENVELOPE_SPREAD = 6.0            # dB below which the envelope is flat and corre
 ENVELOPE_CORRELATION = 0.9
 
 
-def window_levels(path, start, length, folder, name, track="0:a:0"):
+def window_levels(path, start, length, folder, name, threads, track="0:a:0"):
     """RMS envelope of a window, always through a temporary mono 16-bit decode (§8)."""
     # Here -t is legitimate: there is no -copyts, so it is the plain duration after the seek, and
     # `start` is already in the s = pts − format.start_time convention of §3 (never `base + s`):
     # measured on a 12 s sine remuxed with `-output_ts_offset 7` (start_time = 7.000000), `-ss 1`
     # without -copyts gives the same wav as the unshifted original, and `-ss 8` a different one.
     copy = Path(folder) / f"{name}.wav"
-    ffmpeg("-ss", seconds(max(0.0, start)), "-t", seconds(length), "-i", path, "-map", track,
-           "-ac", "1", "-ar", str(LEVEL_RATE), "-c:a", "pcm_s16le", copy)
+    # No -filter_threads: unlike gray_frame and sheets, this call has no -vf/-af filter graph.
+    ffmpeg("-threads", str(threads), "-ss", seconds(max(0.0, start)), "-t", seconds(length),
+           "-i", path, "-map", track, "-ac", "1", "-ar", str(LEVEL_RATE), "-c:a", "pcm_s16le", copy)
     return energy(copy)
 
 
@@ -2181,7 +2199,8 @@ típica, y el desplazamiento de `test_a_lag_beyond_the_gate_is_reported` se loca
 En `render.py`, añade:
 
 ```python
-def sound_placement(data, final, spans, out_start, out_end, speed, folder, track="0:a:0"):
+def sound_placement(data, final, spans, out_start, out_end, speed, folder, threads,
+                    track="0:a:0"):
     """Compare the envelope at both ends of the cut with the source, rescaled by the speed (§8)."""
     source = data["source"]["path"]
     first, last = spans[0], spans[-1]
@@ -2194,15 +2213,16 @@ def sound_placement(data, final, spans, out_start, out_end, speed, folder, track
     points = (("inicio", head, out_start, first[0]),
               ("fin", tail, out_end - tail, last[1] - tail * speed))
     rows = []
-    with tempfile.TemporaryDirectory(prefix="envolvente-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="envolvente-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         for name, window, moment, origin in points:
             if window <= 4 * LEVEL_BLOCK:
                 rows.append({"punto": name, "bloques": 0, "diferencia_db": 0.0, "desfase_ms": 0,
                              "correlacion": None, "modulacion_db": 0.0})
                 continue
-            produced = window_levels(final, moment, window, temporary, f"{name}-salida")
+            produced = window_levels(final, moment, window, temporary, f"{name}-salida", threads)
             original = window_levels(source, origin, window * speed, temporary, f"{name}-origen",
-                                     track)
+                                     threads, track)
             reference = stretched(original, speed, len(produced))
             difference, lag, value = align(produced, reference)
             modulation = spread(reference)
@@ -2272,7 +2292,7 @@ class SoundPlacementTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             data, staged, spans = self.built(root)
-            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root, 1)
             self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
             # Measured here: 0.81 dB / 0.973 at the start and 0.17 dB / 1.0 at the end, both with
             # real margin over ENVELOPE_MARK and ENVELOPE_CORRELATION.
@@ -2289,7 +2309,7 @@ class SoundPlacementTest(unittest.TestCase):
             root = Path(temporary)
             data, staged, _ = self.built(root)
             moved = [(0.75, 1.83), (2.17, 3.33), (3.67, 5.15)]
-            rows = render.sound_placement(data, staged, moved, 0.0, 74 / 25, 1.25, root)
+            rows = render.sound_placement(data, staged, moved, 0.0, 74 / 25, 1.25, root, 1)
             # §8 coverage: measured 54.22 / 74.16 dB and correlación −0.131 / −0.498, so both the
             # difference and the correlation gates would reject this montage.
             self.assertTrue(any(row["diferencia_db"] > render.ENVELOPE_MARK for row in rows), rows)
@@ -2309,7 +2329,7 @@ class SoundPlacementTest(unittest.TestCase):
             shifted(moved, plain, ahead=7)
             data, staged, spans = self.built(root, source_path=moved)
             self.assertAlmostEqual(common.timeline_start(data), 7.0, places=3)
-            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root, 1)
             for row in rows:
                 with self.subTest(row=row):
                     self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
@@ -2338,7 +2358,7 @@ class SoundPlacementTest(unittest.TestCase):
             staged = cortes / "resumen.mp4"
             render.assemble(cortes, cuts, staged, 1)
             spans_t = [(a, b) for a, b in spans]
-            rows = render.sound_placement(data, staged, spans_t, 0.0, 56 / 25, 1.0, root,
+            rows = render.sound_placement(data, staged, spans_t, 0.0, 56 / 25, 1.0, root, 1,
                                           track=f"0:{plan['audio_stream']}")
             for row in rows:
                 with self.subTest(row=row):
@@ -2381,11 +2401,19 @@ git commit -m "feat(render): valida por envolvente la colocación de cada corte,
 - Produces: `render.JOIN_SHEET = (5, 2)`, `render.JOIN_WIDTH = 160`, `render.JOIN_GAP = 4`,
   `render.save_lf(path, data) -> None` (como `common.save`, pero con `newline="\n"`, que `common.save`
   no admite);
-  `render.sheets(final, joins, folder, cadence) -> list[str]`;
+  `render.sheets(final, joins, folder, cadence, threads) -> list[str]`, con `threads` para
+  `-threads`/`-filter_threads` (revisión de rama, hallazgo N2);
   `render.validate(data, plan, parts, final, folder, threads) -> dict` con claves
   `fotogramas_esperados`, `fotogramas`, `video_s`, `audio_s`, `desfase_s`, `colocacion`, `marcas` y
-  `uniones`; `render.report(plan, checks, avisos, cadence) -> str`;
-  `render.montage(args) -> int`; `render.render(args) -> int`; `render.register(sub) -> None`.
+  `uniones`; propaga `threads` a `image_placement` y `sound_placement` y convierte en `Invalid`
+  cualquier `ValueError`/`OSError` posterior a `decode_check` (N1), no solo el suyo propio; una fila de
+  envolvente con `bloques: 0` (ventana degenerada, un extremo a menos de 40 ms) se añade a `marcas` en
+  vez de colar como un acierto perfecto silencioso (D2);
+  `render.report(plan, checks, avisos, cadence) -> str`;
+  `render.montage(args) -> int`, que rechaza `--budget <= 0` con `Refused` (D3) y que solo publica
+  `sheets(...)` dentro de la misma protección de evidencia que ya cubre `validate` (N1: una hoja de
+  uniones que falla merece el mismo `fallo-vN-*` que un fallo de validación);
+  `render.render(args) -> int`; `render.register(sub) -> None`.
 - **Eventos de `historial.jsonl`** que escribe este plan, de los siete del contrato
   (`init, edit, accept, render, verify, doc, deliver`): `accept` con la frase literal aceptada,
   `render` con el número de cortes del plan (`len(plan["segments"])`, no las pasadas que monta
@@ -2406,7 +2434,7 @@ class SheetTest(unittest.TestCase):
             _, _, _, staged = assembled(root)
             uniones = root / "uniones"
             uniones.mkdir()
-            names = render.sheets(staged, [40], uniones, 25.0)
+            names = render.sheets(staged, [40], uniones, 25.0, 1)
             self.assertEqual(names, ["union-01.jpg"])
             sheet = common.probe(uniones / "union-01.jpg")
             picture = common.video_stream(sheet)
@@ -2422,7 +2450,7 @@ class SheetTest(unittest.TestCase):
             _, _, _, staged = assembled(root)
             uniones = root / "uniones"
             uniones.mkdir()
-            self.assertEqual(render.sheets(staged, [2], uniones, 25.0), ["union-01.jpg"])
+            self.assertEqual(render.sheets(staged, [2], uniones, 25.0, 1), ["union-01.jpg"])
             self.assertTrue((uniones / "union-01.jpg").is_file())
 ```
 
@@ -2441,7 +2469,7 @@ JOIN_WIDTH = 160
 JOIN_GAP = 4
 
 
-def sheets(final, joins, folder, cadence):
+def sheets(final, joins, folder, cadence, threads):
     """One contact sheet per join, half before and half after, for the agent's visual review."""
     columns, rows = JOIN_SHEET
     tiles = columns * rows
@@ -2452,7 +2480,8 @@ def sheets(final, joins, folder, cadence):
         name = f"union-{number:02d}.jpg"
         # Accurate input seeking: without it every join would decode the montage from the start.
         # The tpad clone fills the grid when the montage is shorter than one sheet.
-        ffmpeg("-ss", seconds(first / cadence), "-i", final, "-map", "0:v:0",
+        ffmpeg("-threads", str(threads), "-filter_threads", str(threads),
+               "-ss", seconds(first / cadence), "-i", final, "-map", "0:v:0",
                "-vf", f"trim=end_frame={tiles},setpts=N/({cadence:.6f})/TB,"
                       f"tpad=stop=-1:stop_mode=clone,trim=end_frame={tiles},"
                       f"setpts=N/({cadence:.6f})/TB,scale={JOIN_WIDTH}:-2,"
@@ -2475,48 +2504,63 @@ En `render.py`, añade:
 def validate(data, plan, parts, final, folder, threads):
     """Every blocking check of §8; returns the content of validacion.json."""
     decode_check(final, threads)
-    checks = totals_check(final, parts)
-    cadence, speed = cadence_of(plan), float(plan["settings"]["speed"])
-    placements, joins, elapsed = [], [], 0.0
-    for segment in plan["segments"]:
-        spans = [(float(start), float(end)) for start, end in segment["spans"]]
-        length = segment["frames"] / cadence
-        images = image_placement(data, final, spans, elapsed, elapsed + length, folder)
-        sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder,
-                                 f"0:{plan['audio_stream']}")
-        placements.append({"corte": segment["id"], "titulo": segment["title"],
-                           "salida_s": [round(elapsed, 3), round(elapsed + length, 3)],
-                           "imagen": images, "envolvente": sounds})
-        elapsed += length
-        joins.append(round(elapsed * cadence))
-    checks["colocacion"] = placements
-    failures, marks = [], []
-    for entry in placements:
-        for row in entry["imagen"]:
-            if row["distancia"] > IMAGE_MARK:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
-                                f"{row['distancia']:.4f} del original")
-            elif row["distancia"] > IMAGE_OK:
-                marks.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
-                             f"{row['distancia']:.4f}, revísala en la hoja de uniones")
-        for row in entry["envolvente"]:
-            if ENVELOPE_OK < row["diferencia_db"] <= ENVELOPE_MARK:
-                marks.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
-                             f"{row['diferencia_db']:.2f} dB, escúchala")
-            if row["diferencia_db"] > ENVELOPE_MARK:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
-                                f"{row['diferencia_db']:.2f} dB del original")
-            if abs(row["desfase_ms"]) > ENVELOPE_LAG * round(LEVEL_BLOCK * 1000):
-                failures.append(f"corte {entry['corte']} ({row['punto']}): desfase de "
-                                f"{row['desfase_ms']} ms")
-            if row["correlacion"] is not None and row["correlacion"] < ENVELOPE_CORRELATION:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): correlación "
-                                f"{row['correlacion']:.3f}")
-    if failures:
-        raise Invalid("La colocación no coincide con el original: " + "; ".join(failures) + ".")
-    checks["marcas"] = marks
-    checks["uniones"] = joins[:-1]
-    return checks
+    try:
+        checks = totals_check(final, parts)
+        cadence, speed = cadence_of(plan), float(plan["settings"]["speed"])
+        placements, joins, elapsed = [], [], 0.0
+        for segment in plan["segments"]:
+            spans = [(float(start), float(end)) for start, end in segment["spans"]]
+            length = segment["frames"] / cadence
+            images = image_placement(data, final, spans, elapsed, elapsed + length, folder,
+                                     threads)
+            sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder,
+                                     threads, f"0:{plan['audio_stream']}")
+            placements.append({"corte": segment["id"], "titulo": segment["title"],
+                               "salida_s": [round(elapsed, 3), round(elapsed + length, 3)],
+                               "imagen": images, "envolvente": sounds})
+            elapsed += length
+            joins.append(round(elapsed * cadence))
+        checks["colocacion"] = placements
+        failures, marks = [], []
+        for entry in placements:
+            for row in entry["imagen"]:
+                if row["distancia"] > IMAGE_MARK:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                                    f"{row['distancia']:.4f} del original")
+                elif row["distancia"] > IMAGE_OK:
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                                 f"{row['distancia']:.4f}, revísala en la hoja de uniones")
+            for row in entry["envolvente"]:
+                if row["bloques"] == 0:
+                    # A window this short (an end within 40 ms) was never measured;
+                    # diferencia_db: 0.0 is a placeholder, not a perfect match, so it must not
+                    # pass silently as one.
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): tramo demasiado "
+                                 "corto para verificar la envolvente; revísalo a mano")
+                    continue
+                if ENVELOPE_OK < row["diferencia_db"] <= ENVELOPE_MARK:
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                                 f"{row['diferencia_db']:.2f} dB, escúchala")
+                if row["diferencia_db"] > ENVELOPE_MARK:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                                    f"{row['diferencia_db']:.2f} dB del original")
+                if abs(row["desfase_ms"]) > ENVELOPE_LAG * round(LEVEL_BLOCK * 1000):
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): desfase de "
+                                    f"{row['desfase_ms']} ms")
+                if row["correlacion"] is not None and row["correlacion"] < ENVELOPE_CORRELATION:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): correlación "
+                                    f"{row['correlacion']:.3f}")
+        if failures:
+            raise Invalid("La colocación no coincide con el original: " + "; ".join(failures) + ".")
+        checks["marcas"] = marks
+        checks["uniones"] = joins[:-1]
+        return checks
+    except Invalid:
+        raise
+    except (ValueError, OSError) as exc:
+        # N1: any failure past decode_check (e.g. image_distance on mismatched frame sizes) must
+        # become Invalid too, so it gets the same evidence handling as a real placement failure.
+        raise Invalid(f"La validación no se pudo completar: {exc}") from exc
 
 
 def report(plan, checks, avisos, cadence):
@@ -2831,6 +2875,8 @@ def montage(args):
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8-sig"))
     if not isinstance(plan, dict) or type(plan.get("version")) is not int:
         raise Refused("El plan debe ser un objeto JSON con version entera.")
+    if args.budget is not None and args.budget <= 0:
+        raise Refused("--budget debe ser mayor que 0 segundos.")
     data = probe(args.video)
     avisos = sources_agree(plan, args.video)
     record = accepted(plan, args.accept, args.directo)
@@ -2862,6 +2908,13 @@ def montage(args):
             uniones.mkdir()
             try:
                 checks = validate(data, plan, all_parts(plan), staged, folder, args.threads)
+                try:
+                    # N1: sheets() also runs FFmpeg over the montage, right after validate(); a
+                    # failure here deserves the same evidence handling, not a bare crash.
+                    checks["uniones_hojas"] = sheets(staged, checks["uniones"], uniones,
+                                                     cadence_of(plan), args.threads)
+                except (ValueError, OSError) as exc:
+                    raise Invalid(f"No se pudieron generar las hojas de uniones: {exc}") from exc
             except Invalid as exc:
                 kept = new_dir(work / f"fallo-v{plan['version']}-{int(time.time())}")
                 staged.replace(kept / "resumen.mp4")
@@ -2869,7 +2922,6 @@ def montage(args):
                 exc.evidencia = kept
                 history(work, "verify", {"version": plan["version"], "ok": False, "codigo": 4})
                 raise
-            checks["uniones_hojas"] = sheets(staged, checks["uniones"], uniones, cadence_of(plan))
             # `vN/` is built whole here, still inside the temp folder: `publish` below is the only
             # write that reaches `work`, so nothing under `work` is ever half-published (§11).
             version = folder / f"v{plan['version']}"
@@ -2908,6 +2960,12 @@ def render(args):
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 ```
+
+La revisión de rama completa del plan añadió aquí dos guardas más: `--budget <= 0` se rechaza con
+`Refused` en vez de comportarse como «sin límite» (D3, traspaso nunca cerrado de la Tarea 5), y la
+llamada a `sheets(...)` se movió dentro del mismo `try` que ya protege `validate(...)` (N1), porque
+también invoca FFmpeg sobre el montaje y un fallo suyo merece la misma carpeta de evidencia
+`fallo-vN-*` y el mismo `codigo: 4`, no un `ValueError` desnudo que saldría con código 1.
 
 Añade `DEFAULT_THREADS`, `history`, `lock`, `new_dir`, `probe` y `stamp` a las importaciones de
 `common`; ninguna importación nueva hace falta fuera de ellas, y `os` deja de usarse en `render.py`
@@ -3199,10 +3257,16 @@ python -B -m unittest discover -s tests
 
 Esperado: `Ran 67 tests … OK` en la primera (4 + 8 + 9 + 4 + 9 + 1 + 4 + 4 + 9 + 11 + 4 por tareas) y
 `OK` en la segunda. En `tests/` sigue valiendo lo dicho en la Tarea 10: solo puede fallar
-`test_versions_agree_everywhere`. `test_render.py` cierra así con 67 pruebas: sumadas a las 126 de la
-skill de antes de este plan (44 de `test_common.py`, 12 de `test_video.py` y 70 de `test_plan.py`), la
-skill queda con 193 pruebas propias; con las 23 de `tests/` (ajenas a la skill), el repositorio entero
-suma 216.
+`test_versions_agree_everywhere`. `test_render.py` cierra las once tareas de este plan con 67 pruebas.
+
+La revisión de rama completa del plan, posterior a las once tareas, encontró 7 hallazgos (propagación
+de `--threads` a `gray_frame`/`image_placement`/`window_levels`/`sound_placement`/`sheets`; `.get()`
+defensivo en `accepted` y `subcuts`; marcas de envolvente con `bloques: 0`; rechazo de `--budget <= 0`;
+`ignore_cleanup_errors=True` uniforme; y `validate`/`sheets` protegidos de extremo a extremo) y los
+corrigió en una única ronda de fixes con 10 pruebas nuevas. El recuento **final** de este plan, tras esa
+ronda, es **77** pruebas en `test_render.py`: sumadas a las 126 de la skill de antes de este plan (44 de
+`test_common.py`, 12 de `test_video.py` y 70 de `test_plan.py`), la skill queda con **203** pruebas
+propias; con las 23 de `tests/` (ajenas a la skill), el repositorio entero suma **226**.
 
 - [ ] **Paso 10: Confirma los cambios**
 
