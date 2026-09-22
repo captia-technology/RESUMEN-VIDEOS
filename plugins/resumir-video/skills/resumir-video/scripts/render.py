@@ -39,7 +39,8 @@ def accepted(plan, accept, directo):
     """The plan only renders with a literal acceptance; blocking warnings stop --directo too (§9)."""
     blocking = [item for item in plan.get("warnings", []) if item.get("codigo") in BLOCKING]
     if blocking:
-        detail = "; ".join(f"{item['codigo']}: {item['mensaje']}" for item in blocking)
+        detail = "; ".join(f"{item.get('codigo', '?')}: {item.get('mensaje', '(sin mensaje)')}"
+                           for item in blocking)
         cuts = sorted({str(item["corte"]) for item in blocking if item.get("corte") is not None})
         where = f" Cortes afectados: {', '.join(cuts)}." if cuts else ""
         raise Refused(f"El plan tiene avisos bloqueantes ({detail}).{where} Corrige el plan con "
@@ -97,6 +98,9 @@ def subcuts(segment, limit=MAX_SPANS):
                       f"replanifica (aviso corte_vacio).")
     parts, joined = [], []
     for index, item in enumerate(declared):
+        if not {"spans", "frames", "samples"} <= item.keys():
+            raise Refused(f"El corte {segment['id']} tiene un subcorte publicado incompleto: "
+                          "replanifica.")
         spans = [(float(start), float(end)) for start, end in item["spans"]]
         frames, samples = item["frames"], item["samples"]
         where = f"El corte {segment['id']} en el subcorte {index + 1}/{len(declared)}"
@@ -181,7 +185,8 @@ def counted_frames(path):
 
 def counted_samples(path, sample_rate, folder):
     """Samples of the audio track: ffprobe gives none for PCM in Matroska, so it is decoded."""
-    with tempfile.TemporaryDirectory(prefix="muestras-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="muestras-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         # 24-bit PCM is WAVE_FORMAT_EXTENSIBLE and `wave` refuses it: decode to 16 bits first.
         copy = Path(temporary) / "cuenta.wav"
         ffmpeg("-i", path, "-map", "0:a:0", "-ac", "1", "-ar", str(sample_rate),
@@ -414,9 +419,10 @@ IMAGE_SIDE = 64
 IMAGE_OK, IMAGE_MARK = 0.08, 0.15
 
 
-def gray_frame(path, instant, base, margin, target, track="0:v:0"):
+def gray_frame(path, instant, base, margin, target, threads, track="0:v:0"):
     """The frame on screen at `instant`, reduced to IMAGE_SIDE² luminance samples."""
-    ffmpeg("-ss", seconds(max(0.0, instant - margin)), "-noaccurate_seek", "-copyts", "-i", path,
+    ffmpeg("-threads", str(threads), "-filter_threads", str(threads),
+           "-ss", seconds(max(0.0, instant - margin)), "-noaccurate_seek", "-copyts", "-i", path,
            "-map", track, "-frames:v", "1",
            "-vf", f"fps=1000:start_time={seconds(base + instant)},"
                   f"scale={IMAGE_SIDE}:{IMAGE_SIDE},format=gray",
@@ -431,7 +437,7 @@ def image_distance(left, right):
     return sum(abs(one - two) for one, two in zip(left, right)) / (len(left) * 255)
 
 
-def image_placement(data, final, spans, out_start, out_end, folder):
+def image_placement(data, final, spans, out_start, out_end, folder, threads):
     """Compare the first and last frame of the cut against the source it claims to come from."""
     source, base = data["source"]["path"], timeline_start(data)
     margin = seek_margin(data)
@@ -441,11 +447,13 @@ def image_placement(data, final, spans, out_start, out_end, folder):
     points = (("inicio", out_start, spans[0][0]), ("fin", max(out_start, out_end - 1e-3),
                                                    max(spans[-1][0], spans[-1][1] - 1e-3)))
     rows = []
-    with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         for name, moment, origin in points:
-            produced = gray_frame(final, moment, 0.0, margin, Path(temporary) / f"{name}-s.gray")
+            produced = gray_frame(final, moment, 0.0, margin, Path(temporary) / f"{name}-s.gray",
+                                  threads)
             expected = gray_frame(source, origin, base, margin, Path(temporary) / f"{name}-o.gray",
-                                  origin_track)
+                                  threads, origin_track)
             rows.append({"punto": name, "salida_s": round(moment, 3), "origen_s": round(origin, 3),
                          "distancia": round(image_distance(produced, expected), 4)})
     return rows
@@ -463,15 +471,16 @@ ENVELOPE_SPREAD = 6.0            # dB below which the envelope is flat and corre
 ENVELOPE_CORRELATION = 0.9
 
 
-def window_levels(path, start, length, folder, name, track="0:a:0"):
+def window_levels(path, start, length, folder, name, threads, track="0:a:0"):
     """RMS envelope of a window, always through a temporary mono 16-bit decode (§8)."""
     # Here -t is legitimate: there is no -copyts, so it is the plain duration after the seek, and
     # `start` is already in the s = pts − format.start_time convention of §3 (never `base + s`):
     # measured on a 12 s sine remuxed with `-output_ts_offset 7` (start_time = 7.000000), `-ss 1`
     # without -copyts gives the same wav as the unshifted original, and `-ss 8` a different one.
     copy = Path(folder) / f"{name}.wav"
-    ffmpeg("-ss", seconds(max(0.0, start)), "-t", seconds(length), "-i", path, "-map", track,
-           "-ac", "1", "-ar", str(LEVEL_RATE), "-c:a", "pcm_s16le", copy)
+    # No -filter_threads: unlike gray_frame and sheets, this call has no -vf/-af filter graph.
+    ffmpeg("-threads", str(threads), "-ss", seconds(max(0.0, start)), "-t", seconds(length),
+           "-i", path, "-map", track, "-ac", "1", "-ar", str(LEVEL_RATE), "-c:a", "pcm_s16le", copy)
     return energy(copy)
 
 
@@ -530,7 +539,8 @@ def align(produced, reference, span=ENVELOPE_LAG + 2):
     return best
 
 
-def sound_placement(data, final, spans, out_start, out_end, speed, folder, track="0:a:0"):
+def sound_placement(data, final, spans, out_start, out_end, speed, folder, threads,
+                    track="0:a:0"):
     """Compare the envelope at both ends of the cut with the source, rescaled by the speed (§8)."""
     source = data["source"]["path"]
     first, last = spans[0], spans[-1]
@@ -543,15 +553,16 @@ def sound_placement(data, final, spans, out_start, out_end, speed, folder, track
     points = (("inicio", head, out_start, first[0]),
               ("fin", tail, out_end - tail, last[1] - tail * speed))
     rows = []
-    with tempfile.TemporaryDirectory(prefix="envolvente-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="envolvente-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         for name, window, moment, origin in points:
             if window <= 4 * LEVEL_BLOCK:
                 rows.append({"punto": name, "bloques": 0, "diferencia_db": 0.0, "desfase_ms": 0,
                              "correlacion": None, "modulacion_db": 0.0})
                 continue
-            produced = window_levels(final, moment, window, temporary, f"{name}-salida")
+            produced = window_levels(final, moment, window, temporary, f"{name}-salida", threads)
             original = window_levels(source, origin, window * speed, temporary, f"{name}-origen",
-                                     track)
+                                     threads, track)
             reference = stretched(original, speed, len(produced))
             difference, lag, value = align(produced, reference)
             modulation = spread(reference)
@@ -568,7 +579,7 @@ JOIN_WIDTH = 160
 JOIN_GAP = 4
 
 
-def sheets(final, joins, folder, cadence):
+def sheets(final, joins, folder, cadence, threads):
     """One contact sheet per join, half before and half after, for the agent's visual review."""
     columns, rows = JOIN_SHEET
     tiles = columns * rows
@@ -579,7 +590,8 @@ def sheets(final, joins, folder, cadence):
         name = f"union-{number:02d}.jpg"
         # Accurate input seeking: without it every join would decode the montage from the start.
         # The tpad clone fills the grid when the montage is shorter than one sheet.
-        ffmpeg("-ss", seconds(first / cadence), "-i", final, "-map", "0:v:0",
+        ffmpeg("-threads", str(threads), "-filter_threads", str(threads),
+               "-ss", seconds(first / cadence), "-i", final, "-map", "0:v:0",
                "-vf", f"trim=end_frame={tiles},setpts=N/({cadence:.6f})/TB,"
                       f"tpad=stop=-1:stop_mode=clone,trim=end_frame={tiles},"
                       f"setpts=N/({cadence:.6f})/TB,scale={JOIN_WIDTH}:-2,"
@@ -592,48 +604,63 @@ def sheets(final, joins, folder, cadence):
 def validate(data, plan, parts, final, folder, threads):
     """Every blocking check of §8; returns the content of validacion.json."""
     decode_check(final, threads)
-    checks = totals_check(final, parts)
-    cadence, speed = cadence_of(plan), float(plan["settings"]["speed"])
-    placements, joins, elapsed = [], [], 0.0
-    for segment in plan["segments"]:
-        spans = [(float(start), float(end)) for start, end in segment["spans"]]
-        length = segment["frames"] / cadence
-        images = image_placement(data, final, spans, elapsed, elapsed + length, folder)
-        sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder,
-                                 f"0:{plan['audio_stream']}")
-        placements.append({"corte": segment["id"], "titulo": segment["title"],
-                           "salida_s": [round(elapsed, 3), round(elapsed + length, 3)],
-                           "imagen": images, "envolvente": sounds})
-        elapsed += length
-        joins.append(round(elapsed * cadence))
-    checks["colocacion"] = placements
-    failures, marks = [], []
-    for entry in placements:
-        for row in entry["imagen"]:
-            if row["distancia"] > IMAGE_MARK:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
-                                f"{row['distancia']:.4f} del original")
-            elif row["distancia"] > IMAGE_OK:
-                marks.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
-                             f"{row['distancia']:.4f}, revísala en la hoja de uniones")
-        for row in entry["envolvente"]:
-            if ENVELOPE_OK < row["diferencia_db"] <= ENVELOPE_MARK:
-                marks.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
-                             f"{row['diferencia_db']:.2f} dB, escúchala")
-            if row["diferencia_db"] > ENVELOPE_MARK:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
-                                f"{row['diferencia_db']:.2f} dB del original")
-            if abs(row["desfase_ms"]) > ENVELOPE_LAG * round(LEVEL_BLOCK * 1000):
-                failures.append(f"corte {entry['corte']} ({row['punto']}): desfase de "
-                                f"{row['desfase_ms']} ms")
-            if row["correlacion"] is not None and row["correlacion"] < ENVELOPE_CORRELATION:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): correlación "
-                                f"{row['correlacion']:.3f}")
-    if failures:
-        raise Invalid("La colocación no coincide con el original: " + "; ".join(failures) + ".")
-    checks["marcas"] = marks
-    checks["uniones"] = joins[:-1]
-    return checks
+    try:
+        checks = totals_check(final, parts)
+        cadence, speed = cadence_of(plan), float(plan["settings"]["speed"])
+        placements, joins, elapsed = [], [], 0.0
+        for segment in plan["segments"]:
+            spans = [(float(start), float(end)) for start, end in segment["spans"]]
+            length = segment["frames"] / cadence
+            images = image_placement(data, final, spans, elapsed, elapsed + length, folder,
+                                     threads)
+            sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder,
+                                     threads, f"0:{plan['audio_stream']}")
+            placements.append({"corte": segment["id"], "titulo": segment["title"],
+                               "salida_s": [round(elapsed, 3), round(elapsed + length, 3)],
+                               "imagen": images, "envolvente": sounds})
+            elapsed += length
+            joins.append(round(elapsed * cadence))
+        checks["colocacion"] = placements
+        failures, marks = [], []
+        for entry in placements:
+            for row in entry["imagen"]:
+                if row["distancia"] > IMAGE_MARK:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                                    f"{row['distancia']:.4f} del original")
+                elif row["distancia"] > IMAGE_OK:
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                                 f"{row['distancia']:.4f}, revísala en la hoja de uniones")
+            for row in entry["envolvente"]:
+                if row["bloques"] == 0:
+                    # A window this short (an end within 40 ms) was never measured;
+                    # diferencia_db: 0.0 is a placeholder, not a perfect match, so it must not
+                    # pass silently as one.
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): tramo demasiado "
+                                 "corto para verificar la envolvente; revísalo a mano")
+                    continue
+                if ENVELOPE_OK < row["diferencia_db"] <= ENVELOPE_MARK:
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                                 f"{row['diferencia_db']:.2f} dB, escúchala")
+                if row["diferencia_db"] > ENVELOPE_MARK:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                                    f"{row['diferencia_db']:.2f} dB del original")
+                if abs(row["desfase_ms"]) > ENVELOPE_LAG * round(LEVEL_BLOCK * 1000):
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): desfase de "
+                                    f"{row['desfase_ms']} ms")
+                if row["correlacion"] is not None and row["correlacion"] < ENVELOPE_CORRELATION:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): correlación "
+                                    f"{row['correlacion']:.3f}")
+        if failures:
+            raise Invalid("La colocación no coincide con el original: " + "; ".join(failures) + ".")
+        checks["marcas"] = marks
+        checks["uniones"] = joins[:-1]
+        return checks
+    except Invalid:
+        raise
+    except (ValueError, OSError) as exc:
+        # N1: any failure past decode_check (e.g. image_distance on mismatched frame sizes) must
+        # become Invalid too, so it gets the same evidence handling as a real placement failure.
+        raise Invalid(f"La validación no se pudo completar: {exc}") from exc
 
 
 def report(plan, checks, avisos, cadence):
@@ -683,6 +710,8 @@ def montage(args):
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8-sig"))
     if not isinstance(plan, dict) or type(plan.get("version")) is not int:
         raise Refused("El plan debe ser un objeto JSON con version entera.")
+    if args.budget is not None and args.budget <= 0:
+        raise Refused("--budget debe ser mayor que 0 segundos.")
     data = probe(args.video)
     avisos = sources_agree(plan, args.video)
     if args.dry_run:
@@ -722,6 +751,13 @@ def montage(args):
             uniones.mkdir()
             try:
                 checks = validate(data, plan, all_parts(plan), staged, folder, args.threads)
+                try:
+                    # N1: sheets() also runs FFmpeg over the montage, right after validate(); a
+                    # failure here deserves the same evidence handling, not a bare crash.
+                    checks["uniones_hojas"] = sheets(staged, checks["uniones"], uniones,
+                                                     cadence_of(plan), args.threads)
+                except (ValueError, OSError) as exc:
+                    raise Invalid(f"No se pudieron generar las hojas de uniones: {exc}") from exc
             except Invalid as exc:
                 kept = new_dir(work / f"fallo-v{plan['version']}-{int(time.time())}")
                 staged.replace(kept / "resumen.mp4")
@@ -729,7 +765,6 @@ def montage(args):
                 exc.evidencia = kept
                 history(work, "verify", {"version": plan["version"], "ok": False, "codigo": 4})
                 raise
-            checks["uniones_hojas"] = sheets(staged, checks["uniones"], uniones, cadence_of(plan))
             # `vN/` is built whole here, still inside the temp folder: `publish` below is the only
             # write that reaches `work`, so nothing under `work` is ever half-published (§11).
             version = folder / f"v{plan['version']}"

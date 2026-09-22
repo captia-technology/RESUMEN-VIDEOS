@@ -66,6 +66,13 @@ class AcceptanceTest(unittest.TestCase):
                     render.accepted(plan, accept, directo)
                 self.assertIn("7", str(caught.exception))
 
+    def test_a_blocking_warning_without_a_message_or_code_is_still_refused_readably(self):
+        # D1: a plan edited by hand can drop keys other than `codigo` (which the filter needs);
+        # accepted() must not raise a bare KeyError while composing the refusal.
+        plan = sample_plan(warnings=[{"codigo": "corte_vacio", "corte": 3}])
+        with self.assertRaisesRegex(render.Refused, r"\(sin mensaje\)"):
+            render.accepted(plan, None, True)
+
     def test_the_acceptance_records_the_literal_phrase_and_the_plan_hash(self):
         plan = sample_plan()
         record = render.accepted(plan, "vale, móntalo", False)
@@ -158,6 +165,17 @@ class SubcutTest(unittest.TestCase):
             render.subcuts(dict(segment, subcuts=[swapped] + segment["subcuts"][1:]))
         with self.assertRaisesRegex(render.Refused, "máximo es 30"):
             render.subcuts(segment, limit=30)
+
+    def test_a_published_subcut_missing_a_key_is_refused_as_incomplete(self):
+        # D1: a hand-edited plan can publish a subcut dict missing one of the three keys render
+        # reads; subcuts() must refuse with a readable message instead of raising KeyError.
+        whole = published([(1.0, 2.0)])
+        for missing_key in ("spans", "frames", "samples"):
+            with self.subTest(missing_key=missing_key):
+                incomplete = {key: value for key, value in whole["subcuts"][0].items()
+                             if key != missing_key}
+                with self.assertRaisesRegex(render.Refused, "incompleto"):
+                    render.subcuts(dict(whole, subcuts=[incomplete]))
 
     def test_the_fractional_rate_is_exact(self):
         rate = 1 / common.output_interval("30000/1001")
@@ -639,6 +657,22 @@ class BudgetTest(unittest.TestCase):
                 self.assertEqual(len(render.build(None, plan, cortes, "8.0.1", 1, None)), 3)
                 self.assertEqual(calls, [1, 1])
 
+    def test_a_non_positive_budget_is_refused_not_treated_as_unlimited(self):
+        # D3: --budget 0 (or negative) must not behave as "no limit"; it is invalid input.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            work = root / "trabajo"
+            work.mkdir()
+            common.save(work / "seleccion-v1.json", sample_plan())
+            for budget in (0, -5):
+                with self.subTest(budget=budget):
+                    args = argparse.Namespace(video=str(root / "no-existe.mkv"), work=str(work),
+                                              plan=str(work / "seleccion-v1.json"), accept=None,
+                                              directo=False, budget=budget, threads=1,
+                                              dry_run=False)
+                    with self.assertRaisesRegex(render.Refused, "--budget"):
+                        render.montage(args)
+
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
 class ResumeTest(unittest.TestCase):
@@ -789,6 +823,59 @@ class TotalsTest(unittest.TestCase):
                               if float(item["duration_time"]) < 0.001])
 
 
+class ThreadsPropagationTest(unittest.TestCase):
+    """N2: `--threads` must reach every FFmpeg call validate() makes, not just render_part's."""
+
+    def test_gray_frame_propagates_threads_to_ffmpeg(self):
+        calls = []
+
+        def fake_ffmpeg(*args, **kwargs):
+            calls.append(args)
+            Path(args[-1]).write_bytes(bytes(render.IMAGE_SIDE * render.IMAGE_SIDE))
+
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            target = Path(temporary) / "frame.gray"
+            with mock.patch.object(render, "ffmpeg", side_effect=fake_ffmpeg):
+                render.gray_frame("fuente.mkv", 1.0, 0.0, 3.0, target, 7)
+            args = calls[0]
+            self.assertEqual(args[args.index("-threads") + 1], "7")
+            self.assertEqual(args[args.index("-filter_threads") + 1], "7")
+
+    def test_window_levels_propagates_threads_to_ffmpeg(self):
+        calls = []
+
+        def fake_ffmpeg(*args, **kwargs):
+            calls.append(args)
+            with wave.open(str(args[-1]), "wb") as stream:
+                stream.setnchannels(1)
+                stream.setsampwidth(2)
+                stream.setframerate(render.LEVEL_RATE)
+                stream.writeframes(b"\x00\x00" * render.LEVEL_RATE)
+
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            with mock.patch.object(render, "ffmpeg", side_effect=fake_ffmpeg):
+                render.window_levels("fuente.mkv", 0.0, 1.0, temporary, "prueba", 5)
+            args = calls[0]
+            self.assertEqual(args[args.index("-threads") + 1], "5")
+            self.assertNotIn("-filter_threads", args)
+
+    def test_sheets_propagates_threads_to_ffmpeg(self):
+        calls = []
+
+        def fake_ffmpeg(*args, **kwargs):
+            calls.append(args)
+            Path(args[-1]).write_bytes(b"jpg")
+
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            folder = Path(temporary)
+            with mock.patch.object(render, "counted_frames", return_value=100), \
+                    mock.patch.object(render, "ffmpeg", side_effect=fake_ffmpeg):
+                render.sheets("montaje.mp4", [40], folder, 25.0, 3)
+            args = calls[0]
+            self.assertEqual(args[args.index("-threads") + 1], "3")
+            self.assertEqual(args[args.index("-filter_threads") + 1], "3")
+
+
 class ImageDistanceTest(unittest.TestCase):
     def test_the_distance_is_normalised_and_symmetric(self):
         black, white = bytes(4096), bytes([255]) * 4096
@@ -809,7 +896,7 @@ class ImagePlacementTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             _, _, data, staged = assembled(root)
-            rows = render.image_placement(data, staged, [(1.0, 2.0), (4.0, 5.0)], 0.0, 1.6, root)
+            rows = render.image_placement(data, staged, [(1.0, 2.0), (4.0, 5.0)], 0.0, 1.6, root, 1)
             self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
             self.assertTrue(all(row["distancia"] <= render.IMAGE_OK for row in rows), rows)
 
@@ -818,7 +905,7 @@ class ImagePlacementTest(unittest.TestCase):
             root = Path(temporary)
             _, _, data, staged = assembled(root)
             # Same cut, wrong source times: the montage holds seconds 1 and 4, not 6 and 9.
-            rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root)
+            rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root, 1)
             self.assertTrue(any(row["distancia"] > render.IMAGE_MARK for row in rows), rows)
 
 
@@ -930,7 +1017,7 @@ class SoundPlacementTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             data, staged, spans = self.built(root)
-            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root, 1)
             self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
             # Measured here: 0.81 dB / 0.973 at the start and 0.17 dB / 1.0 at the end, both with
             # real margin over ENVELOPE_MARK and ENVELOPE_CORRELATION.
@@ -947,7 +1034,7 @@ class SoundPlacementTest(unittest.TestCase):
             root = Path(temporary)
             data, staged, _ = self.built(root)
             moved = [(0.75, 1.83), (2.17, 3.33), (3.67, 5.15)]
-            rows = render.sound_placement(data, staged, moved, 0.0, 74 / 25, 1.25, root)
+            rows = render.sound_placement(data, staged, moved, 0.0, 74 / 25, 1.25, root, 1)
             # §8 coverage: measured 54.22 / 74.16 dB and correlación −0.131 / −0.498, so both the
             # difference and the correlation gates would reject this montage.
             self.assertTrue(any(row["diferencia_db"] > render.ENVELOPE_MARK for row in rows), rows)
@@ -967,7 +1054,7 @@ class SoundPlacementTest(unittest.TestCase):
             shifted(moved, plain, ahead=7)
             data, staged, spans = self.built(root, source_path=moved)
             self.assertAlmostEqual(common.timeline_start(data), 7.0, places=3)
-            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root, 1)
             for row in rows:
                 with self.subTest(row=row):
                     self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
@@ -996,7 +1083,7 @@ class SoundPlacementTest(unittest.TestCase):
             staged = cortes / "resumen.mp4"
             render.assemble(cortes, cuts, staged, 1)
             spans_t = [(a, b) for a, b in spans]
-            rows = render.sound_placement(data, staged, spans_t, 0.0, 56 / 25, 1.0, root,
+            rows = render.sound_placement(data, staged, spans_t, 0.0, 56 / 25, 1.0, root, 1,
                                           track=f"0:{plan['audio_stream']}")
             for row in rows:
                 with self.subTest(row=row):
@@ -1011,7 +1098,7 @@ class SheetTest(unittest.TestCase):
             _, _, _, staged = assembled(root)
             uniones = root / "uniones"
             uniones.mkdir()
-            names = render.sheets(staged, [40], uniones, 25.0)
+            names = render.sheets(staged, [40], uniones, 25.0, 1)
             self.assertEqual(names, ["union-01.jpg"])
             sheet = common.probe(uniones / "union-01.jpg")
             picture = common.video_stream(sheet)
@@ -1027,7 +1114,7 @@ class SheetTest(unittest.TestCase):
             _, _, _, staged = assembled(root)
             uniones = root / "uniones"
             uniones.mkdir()
-            self.assertEqual(render.sheets(staged, [2], uniones, 25.0), ["union-01.jpg"])
+            self.assertEqual(render.sheets(staged, [2], uniones, 25.0, 1), ["union-01.jpg"])
             self.assertTrue((uniones / "union-01.jpg").is_file())
 
 
@@ -1096,6 +1183,35 @@ class ValidateTest(unittest.TestCase):
             with mock.patch.object(render, "sound_placement", return_value=[marked, fine]):
                 checks = render.validate(data, plan, render.all_parts(plan), staged, root, 1)
             self.assertIn("corte 1 (inicio): envolvente a 6.00 dB, escúchala", checks["marcas"])
+
+    def test_a_window_too_short_to_measure_is_marked_not_failed(self):
+        # D2: bloques == 0 is a degenerate window (an end within 40 ms), not a perfect match; it
+        # must not be indistinguishable from diferencia_db: 0.0 and must not block the montage.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            plan = self.plan_for(data, spans)
+            degenerate = {"punto": "inicio", "bloques": 0, "diferencia_db": 0.0, "desfase_ms": 0,
+                          "correlacion": None, "modulacion_db": 0.0}
+            fine = {"punto": "fin", "bloques": 100, "diferencia_db": 0.17, "desfase_ms": 20,
+                    "correlacion": 1.0, "modulacion_db": 51.2}
+            with mock.patch.object(render, "sound_placement", return_value=[degenerate, fine]):
+                checks = render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+            self.assertIn("corte 1 (inicio): tramo demasiado corto para verificar la envolvente; "
+                         "revísalo a mano", checks["marcas"])
+
+    def test_a_plain_valueerror_after_decode_check_becomes_invalid(self):
+        # N1: only decode_check's own failures were converted to Invalid; a plain ValueError from
+        # any later step (e.g. image_distance on mismatched frame sizes) must not escape as a bare
+        # ValueError and reach exit code 1 without evidence.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            plan = self.plan_for(data, spans)
+            with mock.patch.object(render, "image_placement",
+                                   side_effect=ValueError("tamaño distinto")):
+                with self.assertRaisesRegex(render.Invalid, "tamaño distinto"):
+                    render.validate(data, plan, render.all_parts(plan), staged, root, 1)
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
@@ -1194,6 +1310,29 @@ class CommandTest(unittest.TestCase):
                         "--accept", "vale, móntalo", "--threads", "1")
             self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
 
+    def test_a_sheets_failure_gets_the_same_evidence_handling_as_validate(self):
+        # N1: sheets() runs FFmpeg right after validate() but, before this fix, sat outside the
+        # try/except that gives validation failures their evidence folder and codigo 4 in verify.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, _ = self.work(root)
+            args = argparse.Namespace(video=str(source), work=str(trabajo),
+                                      plan=str(trabajo / "seleccion-v1.json"),
+                                      accept="vale, móntalo", directo=False, budget=None, threads=1,
+                                      dry_run=False)
+            with mock.patch.object(render, "sheets", side_effect=ValueError("hoja rota")):
+                with self.assertRaises(render.Invalid):
+                    render.montage(args)
+            self.assertFalse((trabajo / "v1").exists())
+            self.assertFalse((trabajo / "montaje.lock").exists())
+            fallos = list(trabajo.glob("fallo-v1-*"))
+            self.assertEqual(len(fallos), 1)
+            self.assertTrue((fallos[0] / "resumen.mp4").is_file())
+            log = [json.loads(line) for line in
+                  (trabajo / "historial.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([entry["evento"] for entry in log], ["accept", "render", "verify"])
+            self.assertEqual((log[2]["ok"], log[2]["codigo"]), (False, 4))
+
     def test_an_exhausted_budget_answers_with_code_three(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
@@ -1280,6 +1419,18 @@ class CommandTest(unittest.TestCase):
             notas = [json.loads(path.read_text(encoding="utf-8"))
                      for path in (trabajo / "cortes").glob("*.json")]
             self.assertTrue(all(nota["segundos"] > 0 for nota in notas), notas)
+
+
+class TempDirConsistencyTest(unittest.TestCase):
+    def test_every_temporary_directory_ignores_cleanup_errors(self):
+        # D4: Windows can hold a file descriptor open at any of the 5 sites; all must share the
+        # same `ignore_cleanup_errors=True` criterion, not just the two that already had it.
+        source = Path(render.__file__).read_text(encoding="utf-8")
+        calls = re.findall(r"tempfile\.TemporaryDirectory\((?:[^()]|\([^()]*\))*\)", source)
+        self.assertGreaterEqual(len(calls), 5)
+        for call in calls:
+            with self.subTest(call=call):
+                self.assertIn("ignore_cleanup_errors=True", call)
 
 
 class CostTest(unittest.TestCase):
