@@ -968,10 +968,6 @@ class VersionesTest(unittest.TestCase):
         self.assertFalse(list(self.work.glob("propuesta-v*.md")))
         # A draft that is missing is the same class of invalid argument as one that is wrong.
         self.assertEqual(call(self.work, draft=None)[0], 2)
-        draft(self.work, BASE)
-        with self.assertRaisesRegex(ValueError, "modo audio"):
-            call(self.work, kind="audio")
-
 
     def names(self):
         return sorted(path.name for path in self.work.iterdir())
@@ -1258,6 +1254,112 @@ class CliTest(unittest.TestCase):
             with self.subTest(combo=combo), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     parser.parse_args(["plan", "--work", "T", *combo])
+
+
+def question(id_, start, end, **extra):
+    base = {"id": id_, "start": start, "end": end, "question": f"¿Pregunta {id_}?",
+            "answer": "Respuesta de la fuente.", "audio_evidence": f"{start:.0f}–{end:.0f} s"}
+    base.update(extra)
+    return base
+
+
+IDEAS = [cut(1, 12.0, 45.0, 1), cut(2, 60.0, 90.0, 1), cut(3, 200.0, 240.0, 2, included=False)]
+QUESTIONS = [question(1, 100.0, 130.0), question(2, 150.0, 180.0)]
+
+
+class AudioQuestionsTest(unittest.TestCase):
+    def test_every_refusal_names_what_is_wrong(self):
+        cases = [({"questions": "x"}, "una lista «questions»"),
+                 ({"questions": [{**QUESTIONS[0], "id": 0}]}, "id entero positivo"),
+                 ({"questions": [QUESTIONS[0], {**QUESTIONS[1], "id": 1}]}, "El id 1 se repite"),
+                 ({"questions": [QUESTIONS[1], QUESTIONS[0]]}, "rompe el orden cronológico"),
+                 ({"questions": [{**QUESTIONS[0], "end": 400.0}]}, "fuera del medio"),
+                 ({"questions": [{**QUESTIONS[0], "end": 100.0}]}, "fuera del medio"),
+                 ({"questions": [{**QUESTIONS[0], "answer": "  "}]}, "Falta answer en la pregunta 1")]
+        for change, message in cases:
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, message):
+                plan.questions_of(change, 300.0)
+
+    def test_a_correct_list_is_normalised(self):
+        rows = plan.questions_of({"questions": QUESTIONS}, 300.0)
+        self.assertEqual([row["id"] for row in rows], [1, 2])
+        self.assertEqual(rows[0]["question"], "¿Pregunta 1?")
+        self.assertEqual(plan.questions_of({}, 300.0), [])
+
+
+class AudioSchemaTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+        work_folder(self.work, seconds=300.0, videos=0)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_the_outline_is_published_with_a_proposal_and_a_canonical_hash(self):
+        draft(self.work, IDEAS, request="resume la reunión",
+              settings={"target": "10%", "speed": 1.5}, questions=QUESTIONS)
+        code, output = call(self.work)
+        self.assertEqual(code, 0)
+        self.assertIn("esquema-v1.json", output)
+        body = json.loads((self.work / "esquema-v1.json").read_text(encoding="utf-8"))
+        self.assertEqual((body["kind"], body["version"]), ("audio", 1))
+        self.assertEqual([(item["numero"], item["id"], item["start"], item["end"])
+                          for item in body["ideas"]], [(1, 1, 12.0, 45.0), (2, 2, 60.0, 90.0)])
+        self.assertEqual([item["id"] for item in body["questions"]], [1, 2])
+        self.assertNotIn("segments", body)
+        self.assertEqual(body["settings"], {"target": None, "speed": 1.0, "remove_pauses": False,
+                                            "silence_db": -50.0, "rate": None,
+                                            "sample_rate": 48000, "tolerance": None})
+        self.assertEqual(body["sha256"], common.plan_sha256(
+            {k: v for k, v in body.items() if k != "sha256"}))
+        text = (self.work / "propuesta-v1.md").read_text(encoding="utf-8")
+        self.assertIn("# Esquema v1", text)
+        self.assertIn("2 ideas · 2 preguntas", text)
+        self.assertIn("se ignoran objetivo, velocidad y pausas", text)
+        self.assertIn("| 1 | 0:12–0:45 | 1 | Frase 1 |", text)
+        self.assertIn("| 1 | 1:40–2:10 | ¿Pregunta 1? |", text)
+        record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8").strip())
+        self.assertEqual((record["evento"], record["ideas"], record["preguntas"]), ("init", 2, 2))
+
+    def test_a_second_version_records_an_edit(self):
+        draft(self.work, IDEAS, questions=QUESTIONS)
+        call(self.work)
+        draft(self.work, IDEAS, parent=1, questions=QUESTIONS)
+        code, _ = call(self.work)
+        self.assertEqual(code, 0)
+        self.assertTrue((self.work / "esquema-v2.json").is_file())
+        self.assertTrue((self.work / "propuesta-v2.md").is_file())
+        events = [json.loads(line)["evento"] for line
+                  in (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(events, ["init", "edit"])
+
+    def test_dry_run_writes_nothing(self):
+        draft(self.work, IDEAS, questions=QUESTIONS)
+        before = sorted(p.name for p in self.work.iterdir())
+        code, body = dry(self.work)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(body["ideas"]), 2)
+        self.assertEqual(body["sha256"], common.plan_sha256(
+            {k: v for k, v in body.items() if k != "sha256"}))
+        # --dry-run promises no plan version, not an untouched disk: run() caches the energy
+        # levels before dry_run is even checked, in audio as in video (VersionesTest above).
+        after = sorted(p.name for p in self.work.iterdir())
+        self.assertEqual(after, sorted(before + ["energia.f32"]))
+
+    def test_blocking_warnings_also_stop_an_outline(self):
+        segments = [dict(IDEAS[0], depends_on=[3]), IDEAS[1], IDEAS[2]]
+        draft(self.work, segments, questions=QUESTIONS)
+        code, _ = call(self.work)
+        self.assertEqual(code, 2)
+        body = json.loads((self.work / "esquema-v1.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["codigo"] for item in body["warnings"] if item["bloquea"]],
+                         ["dependencia_excluida"])
+
+    def test_an_audio_job_never_asks_for_a_picture(self):
+        segments = [{k: v for k, v in item.items() if k != "visual_evidence"} for item in IDEAS]
+        draft(self.work, segments, questions=QUESTIONS)
+        self.assertEqual(call(self.work)[0], 0)
 
 
 if __name__ == "__main__":

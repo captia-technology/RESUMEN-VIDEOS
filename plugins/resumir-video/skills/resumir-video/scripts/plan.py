@@ -121,14 +121,15 @@ def check_draft(draft, total, kind):
     return segments
 
 
-def check_parent(draft, work):
+def check_parent(draft, work, kind):
     """`parent` is null or the number of a version this folder has already published."""
     parent = draft.get("parent")
     if parent is None:
         return
-    if type(parent) is not int or parent < 1 or not (work / f"seleccion-v{parent}.json").is_file():
+    prefix = "esquema" if kind == "audio" else "seleccion"
+    if type(parent) is not int or parent < 1 or not (work / f"{prefix}-v{parent}.json").is_file():
         raise ValueError("parent debe ser nulo o el número de una versión ya publicada "
-                         f"(seleccion-vN.json en la carpeta de trabajo); recibido {parent!r}.")
+                         f"({prefix}-vN.json en la carpeta de trabajo); recibido {parent!r}.")
 
 
 def settings_of(draft, args, total, grid):
@@ -170,6 +171,42 @@ def words_of(transcription):
         words.extend({"start": float(word["start"]), "end": float(word["end"])}
                      for word in segment.get("words", []) if word.get("start") is not None)
     return sorted(words, key=lambda word: word["start"])
+
+
+QUESTION_FIELDS = ("question", "answer", "audio_evidence")
+
+
+def questions_of(draft, total):
+    """The session's questions: the discipline of check_draft, without spans or priority."""
+    rows = draft.get("questions") or []
+    if not isinstance(rows, list):
+        raise ValueError("El borrador de audio requiere una lista «questions».")
+    seen, previous = set(), -1.0
+    for number, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"La pregunta {number} debe ser un objeto.")
+        key = row.get("id")
+        if type(key) is not int or key < 1:
+            raise ValueError(f"La pregunta {number} necesita un id entero positivo.")
+        if key in seen:
+            raise ValueError(f"El id {key} se repite entre las preguntas.")
+        seen.add(key)
+        start, end = row.get("start"), row.get("end")
+        if any(type(x) not in (int, float) or not math.isfinite(x) for x in (start, end)):
+            raise ValueError(f"La pregunta {key} necesita start y end numéricos finitos.")
+        if not 0 <= start < end <= total:
+            raise ValueError(f"La pregunta {key} está fuera del medio o invertida (el medio termina "
+                             f"en {total:.3f} s).")
+        if start < previous:
+            raise ValueError(f"La pregunta {key} rompe el orden cronológico.")
+        previous = start
+        for field in QUESTION_FIELDS:
+            if not isinstance(row.get(field), str) or not row[field].strip():
+                raise ValueError(f"Falta {field} en la pregunta {key}.")
+    return [{"id": row["id"], "start": round(float(row["start"]), 6),
+             "end": round(float(row["end"]), 6), "question": row["question"].strip(),
+             "answer": row["answer"].strip(),
+             "audio_evidence": row["audio_evidence"].strip()} for row in rows]
 
 
 def adjusted(segments, levels, words, threshold):
@@ -793,6 +830,84 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
     return 2 if blocking else 0
 
 
+def audio_plan(args, work, data, draft, settings, segments, total, levels, words, grid):
+    """Audio jobs publish an outline: ideas and questions with times, no spans and no speed."""
+    included = {segment["id"] for segment in segments if segment.get("included", False)}
+    ideas = [{"numero": number, "id": segment["id"], "priority": segment["priority"],
+              "title": segment["title"], "phrase": segment["phrase"], "reason": segment["reason"],
+              "audio_evidence": segment["audio_evidence"],
+              "start": round(segment["start"], 6), "end": round(segment["end"], 6)}
+             for number, segment in enumerate([item for item in segments
+                                               if item["id"] in included], start=1)]
+    if not ideas:
+        raise ValueError("El esquema necesita al menos una idea clave incluida en el borrador.")
+    questions = questions_of(draft, total)
+    warnings = dependency_warnings([{"segment": item} for item in segments], included)
+    warnings += topic_warnings(draft, [{"segment": item} for item in segments], included)
+    if not words:
+        warnings.append(common.warning(
+            "sin_marcas_por_palabra", "La transcripción no trae marcas por palabra: los tiempos "
+            "del esquema son los de cada segmento."))
+    # prepare records huecos_pts and fuente_vfr of the packet probe; the outline only carries them on.
+    warnings += [common.warning(item["codigo"], item["mensaje"], cut=item.get("corte"))
+                 for item in data.get("avisos", [])]
+    body = {"version": 0, "parent": draft.get("parent"), "kind": "audio",
+            "request": draft.get("request", ""), "source": data["source"],
+            "audio_stream": data["audio_stream"],
+            # No montage in audio: target, speed and pauses are published neutralised (section 4).
+            "settings": {"target": None, "speed": 1.0, "remove_pauses": False,
+                         "silence_db": settings["silence_db"], "rate": None,
+                         "sample_rate": grid["sample_rate"], "tolerance": None},
+            "ideas": ideas, "questions": questions, "excluded": draft.get("excluded", []),
+            "changes": [] if draft.get("parent") else ["propuesta inicial"],
+            "warnings": warnings}
+    blocking = any(item["bloquea"] for item in warnings)
+    if args.dry_run:
+        body["sha256"] = common.plan_sha256(body)
+        print(dumps(body))
+        return 2 if blocking else 0
+    name = Path(data["source"]["path"]).name
+    version, path = publish_version(work, "esquema", body,
+                                    lambda: audio_proposal(body, total, name, body["version"]))
+    common.history(work, "edit" if draft.get("parent") else "init",
+                   {"version": version, "ideas": len(ideas), "preguntas": len(questions),
+                    "sha256": body["sha256"], "peticion": draft.get("request", "")})
+    print(path)
+    return 2 if blocking else 0
+
+
+def audio_proposal(body, total, name, version):
+    """The outline the user accepts before the document is written."""
+    lines = [f"# Esquema v{version} · documento de «{name}»", "",
+             f"Original {common.clock(total)} · {len(body['ideas'])} ideas · "
+             f"{len(body['questions'])} preguntas · sin montaje (entrada de solo audio)", "",
+             "En modo audio se ignoran objetivo, velocidad y pausas: la entrega es el documento.",
+             "", "## Avisos", ""]
+    lines += [f"- {'**bloquea** · ' if item['bloquea'] else ''}`{item['codigo']}` · "
+              f"{item['mensaje']}" for item in body["warnings"]] or ["- ninguno"]
+    lines += ["", "## Ideas", "", "| # | Origen | Prioridad | Qué se dice |",
+              "| --- | --- | --- | --- |"]
+    for idea in body["ideas"]:
+        lines.append(f"| {idea['numero']} | {common.clock(idea['start'])}–"
+                     f"{common.clock(idea['end'])} | {idea['priority']} | {cell(idea['phrase'])} |")
+    lines += ["", "## Preguntas", "", "| # | Origen | Pregunta | Respuesta |",
+              "| --- | --- | --- | --- |"]
+    for item in body["questions"]:
+        lines.append(f"| {item['id']} | {common.clock(item['start'])}–"
+                     f"{common.clock(item['end'])} | {cell(item['question'])} | "
+                     f"{cell(item['answer'])} |")
+    if not body["questions"]:
+        lines.append("| — | — | No se registraron preguntas en la sesión. | — |")
+    lines += ["", "## Exclusiones deliberadas", "", "| Qué | Por qué |", "| --- | --- |"]
+    for item in body["excluded"]:
+        lines.append(f"| {cell(item.get('title', ''))} | {cell(item.get('reason', ''))} |")
+    lines += ["", "## Cómo responder", "",
+              "- «acepta» o «adelante» para redactar el documento con este esquema.",
+              "- «quita la 3», «añade lo de ATEX», «junta la 1 y la 2» para cambiarlo.",
+              "- «¿qué has dejado fuera?» para ver lo descartado sin crear una versión.", ""]
+    return "\n".join(lines)
+
+
 def publish_draft(work, body, event, payload, dry_run):
     """The shared ending of --import and --revert: a new draft, never a plan."""
     if dry_run:
@@ -904,15 +1019,12 @@ def run(args):
         return 2
     # prepare writes `kind`; a job that does not declare it is a video job, as in 0.1.0.
     kind = args.kind or data.get("kind") or "video"
-    if kind != "video":
-        raise ValueError("El modo audio publica un esquema de ideas, no una selección de tramos; "
-                         "este subcomando todavía no lo genera.")
     grid = data.get("timeline") or common.timeline(data)
     try:
         draft = load_draft(args.draft)
         settings = settings_of(draft, args, total, grid)
         segments = check_draft(draft, total, kind)
-        check_parent(draft, work)
+        check_parent(draft, work, kind)
     except ValueError as exc:
         # The same door: a draft the agent has to fix (or cannot even give us) is an invalid
         # argument, not a controlled failure.
@@ -921,6 +1033,8 @@ def run(args):
     transcript = work / "transcripcion.json"
     words = words_of(load(transcript)) if transcript.is_file() else []
     levels = common.energy(work / "audio.wav", work / "energia.f32")
+    if kind == "audio":
+        return audio_plan(args, work, data, draft, settings, segments, total, levels, words, grid)
     return video_plan(args, work, data, draft, settings, segments, total, levels, words, grid)
 
 
