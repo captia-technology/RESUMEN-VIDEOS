@@ -1053,10 +1053,12 @@ class BlockTest(unittest.TestCase):
                  "colocacion": [{"corte": 1, "titulo": "A", "salida_s": [0.0, 6.4],
                                  "imagen": [{"punto": "inicio", "distancia": 0.031}],
                                  # `bloques: 0` is a degenerate window (never measured): its
-                                 # desfase_ms of 0 must not count as a perfect measurement.
+                                 # desfase_ms of 500 must not count towards the maximum below —
+                                 # if the `bloques != 0` filter ever reverted to `desfase_ms is
+                                 # not None`, this row alone would push the max well past 40 ms.
                                  "envolvente": [{"punto": "inicio", "bloques": 86, "desfase_ms": 20,
                                                  "correlacion": 0.97},
-                                                {"punto": "fin", "bloques": 0, "desfase_ms": 0,
+                                                {"punto": "fin", "bloques": 0, "desfase_ms": 500,
                                                  "correlacion": None}]},
                                 {"corte": 2, "titulo": "B", "salida_s": [6.4, 9.6],
                                  "imagen": [{"punto": "inicio", "distancia": 0.11}],
@@ -1391,7 +1393,8 @@ Tres caminos con la misma entrada y el mismo código de salida 0 (spec §10, §1
 
 - [ ] **Paso 1: Escribir la prueba que falla**
 
-Añade a `test_doc.py` (junto a los imports, `import zipfile` y `from unittest import mock`):
+Añade a `test_doc.py` (junto a los imports, `import struct`, `import zipfile`, `import zlib` y
+`from unittest import mock`):
 
 ````python
 SAMPLE = """# Resumen
@@ -1409,6 +1412,20 @@ Párrafo con **negrita**, *cursiva* y `código`.
 0:00 ▕·····█████▏ 1:36
 ```
 """
+
+
+def png_chunk(kind, data):
+    return (struct.pack(">I", len(data)) + kind + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+
+def minimal_png():
+    """A real, valid 1x1 RGB PNG built from stdlib bytes only: no Pillow dependency needed
+    just to exercise render_docx's IMAGE branch."""
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00\xff\x00\x00")  # filter byte + one red RGB pixel
+    return signature + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", idat) + png_chunk(b"IEND", b"")
 
 
 class DocxTest(unittest.TestCase):
@@ -1448,6 +1465,23 @@ class DocxTest(unittest.TestCase):
             self.assertIn("<w:b/>", xml)
             self.assertIn("<w:i/>", xml)
             self.assertIn("Segunda idea", xml)
+
+    def test_render_docx_embeds_a_referenced_image(self):
+        if not doc.has_python_docx():
+            self.skipTest("python-docx no instalado")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            base = Path(temporary)
+            (base / "captura.png").write_bytes(minimal_png())
+            markdown = "# Resumen\n\n![Captura](captura.png)\n"
+            target = base / "con-imagen.docx"
+            doc.render_docx(markdown, target, base)
+            with zipfile.ZipFile(target) as bundle:
+                names = bundle.namelist()
+                media = [n for n in names
+                         if n.startswith("word/media/image") and n.endswith(".png")]
+                xml = bundle.read("word/document.xml").decode("utf-8")
+            self.assertTrue(media, f"Sin imagen incrustada en {names}")
+            self.assertIn("<w:drawing>", xml)
 ````
 
 - [ ] **Paso 2: Ejecutarla y comprobar que falla**
@@ -1482,12 +1516,17 @@ def to_docx(markdown_path, target, base):
     used = engine()
     if used is None:
         return None
-    if used == "pandoc":
-        common.run([common.tool("pandoc"), "--from=markdown", "--to=docx",
-                    f"--resource-path={Path(base).resolve()}", "--output", str(staged),
-                    str(markdown_path)])
-    else:
-        render_docx(Path(markdown_path).read_text(encoding="utf-8"), staged, Path(base))
+    try:
+        if used == "pandoc":
+            common.run([common.tool("pandoc"), "--from=markdown", "--to=docx",
+                        f"--resource-path={Path(base).resolve()}", "--output", str(staged),
+                        str(markdown_path)])
+        else:
+            render_docx(Path(markdown_path).read_text(encoding="utf-8"), staged, Path(base))
+    except Exception:
+        # A crash mid-write must not leave a <nombre>.docx.parcial orphaned forever.
+        staged.unlink(missing_ok=True)
+        raise
     staged.replace(target)
     return used
 ```
@@ -1762,13 +1801,26 @@ def context_of(work, number, out, metadata, schema=None):
         if key not in plan:
             raise ValueError(f"El plan publicado no tiene «{key}»: {Path(out) / 'seleccion.json'}")
     speed = float(plan["settings"].get("speed", 1.0))
+    corrupt = ValueError("El plan publicado tiene una velocidad o una cadencia no válidas: ¿se ha "
+                         "editado a mano? revisa `settings.speed` y `settings.rate` en el plan.")
+    if speed <= 0:
+        raise corrupt
     # The montage's own F rules; metadata only answers when the plan does not carry it.
     rate = plan["settings"].get("rate")
-    cadence = 1 / common.output_interval(rate) if rate else float(metadata["timeline"]["fps"])
+    try:
+        cadence = 1 / common.output_interval(rate) if rate else float(metadata["timeline"]["fps"])
+    except ZeroDivisionError:
+        cadence = 0.0
+    if cadence <= 0:
+        raise corrupt
     base.update(spans=placements(plan["segments"], speed, cadence), speed=speed,
                 settings=plan["settings"])
     return base
 ```
+
+Una velocidad o una cadencia de cero en un `seleccion.json` editado a mano ya no se cuela como un
+`ZeroDivisionError` crudo hasta el manejador genérico de `video.main()`: ambas se comprueban después de
+calcularse, con el mismo `ValueError` explícito para las dos causas.
 
 - [ ] **Paso 4: Implementar las revisiones y la publicación**
 
@@ -1808,6 +1860,7 @@ def record_revision(out, number, reason, phrase, source):
 
 
 def publish_document(text, out, name, base, skip_docx):
+    """Publish the Markdown, then try the DOCX; a converter crash never undoes the Markdown."""
     markdown, staged = Path(out) / f"{name}.md", Path(out) / f"{name}.md.parcial"
     staged.write_text(text, encoding="utf-8")
     try:
@@ -1817,8 +1870,13 @@ def publish_document(text, out, name, base, skip_docx):
         staged.unlink(missing_ok=True)
         raise
     if skip_docx:
-        return markdown, None
-    return markdown, to_docx(markdown, Path(out) / f"{name}.docx", base)
+        return markdown, None, None
+    try:
+        return markdown, to_docx(markdown, Path(out) / f"{name}.docx", base), None
+    except Exception as exc:
+        # The Markdown above is already published and immutable at this name; a Pandoc crash or a
+        # broken python-docx render must not cost the caller its revision record and history event.
+        return markdown, None, f"Fallo al generar el DOCX ({exc}): la entrega es solo Markdown."
 ```
 
 - [ ] **Paso 5: Implementar `document` y el registro del subcomando**
@@ -1841,12 +1899,13 @@ def report_of(args):
     text = expand(source.read_text(encoding="utf-8-sig"), context)
     revision = next_revision(out) if args.revision else None
     name = "resumen" if revision is None else f"resumen-r{revision}"
-    markdown, used = publish_document(text, out, name, out, args.no_docx)
+    markdown, used, docx_error = publish_document(text, out, name, out, args.no_docx)
     if revision is not None:
         record_revision(out, revision, args.revision, args.accept, source)
     if used is None and not args.no_docx:
-        context["avisos"].append("Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala "
-                                 "Pandoc (pandoc.org) o ejecuta `python -m pip install python-docx`.")
+        context["avisos"].append(docx_error or (
+            "Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala Pandoc (pandoc.org) "
+            "o ejecuta `python -m pip install python-docx`."))
     # `doc` on every publication; `deliver` belongs to the final handover, not to this subcommand.
     common.history(work, "doc", {"version": number, "revision": revision, "motor": used,
                                  "archivo": markdown.name, "kind": metadata.get("kind")})
@@ -2464,6 +2523,7 @@ modo que una marca inválida no deja ninguna carpeta a medias.
 
 ```python
 def report_of(args):
+    """Publish the document of one version and answer what was written; document() prints it."""
     work = Path(args.work).resolve()
     number = args.version
     metadata = read_json(work / "metadata.json")
@@ -2487,12 +2547,13 @@ def report_of(args):
         common.save(out / "esquema.json", schema)
     revision = next_revision(out) if args.revision else None
     name = "resumen" if revision is None else f"resumen-r{revision}"
-    markdown, used = publish_document(text, out, name, out, args.no_docx)
+    markdown, used, docx_error = publish_document(text, out, name, out, args.no_docx)
     if revision is not None:
         record_revision(out, revision, args.revision, args.accept, source)
     if used is None and not args.no_docx:
-        context["avisos"].append("Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala "
-                                 "Pandoc (pandoc.org) o ejecuta `python -m pip install python-docx`.")
+        context["avisos"].append(docx_error or (
+            "Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala Pandoc (pandoc.org) "
+            "o ejecuta `python -m pip install python-docx`."))
     common.history(work, "doc", {"version": number, "revision": revision, "motor": used,
                                  "archivo": markdown.name, "kind": metadata.get("kind"),
                                  "sha256": digest, "frase": args.accept})
@@ -2750,7 +2811,7 @@ y añade su subparser a `register(sub)`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_doc.py" -v
 ```
 
-Esperado: PASS (32 pruebas).
+Esperado: PASS (38 pruebas).
 
 - [ ] **Paso 6: Dejar redactado el texto de `references/documento.md` para el plan 4**
 
@@ -2948,8 +3009,11 @@ Todas en esta máquina (Windows 11, Python 3.11.9, FFmpeg 8.0.1-full_build, Pand
   sondeo de paquetes, unificaron la línea temporal en `common.timeline` y renombraron a `doc` el
   evento que escribe `doc.document`. Repetir el ensayo con los bloques de código de esta versión es
   **(pendiente de evidencia)**: hazlo al ejecutar la tarea 1 y anota el recuento real.
-- Recuento previsto de pruebas, para contrastarlo con lo que salga: `test_video.py` pasa de las 12 que
-  deja la tarea 1 del plan 1 a **18** (+6: 3 rápidas —`kind`, `search` y la eñe— y 3 con FFmpeg —los
-  dos `prepare` y el HDR con huecos—), `test_doc.py` llega a **32** y `test_plan.py` suma **+7** a las
-  del plan 1. Punto de partida medido hoy en el repositorio, antes de cualquier plan: 15 pruebas en
+- Recuento final de pruebas, tal como quedó el repositorio al cerrar este plan (10 tareas más la
+  revisión de rama completa y su ronda de correcciones): `test_video.py` pasa de las 12 que deja la
+  tarea 1 del plan 1 a **18** (+6: 3 rápidas —`kind`, `search` y la eñe— y 3 con FFmpeg —los dos
+  `prepare` y el HDR con huecos—), `test_doc.py` llega a **38**, `test_plan.py` suma **+7** a las del
+  plan 1 (**77** en total) y `tests/` se mantiene en **23**. La suite completa de la skill queda en
+  **254** pruebas (2 se saltan sin `python-docx` en el intérprete principal) y el repositorio en
+  **277**. Punto de partida medido hoy en el repositorio, antes de cualquier plan: 15 pruebas en
   `scripts/test_video.py` y 23 en `tests/`.
