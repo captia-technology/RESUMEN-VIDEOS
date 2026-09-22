@@ -290,6 +290,36 @@ class PlanTest(unittest.TestCase):
             common.kind({"streams": [picture, dict(picture, index=3), sound]})
         self.assertEqual([s["index"] for s in common.pictures({"streams": [picture, cover]})], [0])
 
+    TRANSCRIPTION = {"segments": [
+        {"start": 0.0, "end": 3.0, "text": " Buenos días a todos.", "words": [
+            {"start": 0.1, "end": 0.6, "text": " Buenos"}, {"start": 0.6, "end": 1.1, "text": " días"}]},
+        {"start": 3.0, "end": 9.0, "text": " La atmósfera ATEX exige un equipo certificado.", "words": [
+            {"start": 3.1, "end": 3.3, "text": " La"}, {"start": 3.3, "end": 4.0, "text": " atmósfera"},
+            {"start": 4.0, "end": 4.6, "text": " ATEX"}, {"start": 4.6, "end": 5.2, "text": " exige"}]},
+        {"start": 9.0, "end": 12.0, "text": " Sin atex no hay permiso.", "words": []},
+        {"start": 12.0, "end": 15.0, "text": " El ingeniero diseñó la señal.", "words": []}]}
+
+    def test_search_ignores_accents_and_case(self):
+        found = video.find(self.TRANSCRIPTION, "ATEX")
+        self.assertEqual(found["normalizada"], "atex")
+        self.assertEqual([(h["segmento"], h["inicio"]) for h in found["coincidencias"]],
+                         [(1, 4.0), (2, 9.0)])
+        self.assertEqual(video.find(self.TRANSCRIPTION, "ATMÓSFERA")["coincidencias"][0]["inicio"], 3.3)
+        self.assertEqual(video.find(self.TRANSCRIPTION, "atmosfera")["total"], 1)
+        self.assertEqual(video.find(self.TRANSCRIPTION, "zona 0")["total"], 0)
+        self.assertIn("Buenos días", video.find(self.TRANSCRIPTION, "atmosfera")["coincidencias"][0]["contexto"])
+        self.assertEqual(video.find(self.TRANSCRIPTION, "atex", limit=1)["total"], 1)
+        with self.assertRaisesRegex(ValueError, "no vacío"):
+            video.find(self.TRANSCRIPTION, "   ")
+
+    def test_the_tilde_of_the_n_is_part_of_the_letter(self):
+        # strip_accents keeps ñ and Ñ: «diseñó» normalises to «diseño», never to «diseno».
+        self.assertEqual(video.find(self.TRANSCRIPTION, "DISEÑÓ")["normalizada"], "diseño")
+        self.assertEqual(video.find(self.TRANSCRIPTION, "diseño")["total"], 1)
+        self.assertEqual(video.find(self.TRANSCRIPTION, "diseno")["total"], 0)
+        self.assertEqual(video.find(self.TRANSCRIPTION, "señal")["total"], 1)
+        self.assertEqual(video.find(self.TRANSCRIPTION, "senal")["total"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

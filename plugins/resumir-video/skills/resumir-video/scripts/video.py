@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import sys
 
@@ -212,6 +213,61 @@ def show(args):
     print(json.dumps(probe(args.video), ensure_ascii=False, indent=2))
 
 
+SPACES = re.compile(r"\s+")
+
+
+def normal(text):
+    return SPACES.sub(" ", common.strip_accents(text).casefold()).strip()
+
+
+def haystack(segment):
+    """Normalised text of a segment and, per character, the word it belongs to."""
+    words = segment.get("words") or []
+    if not words:
+        text = normal(segment.get("text", ""))
+        return text, [None] * len(text)
+    pieces, owners = [], []
+    for index, word in enumerate(words):
+        piece = normal(word.get("text", ""))
+        if not piece:
+            continue
+        if pieces:
+            pieces.append(" ")
+            owners.append(index)
+        pieces.append(piece)
+        owners.extend([index] * len(piece))
+    return "".join(pieces), owners
+
+
+def find(data, query, context=1, limit=20):
+    needle = normal(query)
+    if not needle:
+        raise ValueError("Indica un texto de búsqueda no vacío.")
+    segments, hits = data.get("segments") or [], []
+    for number, segment in enumerate(segments):
+        text, owners = haystack(segment)
+        words = segment.get("words") or []
+        position = text.find(needle)
+        while position >= 0 and len(hits) < limit:
+            owner = owners[position] if position < len(owners) else None
+            start = words[owner]["start"] if owner is not None and owner < len(words) else segment["start"]
+            around = segments[max(0, number - context):number + context + 1]
+            hits.append({"segmento": number, "inicio": round(float(start), 3),
+                         "fin": round(float(segment["end"]), 3),
+                         "texto": str(segment.get("text", "")).strip(),
+                         "contexto": " ".join(str(s.get("text", "")).strip() for s in around)})
+            position = text.find(needle, position + len(needle))
+    return {"consulta": query, "normalizada": needle, "total": len(hits), "coincidencias": hits}
+
+
+def search(args):
+    path = Path(args.transcription)
+    if not path.is_file():
+        raise ValueError(f"No existe la transcripción: {path}")
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    print(json.dumps(find(data, args.query, args.context, args.max), ensure_ascii=False, indent=2))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="video.py", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -254,6 +310,14 @@ def build_parser():
     p.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
                    help=f"Hilos de CPU (por defecto {DEFAULT_THREADS}).")
     p.set_defaults(run=transcribe)
+    p = sub.add_parser("search", help="Busca en la transcripción sin distinguir tildes ni mayúsculas.")
+    p.add_argument("transcription", help="transcripcion.json de la carpeta de trabajo.")
+    p.add_argument("query", help="Texto buscado; se comparan minúsculas y sin tildes.")
+    p.add_argument("--context", type=int, default=1,
+                   help="Segmentos de contexto a cada lado (por defecto 1).")
+    p.add_argument("--max", type=common.positive, default=20,
+                   help="Coincidencias como máximo (por defecto 20).")
+    p.set_defaults(run=search)
     plan.register(sub)
     render.register(sub)
     return parser
