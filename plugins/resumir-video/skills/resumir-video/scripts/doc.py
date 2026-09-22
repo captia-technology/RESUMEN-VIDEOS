@@ -211,6 +211,60 @@ def indice(context):
     return table(rows)
 
 
+def timeline_row(spans, total, width=WIDTH):
+    """One character per slice of the original: a full block where a cut is kept."""
+    row = ["·"] * width
+    for span in spans:
+        first = min(width - 1, int(span["start"] / total * width))
+        last = min(width - 1, math.ceil(span["end"] / total * width) - 1)
+        for i in range(first, max(first, last) + 1):
+            row[i] = "█"
+    return "".join(row)
+
+
+def timeline_text(spans, total, width=WIDTH):
+    output = sum(span["length"] for span in spans)
+    return "\n".join([
+        f"Línea temporal · original {common.clock(total)} · resumen {common.clock(output)} · "
+        f"cada carácter ≈ {total / width:.0f} s", "", "```text",
+        f"{common.clock(0)} ▕{timeline_row(spans, total, width)}▏ {common.clock(total)}",
+        "█ incluido   · fuera del resumen", "```"])
+
+
+def timeline_png(spans, total, path):
+    """Bar of the original with the kept cuts marked; None when Pillow is missing."""
+    path = Path(path)
+    if path.exists():
+        # A document revision reuses the picture of its version: it never republishes it.
+        return path
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    image = Image.new("RGB", (900, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    inner = 880
+    draw.rectangle([10, 10, 10 + inner - 1, 49], fill=(228, 228, 228))
+    for span in spans:
+        left = 10 + int(span["start"] / total * inner)
+        right = 10 + max(int(span["start"] / total * inner) + 1, int(span["end"] / total * inner))
+        draw.rectangle([left, 10, min(right, 10 + inner) - 1, 49], fill=(40, 90, 160))
+    staged = path.with_name(f"{path.name}.parcial")
+    image.save(staged, "PNG")
+    staged.replace(path)
+    return path
+
+
+def timeline(context):
+    text = timeline_text(context["spans"], context["total"])
+    picture = timeline_png(context["spans"], context["total"], Path(context["out"]) / "timeline.png")
+    if picture is None:
+        context["avisos"].append("Sin Pillow: el timeline se entrega solo en texto "
+                                 "(instálalo con `python -m pip install pillow`).")
+        return text
+    return f"{text}\n\n![Línea temporal del resumen](timeline.png)"
+
+
 def validacion(context):
     path = Path(context["out"]) / "validacion.json"
     if not path.is_file():
@@ -239,4 +293,5 @@ def validacion(context):
 def block(name, number, context):
     if context["spans"] is None and name in VIDEO_ONLY:
         raise ValueError(f"Línea {number}: la marca [[{name}]] no existe en modo audio.")
-    return {"ficha": ficha, "indice": indice, "validacion": validacion}[name](context)
+    return {"ficha": ficha, "indice": indice, "timeline": timeline,
+            "validacion": validacion}[name](context)

@@ -119,6 +119,40 @@ class BlockTest(unittest.TestCase):
                 doc.expand(f"[[{name}]]\n", context(spans=None))
 
 
+class TimelineTest(unittest.TestCase):
+    def test_text_row_marks_the_kept_stretches(self):
+        spans = doc.placements(SEGMENTS, 1.25, 25.0)
+        row = doc.timeline_row(spans, 96.0, 48)
+        self.assertEqual(len(row), 48)
+        self.assertEqual([i for i, c in enumerate(row) if c == "█"], [5, 6, 7, 8, 9, 15, 16, 17])
+
+    def test_text_timeline_states_both_durations(self):
+        spans = doc.placements(SEGMENTS, 1.25, 25.0)
+        text = doc.timeline_text(spans, 96.0)
+        self.assertIn("original 1:36", text)
+        self.assertIn("resumen 0:09", text)
+        self.assertIn("0:00 ▕", text)
+        self.assertIn("▏ 1:36", text)
+
+    def test_png_is_written_when_pillow_exists_and_never_twice(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            data = context()
+            data["out"] = Path(temporary)
+            text = doc.expand("[[timeline]]\n", data)
+            picture = Path(temporary) / "timeline.png"
+            try:
+                import PIL  # noqa: F401
+            except ImportError:
+                self.assertNotIn("![", text)
+                self.assertTrue(any("Pillow" in aviso for aviso in data["avisos"]))
+                return
+            self.assertIn("![Línea temporal del resumen](timeline.png)", text)
+            self.assertTrue(picture.is_file())
+            before = picture.read_bytes()
+            doc.expand("[[timeline]]\n", data)
+            self.assertEqual(picture.read_bytes(), before)
+
+
 class MarkTest(unittest.TestCase):
     def test_time_marks_report_the_output_or_its_absence(self):
         self.assertEqual(doc.expand("Ver [[t=11.0]] y [[t=25.0]].\n", context()),
