@@ -43,6 +43,22 @@ def gray_signature(path):
                            "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
 
 
+def marked(path, seconds):
+    """Source whose luminance encodes its own instant: lum = 5 * floor(t), encoded losslessly."""
+    video.ffmpeg("-f", "lavfi", "-i", f"color=c=black:s=320x180:r=25:d={seconds}",
+                 "-vf", "geq=lum='clip(5*floor(T),0,255)':cb=128:cr=128",
+                 "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p", path)
+
+
+def gray_at(path, time):
+    """64x64 gray bytes of the frame on screen at `time`, extracted on its own (0.1.0 method)."""
+    return subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0.0, time - 3):.6f}",
+                           "-noaccurate_seek", "-copyts", "-i", str(path), "-frames:v", "1",
+                           "-vf", f"fps=1000:start_time={time:.6f},scale=64:64,format=gray",
+                           "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                          capture_output=True, check=True).stdout
+
+
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
 class VideoTest(unittest.TestCase):
     def test_extract_edit_and_protect_source(self):
@@ -194,6 +210,69 @@ class VideoTest(unittest.TestCase):
                            ok=False).stderr
             self.assertIn("no tiene pista de audio", error)
             self.assertFalse((root / "t-mudo").exists())
+
+    def test_the_sweep_index_holds_the_frame_on_screen(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "marcada.mp4"
+            marked(source, 50)
+            data = video.probe(source)
+            stream = video.video_stream(data)
+            folder = root / "fotogramas" / "b00000"
+            folder.mkdir(parents=True)
+            index = video.sweep_block(data, stream, folder, 0.0, 50.0, 15.0, 1280)
+            self.assertEqual([f["time"] for f in index["frames"]], [0.0, 15.0, 30.0, 45.0])
+            raw = (folder / "indice.gray").read_bytes()
+            self.assertEqual(len(raw), 4 * video.INDEX_SIDE ** 2)
+            for number, instant in enumerate((0.0, 15.0, 30.0, 45.0)):
+                with self.subTest(instant=instant):
+                    self.assertEqual(raw[number * 4096:(number + 1) * 4096], gray_at(source, instant))
+            self.assertEqual(len(list(folder.glob("hoja-*.jpg"))), 1)
+            detail = root / "fotogramas" / "detalle"
+            detail.mkdir()
+            video.sweep_block(data, stream, detail, 30.0, 30.2, 0.04, 0)
+            self.assertEqual(len(list(detail.glob("frame-*.jpg"))), 5)
+            self.assertEqual(video.probe(detail / "frame-0000.jpg")["streams"][0]["width"], 320)
+            # S = max(0, 30 - 3) = 27 > 0: con -copyts los intervalos siguen en tiempo absoluto del
+            # contenedor, no relativos a S (conversion de intervalos de §13; desviacion en D-009).
+            first = (detail / "indice.gray").read_bytes()[:4096]
+            self.assertEqual(first, gray_at(source, 30.0))
+            self.assertNotEqual(first, gray_at(source, 27.0))
+
+    def test_a_rounded_rate_or_the_default_rounding_take_another_frame(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "marcada.mp4"
+            marked(source, 50)
+            reference = gray_at(source, 15.0)
+            for chain in (f"fps={1 / 15:.6f}:start_time=0.000000:round=up",
+                          "fps=1/15.000000:start_time=0.000000"):
+                with self.subTest(chain=chain):
+                    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", "0", "-noaccurate_seek",
+                                          "-copyts", "-i", str(source), "-filter_complex",
+                                          f"[0:v]{chain},scale=64:64,format=gray[g]",
+                                          "-map", "[g]", "-frames:v", "2", "-f", "rawvideo",
+                                          "-pix_fmt", "gray", "-"],
+                                         capture_output=True, check=True).stdout
+                    self.assertNotEqual(raw[4096:8192], reference)
+
+    def test_the_sweep_keeps_held_frames_of_variable_rate_recordings(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "pantalla.mp4"
+            # 25 fps until 2 s, then one frame held until 8 s (a static slide), then 25 fps again.
+            video.ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=10",
+                         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=10",
+                         "-vf", r"select='lt(t\,2)+eq(n\,50)+gte(t\,8)'", "-fps_mode", "vfr",
+                         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", source)
+            data = video.probe(source)
+            folder = root / "b00002"
+            folder.mkdir()
+            video.sweep_block(data, video.video_stream(data), folder, 2.0, 11.0, 3.0, 1280)
+            raw = (folder / "indice.gray").read_bytes()
+            held, inside, after = (raw[i * 4096:(i + 1) * 4096] for i in range(3))
+            self.assertEqual(held, inside)
+            self.assertNotEqual(inside, after)
 
     def test_hdr_is_refused_and_pts_gaps_are_recorded(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:

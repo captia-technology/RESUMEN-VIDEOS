@@ -168,6 +168,40 @@ def sweep_blocks(start, end, step, *, length=BLOCK):
     return blocks
 
 
+def sweep_block(data, stream, folder, a, b, step, width, *, threads=1):
+    """One FFmpeg process per block: JPEG views, gray index and contact sheets."""
+    count = frame_count(a, b, step)
+    base, margin = timeline_start(data), seek_margin(data)
+    scale = f"scale=w='min({width},iw)':h=-2" if width else "null"
+    # The rate has to stay an exact ratio and the rounding has to be `up`: 1/15 written as 0.066667
+    # shifts the grid, and the default rounding returns the last frame of each bucket, about half a
+    # step later. Both were measured against a source whose luminance encodes its own instant.
+    graph = (f"[0:{stream['index']}]fps=1/{seconds(step)}:"
+             f"start_time={seconds(base + a)}:round=up,split=3[j][g][t];"
+             f"[j]{scale}[jo];"
+             f"[g]scale={INDEX_SIDE}:{INDEX_SIDE},format=gray[go];"
+             f"[t]scale={SHEET_WIDTH}:-2,tile={SHEET}x{SHEET}:padding=2:margin=2[to]")
+    # No -t and no -to: with -copyts both cut the block short. The frame counts bound the work.
+    ffmpeg("-threads", threads, "-ss", seconds(max(0.0, a - margin)),
+           "-noaccurate_seek", "-copyts", "-i", data["source"]["path"],
+           "-filter_complex", graph,
+           "-map", "[jo]", "-frames:v", count, "-q:v", "2", "-start_number", "0",
+           folder / "frame-%04d.jpg",
+           "-map", "[go]", "-frames:v", count, "-f", "rawvideo", "-pix_fmt", "gray",
+           folder / "indice.gray",
+           "-map", "[to]", "-frames:v", sheet_count(count), "-q:v", "3", "-start_number", "0",
+           folder / "hoja-%03d.jpg")
+    images = sorted(folder.glob("frame-*.jpg"))
+    index = folder / "indice.gray"
+    # FFmpeg exits 0 when an instant falls past the last frame, so the count is checked here.
+    if len(images) != count or index.stat().st_size != count * INDEX_SIDE * INDEX_SIDE:
+        raise ValueError(f"El bloque {a:.3f}-{b:.3f} s produjo {len(images)} de {count} imágenes; "
+                         "ajusta el intervalo al final real de la pista de vídeo.")
+    return {"start": a, "end": b, "step": step,
+            "frames": [{"time": round(a + i * step, 6), "file": image.name}
+                       for i, image in enumerate(images)]}
+
+
 def clear_partial(folder):
     """A block with a valid index.json is kept; anything else is set aside so it can be redone."""
     folder = Path(folder)
