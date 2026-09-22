@@ -54,6 +54,71 @@ class MapTest(unittest.TestCase):
             doc.placements([{"id": 7}], 1.25, 25.0)
 
 
+class BlockTest(unittest.TestCase):
+    def test_ficha_describes_the_medium_and_the_techniques(self):
+        text = doc.expand("[[ficha]]\n", context())
+        self.assertIn("| Archivo | grabación.mp4 |", text)
+        self.assertIn("| Duración original | 1:36 |", text)
+        self.assertIn("| Duración del resumen | 0:09 (10,0 % del original) |", text)
+        self.assertIn("| Técnicas | 2 cortes · pausas eliminadas · velocidad ×1,25 |", text)
+        self.assertIn("| Versión | v1 ·", text)
+
+    def test_ficha_in_audio_mode_counts_ideas_and_questions(self):
+        data = context(spans=None)
+        data["schema"] = {"ideas": [{"id": 1}, {"id": 2}], "questions": [{"id": 1}]}
+        text = doc.expand("[[ficha]]\n", data)
+        self.assertIn("| Ideas clave | 2 ideas |", text)
+        self.assertIn("| Preguntas | 1 pregunta |", text)
+        self.assertNotIn("Técnicas", text)
+
+    def test_indice_lists_source_and_output_times(self):
+        text = doc.expand("[[indice]]\n", context())
+        self.assertIn("| # | Origen | Salida | Tema |", text)
+        self.assertIn("| 1 | 0:10–0:20 | 0:00–0:06 | Requisito y excepción |", text)
+        self.assertIn("| 2 | 0:30–0:36 | 0:06–0:09 | Zona ATEX |", text)
+
+    def test_validacion_reads_the_report_or_declares_its_absence(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            out = Path(temporary)
+            data = context()
+            data["out"] = out
+            text = doc.expand("[[validacion]]\n", data)
+            self.assertIn("no disponible", text)
+            self.assertEqual(len(data["avisos"]), 1)
+            (out / "validacion.json").write_text(json.dumps(
+                {"fotogramas_esperados": 240, "fotogramas": 240, "video_s": 9.6, "audio_s": 9.58,
+                 "desfase_s": 0.021,
+                 "colocacion": [{"corte": 1, "titulo": "A", "salida_s": [0.0, 6.4],
+                                 "imagen": [{"punto": "inicio", "distancia": 0.031}],
+                                 # `bloques: 0` is a degenerate window (never measured): its
+                                 # desfase_ms of 0 must not count as a perfect measurement.
+                                 "envolvente": [{"punto": "inicio", "bloques": 86, "desfase_ms": 20,
+                                                 "correlacion": 0.97},
+                                                {"punto": "fin", "bloques": 0, "desfase_ms": 0,
+                                                 "correlacion": None}]},
+                                {"corte": 2, "titulo": "B", "salida_s": [6.4, 9.6],
+                                 "imagen": [{"punto": "inicio", "distancia": 0.11}],
+                                 "envolvente": [{"punto": "inicio", "bloques": 100, "desfase_ms": -40,
+                                                 "correlacion": None}]}],
+                 "marcas": ["corte 2 (inicio): imagen a 0,1100"], "uniones": [160]}),
+                encoding="utf-8")
+            data = context()
+            data["out"] = out
+            text = doc.expand("[[validacion]]\n", data)
+            self.assertIn("| Fotogramas | 240 de 240 esperados |", text)
+            self.assertIn("| Desfase vídeo/audio | 0,021 s |", text)
+            self.assertIn("| Colocación de los cortes | 2 cortes comprobados · imagen máx. 0,110 · "
+                          "envolvente máx. 40 ms |", text)
+            self.assertIn("| Ventanas marcadas | 1 ventana |", text)
+            self.assertIn("| Hojas de uniones | 1 unión |", text)
+            self.assertEqual(data["avisos"], [])
+
+    def test_video_only_blocks_are_refused_in_audio_mode(self):
+        for name in ("indice", "timeline", "validacion"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "no existe en modo audio"):
+                doc.expand(f"[[{name}]]\n", context(spans=None))
+
+
 class MarkTest(unittest.TestCase):
     def test_time_marks_report_the_output_or_its_absence(self):
         self.assertEqual(doc.expand("Ver [[t=11.0]] y [[t=25.0]].\n", context()),

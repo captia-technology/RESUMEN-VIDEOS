@@ -140,7 +140,103 @@ def expand(text, context):
                      for number, line in enumerate(lines, start=1)) + "\n"
 
 
+def table(rows):
+    """Markdown table from a list of rows; the first one is the header."""
+    head = f"| {' | '.join(str(c) for c in rows[0])} |"
+    rule = f"| {' | '.join('---' for _ in rows[0])} |"
+    body = [f"| {' | '.join(str(c) for c in row)} |" for row in rows[1:]]
+    return "\n".join([head, rule] + body)
+
+
+def percent(part, whole):
+    return f"{100 * part / whole:.1f}".replace(".", ",") + " %"
+
+
+def count(number, singular, plural):
+    return f"{number} {singular if number == 1 else plural}"
+
+
+def read_json(path):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"Falta {path.name} en {path.parent}.")
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def transcriber(work):
+    """How the audio evidence was obtained, for the document's data sheet."""
+    path = Path(work) / "transcripcion.json"
+    if not path.is_file():
+        return "sin transcripción"
+    data = read_json(path)
+    settings = data.get("settings") or {}
+    name = settings.get("model") or settings.get("origen") or "subtítulos del medio"
+    return f"{name} ({data.get('language') or 'idioma sin declarar'})"
+
+
+def ficha(context):
+    name = Path(context["metadata"]["source"]["path"]).name
+    stamp = datetime.date.today().isoformat()
+    if context["spans"] is None:
+        schema = context["schema"] or {"ideas": [], "questions": []}
+        return table([["Campo", "Valor"], ["Archivo", name],
+                      ["Duración", common.clock(context["total"])],
+                      ["Ideas clave", count(len(schema["ideas"]), "idea", "ideas")],
+                      ["Preguntas", count(len(schema["questions"]), "pregunta", "preguntas")],
+                      ["Transcripción", context["transcriber"]],
+                      ["Versión", f"v{context['version']} · {stamp}"]])
+    output = sum(span["length"] for span in context["spans"])
+    # `remove_pauses` is the published setting; more than one stretch proves it on a hand-written plan.
+    setting = context["settings"].get("remove_pauses")
+    removed = any(len(span["stretches"]) > 1 for span in context["spans"])
+    pauses = "pausas eliminadas" if (removed if setting is None else setting) else "pausas conservadas"
+    speed = f"×{context['speed']:g}".replace(".", ",")
+    return table([["Campo", "Valor"], ["Archivo", name],
+                  ["Duración original", common.clock(context["total"])],
+                  ["Duración del resumen",
+                   f"{common.clock(output)} ({percent(output, context['total'])} del original)"],
+                  ["Técnicas",
+                   f"{count(len(context['spans']), 'corte', 'cortes')} · {pauses} · velocidad {speed}"],
+                  ["Transcripción", context["transcriber"]],
+                  ["Versión", f"v{context['version']} · {stamp}"]])
+
+
+def indice(context):
+    rows = [["#", "Origen", "Salida", "Tema"]]
+    for span in context["spans"]:
+        title = str(span["title"]).replace("|", "\\|").replace("\n", " ")
+        rows.append([span["id"], f"{common.clock(span['start'])}–{common.clock(span['end'])}",
+                     f"{common.clock(span['offset'])}–"
+                     f"{common.clock(span['offset'] + span['length'])}", title])
+    return table(rows)
+
+
+def validacion(context):
+    path = Path(context["out"]) / "validacion.json"
+    if not path.is_file():
+        context["avisos"].append("Sin informe de validación en la carpeta de la versión: el documento "
+                                 "declara la comprobación técnica como no realizada.")
+        return ("Informe de validación no disponible: la carpeta de la versión no incluye "
+                "`validacion.json`.")
+    data = read_json(path)
+    places = data.get("colocacion") or []
+    distances = [row["distancia"] for place in places for row in place.get("imagen") or []]
+    lags = [abs(row["desfase_ms"]) for place in places for row in place.get("envolvente") or []
+            if row.get("bloques", 0) != 0]
+    drift = f"{float(data.get('desfase_s', 0)):.3f}".replace(".", ",")
+    image = f"{max(distances, default=0.0):.3f}".replace(".", ",")
+    return table([["Comprobación", "Resultado"],
+                  ["Fotogramas", f"{data.get('fotogramas', '?')} de "
+                                 f"{data.get('fotogramas_esperados', '?')} esperados"],
+                  ["Desfase vídeo/audio", f"{drift} s"],
+                  ["Colocación de los cortes",
+                   f"{count(len(places), 'corte comprobado', 'cortes comprobados')} · "
+                   f"imagen máx. {image} · envolvente máx. {max(lags, default=0):.0f} ms"],
+                  ["Ventanas marcadas", count(len(data.get("marcas") or []), "ventana", "ventanas")],
+                  ["Hojas de uniones", count(len(data.get("uniones") or []), "unión", "uniones")]])
+
+
 def block(name, number, context):
     if context["spans"] is None and name in VIDEO_ONLY:
         raise ValueError(f"Línea {number}: la marca [[{name}]] no existe en modo audio.")
-    raise ValueError(f"Línea {number}: la marca [[{name}]] aún no está disponible.")
+    return {"ficha": ficha, "indice": indice, "validacion": validacion}[name](context)
