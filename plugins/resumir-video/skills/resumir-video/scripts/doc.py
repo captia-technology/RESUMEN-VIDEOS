@@ -407,6 +407,7 @@ def record_revision(out, number, reason, phrase, source):
 
 
 def publish_document(text, out, name, base, skip_docx):
+    """Publish the Markdown, then try the DOCX; a converter crash never undoes the Markdown."""
     markdown, staged = Path(out) / f"{name}.md", Path(out) / f"{name}.md.parcial"
     staged.write_text(text, encoding="utf-8")
     try:
@@ -416,8 +417,13 @@ def publish_document(text, out, name, base, skip_docx):
         staged.unlink(missing_ok=True)
         raise
     if skip_docx:
-        return markdown, None
-    return markdown, to_docx(markdown, Path(out) / f"{name}.docx", base)
+        return markdown, None, None
+    try:
+        return markdown, to_docx(markdown, Path(out) / f"{name}.docx", base), None
+    except Exception as exc:
+        # The Markdown above is already published and immutable at this name; a Pandoc crash or a
+        # broken python-docx render must not cost the caller its revision record and history event.
+        return markdown, None, f"Fallo al generar el DOCX ({exc}): la entrega es solo Markdown."
 
 
 def report_of(args):
@@ -437,12 +443,13 @@ def report_of(args):
     text = expand(source.read_text(encoding="utf-8-sig"), context)
     revision = next_revision(out) if args.revision else None
     name = "resumen" if revision is None else f"resumen-r{revision}"
-    markdown, used = publish_document(text, out, name, out, args.no_docx)
+    markdown, used, docx_error = publish_document(text, out, name, out, args.no_docx)
     if revision is not None:
         record_revision(out, revision, args.revision, args.accept, source)
     if used is None and not args.no_docx:
-        context["avisos"].append("Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala "
-                                 "Pandoc (pandoc.org) o ejecuta `python -m pip install python-docx`.")
+        context["avisos"].append(docx_error or (
+            "Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala Pandoc (pandoc.org) "
+            "o ejecuta `python -m pip install python-docx`."))
     # `doc` on every publication; `deliver` belongs to the final handover, not to this subcommand.
     common.history(work, "doc", {"version": number, "revision": revision, "motor": used,
                                  "archivo": markdown.name, "kind": metadata.get("kind")})

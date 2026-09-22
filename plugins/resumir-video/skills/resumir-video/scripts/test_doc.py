@@ -333,6 +333,57 @@ class DocumentTest(unittest.TestCase):
                                             source=work / "documento-v1-r2.md",
                                             revision="cambia algo"))
 
+    def test_a_docx_failure_after_the_markdown_is_published_still_records_the_revision(self):
+        # A published .md is immutable and irreplaceable at that name: a later DOCX crash must
+        # never cost the revision its row in revisiones.json or its event in historial.jsonl.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            doc.report_of(doc.arguments(work=work, version=1))
+            (work / "documento-v1-r2.md").write_text(
+                "# Resumen\n\nCorrige la cifra: son 12 equipos.\n", encoding="utf-8")
+            with mock.patch.object(doc, "to_docx", side_effect=RuntimeError("pandoc se cayó")):
+                report = doc.report_of(doc.arguments(
+                    work=work, version=1, source=work / "documento-v1-r2.md",
+                    revision="corrige la cifra de equipos", accept="la cifra correcta es 12"))
+            self.assertEqual(report["revision"], 2)
+            self.assertIsNone(report["motor"])
+            self.assertIsNone(report["docx"])
+            self.assertTrue(any("DOCX" in aviso for aviso in report["avisos"]))
+            self.assertTrue((work / "v1/resumen-r2.md").is_file())
+            rows = json.loads((work / "v1/revisiones.json").read_text(encoding="utf-8"))
+            self.assertEqual(rows[0]["revision"], 2)
+            self.assertEqual(rows[0]["frase"], "la cifra correcta es 12")
+            events = [json.loads(line)["evento"] for line
+                      in (work / "historial.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(events, ["doc", "doc"])
+
+
+class RevisionTest(unittest.TestCase):
+    def test_next_revision_never_hands_out_the_same_number_twice(self):
+        # A plain glob() + max() cannot see its own sibling call's choice until something is
+        # published under that name; the exclusive reservation must, so two calls from the very
+        # same state never collide.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            out = work / "v1"
+            first = doc.next_revision(out)
+            second = doc.next_revision(out)
+            self.assertNotEqual(first, second)
+
+    def test_record_revision_stages_the_index_before_replacing_it(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            out = work / "v1"
+            source = work / "documento-v1-r2.md"
+            source.write_text("# Resumen\n", encoding="utf-8")
+            with mock.patch.object(doc.os, "replace", wraps=doc.os.replace) as replace:
+                doc.record_revision(out, 2, "motivo", "la frase", source)
+            self.assertEqual(replace.call_count, 1)
+            staged, final = replace.call_args[0]
+            self.assertEqual(Path(staged).name, "revisiones.json.parcial")
+            self.assertEqual(Path(final).name, "revisiones.json")
+            self.assertFalse(list(out.glob("revisiones.json.parcial")))
+
 
 if __name__ == "__main__":
     unittest.main()
