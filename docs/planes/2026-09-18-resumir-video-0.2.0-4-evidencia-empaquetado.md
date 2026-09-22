@@ -7,7 +7,7 @@
 **Goal:** reescribir la extracción de evidencia (`frames` secuencial por bloques con índice gris y
 hojas de contacto; `transcribe` por bloques reanudables con recuperación de huecos, dispositivo
 automático y presupuesto; normalización de subtítulos) y cerrar la 0.2.0 publicándola: `SKILL.md`,
-las cuatro referencias, la versión en sus ocho lugares, el CHANGELOG, la documentación del
+las cuatro referencias, la versión en sus nueve lugares, el CHANGELOG, la documentación del
 repositorio, las decisiones D-006…D-011 y los validadores.
 
 **Architecture:** `frames` y `transcribe` dejan de trabajar elemento a elemento. El barrido pasa a
@@ -166,7 +166,8 @@ Tres detalles medidos, y los tres son necesarios:
 Más comprobaciones de esa receta:
 
 - **Coste.** 50 vistas de la misma fuente: **0,68 s** con el barrido en un proceso frente a **21,1 s**
-  con las 50 búsquedas independientes de la 0.1.0.
+  con las 50 búsquedas independientes de la 0.1.0. Cifras orientativas del orden de magnitud (el
+  barrido es notablemente más rápido), no un umbral exacto a verificar en CI.
 - **Hojas de contacto.** 60 imágenes → 3 hojas (25 + 25 + 10); la última, parcial, sí se emite, con
   las celdas sobrantes en negro (inspeccionada visualmente).
 - **Índice gris.** `indice.gray` mide exactamente `N × 64 × 64` bytes; cada bloque de 4096 bytes es
@@ -205,9 +206,9 @@ ffmpeg -hide_banner -loglevel error -nostdin -n -ss {a} -t {b-a} -i TRABAJO/audi
   el informe deja `memory_free_gb` en `null` en vez de fallar.
 - El analizador de subtítulos del plan reconoce SRT con BOM, milisegundos de dos dígitos y etiquetas
   `<i>`, y WebVTT con `NOTE`, identificador de cue y ajustes tras los tiempos (`align:start`).
-- Línea base del repositorio antes de tocar nada: **15 pruebas** en la skill (79,7 s con FFmpeg) y
+- Línea base del repositorio antes de tocar nada: **254 pruebas** en la skill (≈205 s con FFmpeg) y
   **23 pruebas** en `tests/`, todas en verde; `claude plugin validate plugins/resumir-video --strict`
-  pasa.
+  pasa. Cifra confirmada por ejecución real en el escaneo previo del repositorio.
 
 ---
 
@@ -261,10 +262,10 @@ Esperado: `ERROR` con `AttributeError: module 'video' has no attribute 'sweep_bl
 
 - [ ] **Paso 3: Implementar las constantes y las tres funciones de planificación**
 
-En `scripts/video.py`, junto a las constantes del módulo, sustituye `MAX_FRAMES = 600` por:
+En `scripts/video.py`, añade, junto a las importaciones (sin redeclarar `MAX_FRAMES`, ya importado de
+`common`), estas constantes nuevas:
 
 ```python
-MAX_FRAMES = 600
 BLOCK = 600.0
 SHEET = 5
 SHEET_WIDTH = 160
@@ -329,6 +330,11 @@ Añade a `SweepTest`:
             self.assertIsNone(video.clear_partial(half))
             self.assertTrue((root / "b00600.parcial-2").is_dir())
             self.assertIsNone(video.clear_partial(root / "b01200"))
+            broken = root / "b01800"
+            broken.mkdir()
+            (broken / "index.json").write_text('{"start": 1800.0,', encoding="utf-8")  # truncado
+            self.assertIsNone(video.clear_partial(broken))
+            self.assertTrue((root / "b01800.parcial").is_dir())
 ```
 
 - [ ] **Paso 6: Ejecutar la prueba y comprobar que falla**
@@ -343,12 +349,17 @@ Esperado: `ERROR` con `AttributeError: module 'video' has no attribute 'clear_pa
 
 ```python
 def clear_partial(folder):
-    """A block with index.json is kept; an unfinished one is set aside so it can be redone."""
+    """A block with a valid index.json is kept; anything else is set aside so it can be redone."""
     folder = Path(folder)
     if not folder.is_dir():
         return None
-    if (folder / "index.json").is_file():
-        return folder
+    marker = folder / "index.json"
+    if marker.is_file():
+        try:
+            json.loads(marker.read_text(encoding="utf-8"))
+            return folder
+        except (OSError, ValueError):
+            pass  # truncated or corrupt: treat as unfinished, fall through to reset
     # Nothing is deleted: the images already taken stay available to the agent.
     spare, number = folder.with_name(f"{folder.name}.parcial"), 1
     while spare.exists():
@@ -384,7 +395,7 @@ git commit -m "feat(frames): planifica el barrido por bloques y reanuda los inco
 - Probar: `plugins/resumir-video/skills/resumir-video/scripts/test_video.py`
 
 **Interfaces:**
-- Consumes: `video.sweep_blocks`, `video.sheet_count`, `video.INDEX_SIDE`, `video.SHEET`,
+- Consumes: `video.sheet_count`, `video.INDEX_SIDE`, `video.SHEET`,
   `video.SHEET_WIDTH` (tarea 1); `common.ffmpeg`, `common.frame_count`, `common.seconds`,
   `common.seek_margin`, `common.timeline_start`, `common.video_stream` (plan 1).
 - Produces: `video.sweep_block(data, stream, folder, a, b, step, width, *, threads=1) -> dict`, que
@@ -576,11 +587,15 @@ git commit -m "feat(frames): barre cada bloque en una pasada con índice gris y 
   subcomando `probe` desde el plan 1; `common.duration`, `common.new_dir`,
   `common.probe`, `common.save`, `common.stream_end`, `common.video_stream`, `common.positive` y
   `common.kind` (planes 1 y 3).
-- Produces: `video.frames(args) -> int` (0 o 3) y el subparser
+- Produces: `video.frames(args) -> int` (0, 2 o 3) y el subparser
   `frames` con `--out`, `--start`, `--end`, `--step`, `--width`, `--block` y `--threads`. Escribe
   `<--out>/bSSSSS/{frame-NNNN.jpg, indice.gray, hoja-NNN.jpg, index.json}`. Con bloques pendientes
   imprime `{"done", "total", "pending", "bloques"}` en stdout —`pending` entero, `bloques` la lista
-  de carpetas que faltan— y devuelve 3.
+  de carpetas que faltan—, un aviso en stderr y devuelve 3. También produce
+  `video.Refused(ValueError)`, la excepción que `frames` lanza para cada argumento inválido (medio
+  de solo audio, intervalo/paso/anchura/bloque, bloque que supera `MAX_FRAMES` imágenes,
+  espacio insuficiente) y que `main` traduce al código 2 de §12; las tareas 5 y 6 la reutilizan por
+  nombre para `transcribe`/`import_subtitles` sin volver a definirla.
 
 - [ ] **Paso 1: Escribir la prueba que falla**
 
@@ -626,32 +641,39 @@ Esperado: `SystemExit: 2` con `unrecognized arguments: --block` (el subparser to
 Sustituye entera la función `frames` de `scripts/video.py` por:
 
 ```python
+class Refused(ValueError):
+    """Invalid arguments the caller must fix for `frames`: exit code 2, not the generic 1 of a
+    controlled error."""
+
+
 def frames(args):
     """Sequential sweep by blocks: one FFmpeg process each, resumable and bounded per call."""
     data = probe(args.video)
     if common.kind(data) != "video":
-        raise ValueError("El barrido necesita una pista de vídeo; este medio es de solo audio.")
+        raise Refused("El barrido necesita una pista de vídeo; este medio es de solo audio.")
     stream = video_stream(data)
     total = min(duration(data), stream_end(data, stream))
     end = total if args.end is None else args.end
     if not all(math.isfinite(x) for x in (args.start, end, args.step, args.block)):
-        raise ValueError("Tiempos no finitos.")
+        raise Refused("Tiempos no finitos.")
     if not 0 <= args.start < end <= total or args.step <= 0 or args.width < 0 or args.block <= 0:
-        raise ValueError("Intervalo, paso, anchura o bloque no válidos "
-                         f"(la pista de vídeo llega a {total:.3f} s).")
+        raise Refused("Intervalo, paso, anchura o bloque no válidos "
+                      f"(la pista de vídeo llega a {total:.3f} s).")
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     plan = sweep_blocks(args.start, end, args.step, length=args.block)
     todo = [row for row in plan if clear_partial(out / block_name(row[0])) is None]
     if todo and max(count for _, _, count in todo) > MAX_FRAMES:
-        raise ValueError(f"Un bloque supera las {MAX_FRAMES} imágenes por llamada; "
-                         "reduce --block o aumenta --step.")
+        # El mensaje instruye a corregir --block/--step: es la misma categoría "bloque" que las
+        # demás guardas de argumentos de esta función, así que también da código 2, no el 1 genérico.
+        raise Refused(f"Un bloque supera las {MAX_FRAMES} imágenes por llamada; "
+                      "reduce --block o aumenta --step.")
     needed = 2 * space_needed(sum(count for _, _, count in todo))
     free = shutil.disk_usage(out).free
     if free < needed:
-        raise ValueError(f"Espacio insuficiente para el barrido: hacen falta unos {needed / 1e9:.1f} "
-                         f"GB y hay {free / 1e9:.1f} GB libres; reduce el intervalo o trabaja en "
-                         "otra unidad.")
+        raise Refused(f"Espacio insuficiente para el barrido: hacen falta unos {needed / 1e9:.1f} "
+                      f"GB y hay {free / 1e9:.1f} GB libres; reduce el intervalo o trabaja en "
+                      "otra unidad.")
     done = sum(count for _, _, count in plan) - sum(count for _, _, count in todo)
     remaining = []
     for a, b, count in todo:
@@ -665,8 +687,12 @@ def frames(args):
         print(f"Bloque {block_name(a)} ({a:.3f}-{b:.3f} s): {count} imágenes", flush=True)
     if remaining:
         # `pending` cuenta; `bloques` nombra. La forma del código 3 es la misma en toda la skill.
+        # A diferencia del código 3 de `render` (que cuenta solo lo que esa llamada monta), aquí
+        # `done`/`total` son acumulados de todo el intervalo pedido: es el criterio natural para
+        # un barrido reanudable sobre un rango fijo.
         print(json.dumps({"done": done, "total": sum(count for _, _, count in plan),
                           "pending": len(remaining), "bloques": remaining}, ensure_ascii=False))
+        print("Error: presupuesto agotado; repite la misma orden para continuar.", file=sys.stderr)
         return 3
     print(out)
     return 0
@@ -712,10 +738,50 @@ sustitúyelo por:
         return args.run(args) or 0
 ```
 
-Las dos guardas anteriores de `main` no cambian, porque solo **leen** `args.command`: `check` se
-ejecuta antes de comprobar la versión de Python, y los subcomandos que decodifican siguen exigiendo
-`ffmpeg` y `ffprobe` en PATH. Tras esta tarea, `main` no vuelve a nombrar ningún subcomando para
+La primera guarda de `main` no cambia, porque solo **lee** `args.command`: `check` se ejecuta antes de
+comprobar la versión de Python. Tras esta tarea, `main` no vuelve a nombrar ningún subcomando para
 llamarlo.
+
+`main` cambia en dos puntos. El primero es la guarda que exige `ffmpeg`/`ffprobe` en PATH: la
+transcripción reescrita (tarea 5) también decodifica con FFmpeg para cortar cada bloque de audio, así
+que la tupla de subcomandos que la disparan gana `"transcribe"`. Sustituye
+
+```python
+        if args.command in ("probe", "prepare", "frames"):
+```
+
+por
+
+```python
+        if args.command in ("probe", "prepare", "frames", "transcribe"):
+```
+
+El segundo cambio es el bloque `try`/`except`, que gana una rama nueva para `Refused`, colocada
+**antes** de la captura genérica existente, porque `Refused` es subclase de `ValueError` y Python
+prueba las ramas en orden — si quedara después, nunca se alcanzaría. Sustituye
+
+```python
+    except (ValueError, OSError, KeyError, RuntimeError, AttributeError, TypeError,
+            IndexError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+```
+
+por
+
+```python
+    except Refused as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, OSError, KeyError, RuntimeError, AttributeError, TypeError,
+            IndexError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+```
+
+Con esto, `video.Refused` —lanzada por `frames` en esta tarea y reutilizada por `transcribe`/
+`import_subtitles` en las tareas 5 y 6— sale con el código 2 de §12 en vez de caer en el 1 genérico;
+cualquier otro `ValueError` que no sea `Refused` sigue devolviendo 1 exactamente como hasta ahora.
 
 - [ ] **Paso 5: Ejecutar la prueba y comprobar que pasa**
 
@@ -757,6 +823,22 @@ de las imágenes de `root / "imagenes"` a `root / "imagenes" / "b00002"` y `root
 
 En `test_frame_count_excludes_end` y en la comprobación de `frames` de `references/operacion.md` no
 hay nada que tocar: `frame_count` no cambia.
+
+Añade también a `VideoTest` una prueba que ejerza, con la CLI real, el código de salida 2 que exige
+§12 para «audio donde se espera vídeo» —hoy ninguna prueba de la skill ejerce este caso de punta a
+punta—:
+
+```python
+    def test_frames_refuses_audio_only_media_with_exit_code_two(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "solo-audio.m4a"
+            video.ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+                         "-c:a", "aac", source)
+            result = invoke(self, "frames", source, "--out", root / "fotogramas", ok=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("solo audio", result.stderr)
+```
 
 - [ ] **Paso 7: Ejecutar la suite completa de la skill**
 
@@ -929,6 +1011,12 @@ git commit -m "feat(transcribe): corta los bloques en la ventana más silenciosa
   `transcripcion.json = {"language", "settings", "blocks": [{"start", "end"}], "segments": [{"start",
   "end", "text", "words": [...], "dudoso"?, "recuperado"?}], "warnings": []}`.
   La carpeta parcial contiene `ajustes.json` y `bloque-NNN.json`; se borra al publicar.
+  Nota: `transcribe` levanta `Refused` (definida en la tarea 3) para argumentos que el agente debe
+  corregir (salida ya existente, carpeta de salida inexistente, ajustes de reanudación distintos,
+  `--dll-dir` inexistente, modelo ausente de la caché sin `--allow-download`); `main()` debe
+  traducirla a código de salida 2. Nota aparte: la tupla de comprobación amistosa de FFmpeg en
+  `main()` (`("probe", "prepare", "frames")`, fuera de esta zona) debe ampliarse para incluir
+  también `"transcribe"`.
 
 - [ ] **Paso 1: Añadir los ayudantes de prueba del modelo simulado**
 
@@ -1082,9 +1170,9 @@ def transcribe(args):
     """Resumable transcription: one saved block at a time, published only when every block is in."""
     target = Path(args.out).resolve()
     if target.exists():
-        raise ValueError("La transcripción de salida ya existe.")
+        raise Refused("La transcripción de salida ya existe.")
     if not target.parent.is_dir():
-        raise ValueError(f"No existe la carpeta de salida: {target.parent}")
+        raise Refused(f"No existe la carpeta de salida: {target.parent}")
     audio = identity(args.audio)
     work = partial_dir(target)
     work.mkdir(exist_ok=True)
@@ -1097,18 +1185,27 @@ def transcribe(args):
     stored = work / "ajustes.json"
     if stored.is_file():
         if json.loads(stored.read_text(encoding="utf-8")) != fingerprint:
-            raise ValueError("Los ajustes de transcripción no coinciden con los de la parte ya "
-                             "hecha; repite la orden con los mismos o elige otra salida.")
+            raise Refused("Los ajustes de transcripción no coinciden con los de la parte ya "
+                          "hecha; repite la orden con los mismos o elige otra salida.")
     else:
         save(stored, fingerprint)
+    # `device` starts unknown; each bloque-NNN.json records the device that produced it, so a
+    # resumption that finds every block already done still ends up with the real device (below),
+    # instead of publishing settings.device as null.
     model, device, language = None, None, args.language
     started, done = time.monotonic(), 0
     for number, (a, b) in enumerate(plan):
         piece = work / f"bloque-{number:03d}.json"
         if piece.is_file():
-            language = language or json.loads(piece.read_text(encoding="utf-8"))["language"]
-            done += 1
-            continue
+            try:
+                recorded = json.loads(piece.read_text(encoding="utf-8"))
+                language = language or recorded["language"]
+            except (OSError, ValueError, KeyError):
+                recorded = None  # truncated/corrupt: treat as unfinished
+            if recorded is not None:
+                device = recorded.get("device", device)
+                done += 1
+                continue
         if args.budget is not None and done and time.monotonic() - started >= args.budget:
             left = [f"bloque-{i:03d}" for i in range(number, len(plan))]
             print(json.dumps({"done": done, "total": len(plan), "pending": len(left),
@@ -1121,7 +1218,7 @@ def transcribe(args):
             result = transcribe_block(model, cut, a, language, args)
         # The language is fixed with the first block so the rest cannot drift (spec §11).
         language = language or result["language"]
-        save(piece, {"index": number, "start": a, "end": b, **result})
+        save(piece, {"index": number, "start": a, "end": b, "device": device, **result})
         done += 1
         print(f"Bloque {number + 1}/{len(plan)} hasta {b:.1f} s", flush=True)
     segments = [segment for number in range(len(plan))
@@ -1186,7 +1283,10 @@ prueba corra (la tarea 6 la sustituye):
 ```python
 def load_model(args):
     """Model loaded once per call; completed in task 6."""
-    from faster_whisper import WhisperModel
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        raise ValueError(f"Falta faster-whisper: {exc}") from exc
     return WhisperModel(args.model, device="cpu", compute_type=args.compute_type or "int8",
                         cpu_threads=args.threads, num_workers=1,
                         local_files_only=not args.allow_download), "cpu"
@@ -1216,7 +1316,7 @@ cortan en los silencios sintéticos; el modelo simulado produce 9 + 10 + 10 = 29
             with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(video.transcribe(arguments), 3)
             arguments.beam_size = 5
-            with fake_whisper(Recorder), self.assertRaisesRegex(ValueError, "no coinciden"):
+            with fake_whisper(Recorder), self.assertRaisesRegex(video.Refused, "no coinciden"):
                 video.transcribe(arguments)
 ```
 
@@ -1268,7 +1368,7 @@ Añade a `VideoTest`:
         self.assertIn("CUDA", noted.getvalue())
         self.assertEqual(model.device, "cpu")
         arguments.dll_dir = ["carpeta-que-no-existe"]
-        with fake_whisper(Recorder), self.assertRaisesRegex(ValueError, "no existe"):
+        with fake_whisper(Recorder), self.assertRaisesRegex(video.Refused, "no existe"):
             video.load_model(arguments)
 ```
 
@@ -1291,7 +1391,7 @@ def load_model(args):
     for folder in args.dll_dir or ():
         path = Path(folder)
         if not path.is_dir():
-            raise ValueError(f"La carpeta de DLL no existe: {path}")
+            raise Refused(f"La carpeta de DLL no existe: {path}")
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(str(path.resolve()))
         else:
@@ -1313,9 +1413,9 @@ def load_model(args):
                 print(f"Aviso: CUDA no disponible ({exc}); se continúa en CPU.", file=sys.stderr)
                 continue
             if not args.allow_download and not Path(args.model).is_dir():
-                raise ValueError(f"El modelo {args.model} no está en la caché local: repite la orden "
-                                 "con --allow-download o indica en --model una carpeta CTranslate2 "
-                                 f"local.\n{exc}") from exc
+                raise Refused(f"El modelo {args.model} no está en la caché local: repite la orden "
+                              "con --allow-download o indica en --model una carpeta CTranslate2 "
+                              f"local.\n{exc}") from exc
             raise ValueError(f"No se pudo cargar el modelo {args.model} en {device}: {exc}") from exc
     raise ValueError("Sin dispositivo de inferencia disponible.")
 ```
@@ -1384,14 +1484,24 @@ def recover(work, segments, levels, total, language, device, args):
     model = None
     for number, (a, b) in enumerate(gaps(segments, levels, 0.0, total)):
         piece = work / f"hueco-{number:03d}.json"
-        if not piece.is_file():
+        recorded = None
+        if piece.is_file():
+            try:
+                recorded = json.loads(piece.read_text(encoding="utf-8"))
+                recorded["segments"]  # validate shape before trusting the cache
+            except (OSError, ValueError, KeyError):
+                recorded = None  # truncated/corrupt: treat as unfinished
+        if recorded is None:
             if model is None:
                 model, device = load_model(args)
             with tempfile.TemporaryDirectory(prefix="hueco-", dir=work) as tmp:
                 cut = block_cut(args.audio, Path(tmp) / "hueco.wav", a, b)
                 found = transcribe_block(model, cut, a, language, args, vad=False)
-            save(piece, {"start": a, "end": b, **found})
-        for segment in json.loads(piece.read_text(encoding="utf-8"))["segments"]:
+            recorded = {"start": a, "end": b, "device": device, **found}
+            save(piece, recorded)
+        # A hueco can also carry the device that produced it (same reasoning as bloque-NNN.json).
+        device = recorded.get("device", device)
+        for segment in recorded["segments"]:
             segments.append({**segment, "recuperado": True})
     return segments, device
 ```
@@ -1438,6 +1548,10 @@ git commit -m "feat(transcribe): elige dispositivo, admite carpetas de DLL y rec
   que publica un `transcripcion.json` con `segments` sin `words[]`, `settings.origen = "subtitulos"`
   y el aviso `sin_marcas_por_palabra` en `warnings`. El plan 3 lee `settings.origen` para la ficha
   del documento y el aviso para el esquema de audio.
+- Nota: a diferencia de `transcribe` sin `--subtitles`, esta rama publica con `common.save`
+  (creación exclusiva: falla si `--out` ya existe), no con `common.publish` (que publica por
+  renombrado atómico), porque una conversión directa de un archivo ya completo no tiene bloques
+  que reanudar.
 
 - [ ] **Paso 1: Escribir la prueba que falla**
 
@@ -1449,7 +1563,8 @@ class SubtitleTest(unittest.TestCase):
            "2\n00:01:02,25 --> 00:01:05,000\nOtra frase\n")
     VTT = ("WEBVTT\n\nNOTE una nota\n\ncue-1\n"
            "00:00:02.000 --> 00:00:03.250 align:start position:10%\nHola\n\n"
-           "00:10:00.000 --> 00:10:02.000\n<v Ana>Texto\n")
+           "00:10:00.000 --> 00:10:02.000\n<v Ana>Texto\n\n"
+           "00:02.000 --> 00:05.000\nSin horas\n")
 
     def test_srt_and_vtt_become_segments_without_words(self):
         srt = video.subtitles(self.SRT)
@@ -1457,8 +1572,10 @@ class SubtitleTest(unittest.TestCase):
         self.assertEqual(srt[0]["text"], "Primera línea segunda línea")
         self.assertEqual(srt[0]["words"], [])
         vtt = video.subtitles(self.VTT)
-        self.assertEqual([(s["start"], s["end"]) for s in vtt], [(2.0, 3.25), (600.0, 602.0)])
-        self.assertEqual([s["text"] for s in vtt], ["Hola", "Texto"])
+        # WebVTT admite un cue de menos de una hora sin componente de horas (MM:SS.mmm).
+        self.assertEqual([(s["start"], s["end"]) for s in vtt],
+                         [(2.0, 3.25), (2.0, 5.0), (600.0, 602.0)])
+        self.assertEqual([s["text"] for s in vtt], ["Hola", "Sin horas", "Texto"])
         self.assertEqual(video.subtitles("sin ningún tiempo"), [])
 
     def test_the_subtitle_branch_publishes_a_transcription_with_its_warning(self):
@@ -1482,7 +1599,7 @@ class SubtitleTest(unittest.TestCase):
             empty = root / "vacio.srt"
             empty.write_text("sin tiempos\n", encoding="utf-8")
             arguments.subtitles, arguments.out = str(empty), str(root / "otra.json")
-            with self.assertRaisesRegex(ValueError, "no contiene"):
+            with self.assertRaisesRegex(video.Refused, "no contiene"):
                 video.transcribe(arguments)
 ```
 
@@ -1499,13 +1616,14 @@ Esperado: `ERROR` con `AttributeError: module 'video' has no attribute 'subtitle
 Encima de `transcribe`, en `scripts/video.py` (requiere `import re`):
 
 ```python
-CUE = re.compile(r"(\d{1,2}):([0-5]\d):([0-5]\d)[.,](\d{1,3})\s*-->\s*"
-                 r"(\d{1,2}):([0-5]\d):([0-5]\d)[.,](\d{1,3})")
+CUE = re.compile(r"(?:(\d{1,2}):)?([0-5]\d):([0-5]\d)[.,](\d{1,3})\s*-->\s*"
+                 r"(?:(\d{1,2}):)?([0-5]\d):([0-5]\d)[.,](\d{1,3})")
 TAG = re.compile(r"</?[a-zA-Z][^>]*>|\{\\[^}]*\}")
 
 
 def cue_time(hours, minutes, secs, millis):
-    return int(hours) * 3600 + int(minutes) * 60 + int(secs) + int(millis.ljust(3, "0")) / 1000
+    # WebVTT permite que un cue de menos de una hora omita las horas (`MM:SS.mmm`); cuenta como 0.
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(secs) + int(millis.ljust(3, "0")) / 1000
 
 
 def subtitles(text):
@@ -1538,14 +1656,14 @@ def import_subtitles(args):
     """Normalize the medium's own subtitles instead of transcribing (spec §5)."""
     target = Path(args.out).resolve()
     if target.exists():
-        raise ValueError("La transcripción de salida ya existe.")
+        raise Refused("La transcripción de salida ya existe.")
     if not target.parent.is_dir():
-        raise ValueError(f"No existe la carpeta de salida: {target.parent}")
+        raise Refused(f"No existe la carpeta de salida: {target.parent}")
     source = Path(identity(args.subtitles)["path"])
     segments = subtitles(source.read_text(encoding="utf-8-sig", errors="replace"))
     if not segments:
-        raise ValueError(f"{source.name} no contiene ningún bloque con tiempos válidos; "
-                         "comprueba que es SRT o WebVTT.")
+        raise Refused(f"{source.name} no contiene ningún bloque con tiempos válidos; "
+                      "comprueba que es SRT o WebVTT.")
     note = common.warning("sin_marcas_por_palabra",
                           "La transcripción procede de subtítulos: sin marcas por palabra, los "
                           "bordes usan los límites de cada segmento.")
@@ -1563,6 +1681,9 @@ Y como primera línea de `transcribe`:
         return import_subtitles(args)
 ```
 
+Nota: `language` en la salida es el valor de `--language` tal cual (`null` si no se indica); la
+rama `--subtitles` no autodetecta idioma porque no hay audio que analizar.
+
 - [ ] **Paso 5: Ejecutar la prueba y comprobar que pasa**
 
 ```text
@@ -1570,7 +1691,9 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 ```
 
 Esperado: `Ran 2 tests ... OK`. El analizador tolera BOM, milisegundos de dos dígitos, etiquetas
-`<i>` y `<v Ana>`, `NOTE`, identificador de cue y ajustes de posición tras los tiempos.
+`<i>` y `<v Ana>`, `NOTE`, identificador de cue, ajustes de posición tras los tiempos y cues WebVTT
+sin componente de horas (`MM:SS.mmm`). Limitación conocida: el grupo de horas admite hasta 2
+dígitos (no 3 o más), un caso extremo sin impacto práctico en vídeos de formación o reuniones.
 
 - [ ] **Paso 6: Ejecutar la suite completa de la skill y la del repositorio**
 
@@ -2128,8 +2251,8 @@ estimación y el coste de montaje («reutiliza 36 de 38 · 2 cortes nuevos · �
 plan. La frase queda en `vN/seleccion.json` y en `historial.jsonl` junto al sha256 canónico del plan.
 En modo audio, `doc` exige la misma aceptación contra el sha256 del esquema.
 
-Cada versión reserva su número creando en exclusiva `seleccion-vN.json`; si ya existe se reintenta
-con `N+1` hasta tres veces. `vN/` y `documento-vN/` son inmutables: una edición posterior produce
+Cada versión reserva su número creando en exclusiva `seleccion-vN.json` (o `esquema-vN.json` en
+audio); si ya existe se reintenta con `N+1` hasta tres veces. `vN/` y `documento-vN/` son inmutables: una edición posterior produce
 `v(N+1)` sin tocar la anterior. Un cambio que solo afecta al documento publica `vN/resumen-rM.md` (y
 `.docx`) junto a los anteriores, registrado en `vN/revisiones.json`; la entrega apunta siempre a la M
 mayor.
@@ -2152,6 +2275,12 @@ campos propios de cada uno.
 | `verify` | `render` y `compare`, con la validación y la cobertura |
 | `doc` | `doc`, en cada publicación del documento o de una revisión |
 | `deliver` | **Lo escribe el agente al entregar; no lo emite ningún script** |
+
+El evento `verify` tiene dos formas distintas según quién lo escriba: la de `render` lleva `ok`,
+`codigo` (solo si `ok` es `false`) y, si `ok` es `true`, `fotogramas` y `desfase_s`, **sin** el campo
+`tipo`; la de `compare` lleva `tipo: "cobertura"` junto con `media` y `minimo`. Un agente que filtre
+`historial.jsonl` por `evento == "verify"` debe mirar la presencia o ausencia de `tipo` para saber
+cuál de las dos está leyendo.
 
 Cuando entregues el resultado al usuario, añade tú esa línea al final de `historial.jsonl`, con el
 mismo formato que el resto de eventos:
@@ -2215,7 +2344,8 @@ Reglas: las marcas de bloque ocupan una línea entera; los tiempos van en segund
 `[[t]]` y `[[r]]` solo dan el tiempo del original y `[[indice]]`, `[[timeline]]` y `[[validacion]]` no
 existen. `doc` se detiene citando la línea si encuentra una marca desconocida, un tiempo fuera del
 medio, una ruta absoluta o un texto pendiente de completar (`TBD`, `TODO`, `FIXME`, `XXX`,
-`(pendiente de completar)`); «(pendiente de verificar)» sí es válido.
+`(pendiente de completar)`); «(pendiente de verificar)» sí es válido y un enlace `https://…` no se
+confunde con una ruta.
 
 La salida se calcula con los tramos y la velocidad del plan publicado. Si el instante cae en una pausa
 eliminada se usa el inicio del tramo siguiente del mismo corte, y si esa pausa es la última del corte,
@@ -2233,7 +2363,8 @@ En vídeo publica `vN/resumen.md` y `vN/resumen.docx`; en audio crea `documento-
 `resumen.docx` y una copia inmutable del esquema aceptado. En audio, `--accept` con la frase literal
 del usuario es obligatorio y se comprueba contra el sha256 del esquema. Una revisión publica
 `resumen-rM` (M ≥ 2) junto a la anterior y la registra en `revisiones.json`; la entrega apunta siempre
-a la M mayor. Nada publicado se sobrescribe.
+a la M mayor. Nada publicado se sobrescribe —`vN/montaje.md`, el informe técnico que escribe `render`,
+tampoco se toca—.
 
 DOCX: Pandoc si está en PATH; si no, `python-docx` con un subconjunto de Markdown (títulos, párrafos,
 listas, tablas, negrita, cursiva, código e imagen). Sin ninguno de los dos la entrega es solo Markdown,
@@ -2251,7 +2382,8 @@ Escribe `vN/cobertura.json` y devuelve 0 siempre. Mide, por corte, qué proporci
 transcripción comprendidas en el corte sobrevive entera dentro de sus tramos (holgura de 20 ms). Por
 debajo de 0,90 de media o de 0,85 en algún corte emite `cobertura_baja`, que no bloquea: el agente lo
 resuelve moviendo bordes o lo declara en las limitaciones antes de entregar. Los dos umbrales son
-provisionales hasta la calibración con material real.
+provisionales hasta la calibración con material real. Repetir la orden sobre una versión que ya tiene
+su `cobertura.json` no la reescribe: avisa y devuelve 0.
 ````
 
 - [ ] **Paso 11: Ejecutar las pruebas de empaquetado**
@@ -2507,7 +2639,7 @@ git commit -m "docs(skill): SKILL.md 0.2.0 con invocación, modos y flujo de onc
 
 ---
 
-## Tarea 11: Versión 0.2.0 en sus ocho lugares y entrada del CHANGELOG
+## Tarea 11: Versión 0.2.0 en sus nueve lugares y entrada del CHANGELOG
 
 **Files:**
 - Modificar: `CHANGELOG.md`, `plugins/resumir-video/plugin.json`,
@@ -2515,19 +2647,25 @@ git commit -m "docs(skill): SKILL.md 0.2.0 con invocación, modos y flujo de onc
   `plugins/resumir-video/.codex-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
   `plugins/resumir-video/skills/resumir-video/SKILL.md`,
   `plugins/resumir-video/skills/resumir-video/scripts/video.py`, `README.md`,
-  `docs/capacidades.md`, `docs/instalacion.md`
+  `docs/capacidades.md`, `docs/instalacion.md`, `docs/img/datos.json`
+- Generar: `docs/img/banner.svg` (con `scripts/generar_graficos.py`; no se edita a mano)
 - Probar: `tests/test_packaging.py` (`test_versions_agree_everywhere`, sin cambios)
 
 **Interfaces:**
 - Consumes: `test_versions_agree_everywhere`, que exige el mismo `X.Y.Z` en los diez archivos y los
   literales exactos `__version__ = "0.2.0"`, `Versión 0.2.0 ·`, `` `resumir-video` 0.2.0 `` y
-  `Estado: versión 0.2.0`.
-- Produces: la versión 0.2.0 publicada y coherente en todo el repositorio.
+  `Estado: versión 0.2.0`. Ese test no cambia en esta tarea y no cubre el noveno lugar (paso 3), que
+  se comprueba a mano.
+- Produces: la versión 0.2.0 publicada y coherente en todo el repositorio, incluido el banner que
+  `README.md` incrusta en su cabecera.
 
-Los «ocho lugares» de la especificación §14 son: (1) `CHANGELOG.md`, (2) los tres `plugin.json`,
+Los «nueve lugares» de la especificación §14 son: (1) `CHANGELOG.md`, (2) los tres `plugin.json`,
 (3) `.claude-plugin/marketplace.json` (`metadata.version` y `plugins[0].version`), (4) `SKILL.md`,
-(5) `video.py`, (6) `README.md`, (7) `docs/capacidades.md` y (8) `docs/instalacion.md`: diez archivos
-y once apariciones.
+(5) `video.py`, (6) `README.md`, (7) `docs/capacidades.md`, (8) `docs/instalacion.md` y
+(9) `docs/img/datos.json` (campo `"version"`): once archivos y doce apariciones. Este noveno lugar no
+lo pedía la especificación como tal, pero `docs/img/datos.json` alimenta el literal `vX.Y.Z` que
+`scripts/generar_graficos.py` escribe en `docs/img/banner.svg`, y ese banner es lo primero que se ve
+al abrir `README.md`, que lo incrusta en su cabecera.
 
 - [ ] **Paso 1: Comprobar que la prueba de versiones falla**
 
@@ -2564,6 +2702,25 @@ En `.codex-plugin/plugin.json`, actualiza además `interface.longDescription`:
 | `README.md` | `Versión 0.1.0 · Licencia MIT` → `Versión 0.2.0 · Licencia MIT` |
 | `docs/capacidades.md` | `` la skill `resumir-video` 0.1.0 `` → `` la skill `resumir-video` 0.2.0 `` |
 | `docs/instalacion.md` | `Estado: versión 0.1.0 (2026-09-17).` → `Estado: versión 0.2.0 (2026-09-18).` |
+| `docs/img/datos.json` | `"version": "0.1.0"` → `"version": "0.2.0"` |
+
+`docs/img/datos.json` no se limita a un literal de texto: es la fuente de datos del banner. Tras
+cambiar su `"version"`, regenera el SVG (es un archivo generado; no se edita a mano):
+
+```text
+python3 -B scripts/generar_graficos.py
+```
+
+Comprueba a mano que el resultado ya no contiene la versión anterior:
+
+```text
+grep -c "v0.1.0" docs/img/banner.svg
+grep -c "v0.2.0" docs/img/banner.svg
+```
+
+Esperado: `0` y `1`. `README.md` incrusta `docs/img/banner.svg` en su cabecera
+(`<img src="docs/img/banner.svg" …>`), así que un banner desactualizado sería lo primero que vería
+quien abra el repositorio.
 
 - [ ] **Paso 4: Escribir la entrada del CHANGELOG**
 
@@ -2639,11 +2796,12 @@ Esperado: `OK` y `Validation passed` en los dos validadores.
 
 ```bash
 git add CHANGELOG.md README.md docs/capacidades.md docs/instalacion.md \
+        docs/img/datos.json docs/img/banner.svg \
         .claude-plugin/marketplace.json plugins/resumir-video/plugin.json \
         plugins/resumir-video/.claude-plugin/plugin.json \
         plugins/resumir-video/.codex-plugin/plugin.json \
         plugins/resumir-video/skills/resumir-video/scripts/video.py
-git commit -m "chore(release): versión 0.2.0 en los ocho lugares y entrada del CHANGELOG" \
+git commit -m "chore(release): versión 0.2.0 en los nueve lugares y entrada del CHANGELOG" \
            -m "Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
@@ -2749,6 +2907,9 @@ Y añade después de D-006, antes del párrafo final:
 - Motivo: reanudar sin repetir trabajo y no publicar nada que no se haya comprobado.
 - Consecuencia: más espacio en disco (la caché) y una clave que hay que invalidar cuando cambia
   cualquiera de sus componentes.
+- Nota sobre el código 3: su payload amplía el `{done, total, pending}` de §12 con un campo `bloques`
+  adicional (la lista con los nombres de los bloques pendientes), para que el agente que reanude sepa
+  exactamente qué falta sin tener que releer la especificación pensando que es un error.
 - Desviaciones respecto a la especificación, medidas al implementar; las dos primeras se adoptan en
   todo el montaje y también en el barrido de `frames`, y la tercera solo en el montaje:
   1. La búsqueda de cada corte empieza en `S = max(0, inicio − seek_margin(data))` —el margen de la
@@ -2787,9 +2948,12 @@ Y añade después de D-006, antes del párrafo final:
 - Contexto: en la 0.1.0 un plan dejaba de ser válido si el vídeo se movía o cambiaba su fecha de
   modificación, aunque fuera el mismo archivo.
 - Decisión: la identidad pasa a ser la huella —tamaño, `mtime_ns` y sha256 de los primeros y últimos
-  4 MiB—. `render` acepta un plan cuyo `source.path` haya cambiado si la huella coincide: lo avisa y
-  actualiza `source` en el plan publicado. Una huella distinta sigue siendo un error. Los planes de
-  la 0.1 se importan con `plan --import` y reciben el aviso `identidad_parcial`.
+  4 MiB—. En los archivos de 8 MiB o menos, el sha256 se calcula sobre el archivo completo y no solo
+  sobre los extremos, que es como lo hace realmente `common.fingerprint`, para no saltarse el
+  contenido intermedio de un archivo pequeño. `render` acepta un plan cuyo `source.path` haya
+  cambiado si la huella coincide: lo avisa y actualiza `source` en el plan publicado. Una huella
+  distinta sigue siendo un error. Los planes de la 0.1 se importan con `plan --import` y reciben el
+  aviso `identidad_parcial`.
 - Motivo: los trabajos largos sobreviven a copias y movimientos del material.
 - Consecuencia: `prepare` calcula la huella una vez y la guarda en `metadata.json`; leer 8 MiB por
   archivo es despreciable frente al resto del trabajo.
@@ -2797,18 +2961,24 @@ Y añade después de D-006, antes del párrafo final:
 
 - [ ] **Paso 4: Actualizar `docs/requisitos.md`**
 
-Sustituye la sección «Confirmado» por una tabla con los cinco requisitos y añade las decisiones de
-diseño y los umbrales provisionales:
+Sustituye la sección «Confirmado» por sus viñetas vigentes (reformuladas por brevedad, pero sin
+perder ninguna: la versión actual del archivo tiene nueve, y una sustitución que solo conservara tres
+borraría requisitos que la 0.2.0 no ha invalidado) más una tabla con los cinco requisitos nuevos y
+las decisiones de diseño y los umbrales provisionales:
 
 ```markdown
 ## Confirmado
 
 - Skill portable y autocontenida `resumir-video`, invocable con la ruta de una grabación local.
-- Analizar conjuntamente explicaciones y material visual, y priorizar conceptos técnicos, normativa,
-  requisitos, procedimientos, arquitectura, configuraciones, ejemplos, decisiones, conclusiones y
-  advertencias.
+- Crear un resumen de alta calidad con fragmentos originales y su audio, analizando conjuntamente
+  explicaciones y material visual, y priorizando conceptos técnicos, normativa, requisitos,
+  procedimientos, arquitectura, configuraciones, ejemplos, decisiones, conclusiones y advertencias.
+- Eliminar contenido sin valor sin perder contexto ni información visual durante silencios.
+- Priorizar simplicidad, rapidez, fiabilidad y consumo moderado de recursos.
 - Distribuirla como plugin fácil de instalar en Claude Code, OpenAI Codex y GitHub Copilot, con
   licencia MIT a nombre de CAPTIA TECHNOLOGY S.L. en `captia-technology/RESUMEN-VIDEOS`.
+- Mantener la documentación versionada como fuente de verdad. No se solicita aplicación, servidor ni
+  interfaz propia.
 
 | Id | Requisito (2026-09-17) | Decisión |
 | --- | --- | --- |
@@ -2916,6 +3086,16 @@ leídos frente a 153, con la misma salida)
   las DLL de CUDA en Windows.
 - `README.md`: actualiza las viñetas de «Capacidades» (objetivo configurable, revisión previa, modo
   audio y documento) y la tabla de «Estructura» con los cinco scripts y las cuatro referencias.
+  Reescribe también la respuesta de «¿Puede acelerar la voz o quitar pausas para comprimir más?» en
+  «Preguntas frecuentes»: deja de ser cierto que «no en la versión 0.1.0», porque la 0.2.0 aplica
+  velocidad ×1,25 y elimina pausas **por defecto** (D-007) y ya no bajo petición expresa; la
+  respuesta debe explicar cómo desactivarlo (`velocidad=1`, `pausas=no`), no remitir a la hoja de
+  ruta. Depura además «🗺 Hoja de ruta»: sus cuatro viñetas actuales —el barrido con detección de
+  cambios, la transcripción por bloques reanudable y el montaje reanudable por lotes, el modo de
+  aceleración/eliminación de pausas bajo petición, y la reasignación de un plan a un vídeo movido o
+  copiado— las entrega ya la 0.2.0, así que hay que retirarlas todas para que el README no contradiga
+  su propio CHANGELOG; si no queda ninguna pendiente real que anotar, sustituye la lista por una
+  frase breve o retira la sección completa.
 - `AGENTS.md`: en «Comprobaciones», deja constancia de que las pruebas de la skill se descubren con
   `-p "test_*.py"` y cubren cinco módulos.
 
@@ -3004,7 +3184,7 @@ claude plugin validate . --strict
 ```
 
 Esperado: `OK` en las dos suites y `Validation passed` en los dos validadores. Anota los recuentos
-reales de pruebas: la línea base antes de la 0.2.0 era de 15 en la skill y 23 en `tests/`.
+reales de pruebas: la línea base antes de la 0.2.0 era de 254 en la skill y 23 en `tests/`.
 
 - [ ] **Paso 4: Ejecutar los validadores de Codex si está instalado**
 
@@ -3095,7 +3275,7 @@ evidencia)» en la tabla del paso 6. Prueba antes con `--dry-run`, como indica
 | §13, aceptación manual antes de publicar | Tarea 13, pasos 6 a 9 |
 | §14, `SKILL.md` 0.2.0 con invocación, modos y flujo de once pasos, y sustitución de las reglas «no aceleres» y «sin porcentaje fijo» | Tarea 10 |
 | §14, `operacion.md` actualizada y `compresion.md`, `revision.md` y `documento.md` nuevas | Tarea 9 |
-| §14, versión 0.2.0 en los ocho lugares y CHANGELOG con los cambios incompatibles | Tarea 11 |
+| §14, versión 0.2.0 en los nueve lugares y CHANGELOG con los cambios incompatibles | Tarea 11 |
 | §14, documentación del repositorio | Tarea 12 |
 | §14, D-006 actualizada y D-007…D-011 | Tarea 12, paso 3 |
 
@@ -3124,7 +3304,7 @@ Fuera de alcance por diseño (los cubren los planes 1, 2 y 3): `common.py`, `che
    entrada dejan la cadena en cero fotogramas); los `-frames:v` de cada salida son los que acotan el
    trabajo. Los tres detalles están medidos en «Recetas verificadas» y protegidos por el control
    negativo de la tarea 2.
-6. **Recuentos de pruebas.** El repositorio tenía 15 pruebas en la skill y 23 en `tests/` antes de
+6. **Recuentos de pruebas.** El repositorio tenía 254 pruebas en la skill y 23 en `tests/` antes de
    empezar, igual que §13. El plan conserva las existentes y añade sobre ese número.
 7. **Umbrales sin fijar en la especificación.** `no_speech_prob > 0,6` y `avg_logprob < −1,0` para
    marcar un segmento como dudoso, 2,0 s de hueco mínimo y 1 MB por vista para estimar el espacio
