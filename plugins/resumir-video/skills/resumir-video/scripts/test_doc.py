@@ -2,10 +2,12 @@
 
 import json
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 from unittest import mock
 import zipfile
+import zlib
 
 import common
 import doc
@@ -93,10 +95,12 @@ class BlockTest(unittest.TestCase):
                  "colocacion": [{"corte": 1, "titulo": "A", "salida_s": [0.0, 6.4],
                                  "imagen": [{"punto": "inicio", "distancia": 0.031}],
                                  # `bloques: 0` is a degenerate window (never measured): its
-                                 # desfase_ms of 0 must not count as a perfect measurement.
+                                 # desfase_ms of 500 must not count towards the maximum below —
+                                 # if the `bloques != 0` filter ever reverted to `desfase_ms is
+                                 # not None`, this row alone would push the max well past 40 ms.
                                  "envolvente": [{"punto": "inicio", "bloques": 86, "desfase_ms": 20,
                                                  "correlacion": 0.97},
-                                                {"punto": "fin", "bloques": 0, "desfase_ms": 0,
+                                                {"punto": "fin", "bloques": 0, "desfase_ms": 500,
                                                  "correlacion": None}]},
                                 {"corte": 2, "titulo": "B", "salida_s": [6.4, 9.6],
                                  "imagen": [{"punto": "inicio", "distancia": 0.11}],
@@ -213,6 +217,20 @@ Párrafo con **negrita**, *cursiva* y `código`.
 """
 
 
+def png_chunk(kind, data):
+    return (struct.pack(">I", len(data)) + kind + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+
+def minimal_png():
+    """A real, valid 1x1 RGB PNG built from stdlib bytes only: no Pillow dependency needed
+    just to exercise render_docx's IMAGE branch."""
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00\xff\x00\x00")  # filter byte + one red RGB pixel
+    return signature + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", idat) + png_chunk(b"IEND", b"")
+
+
 class DocxTest(unittest.TestCase):
     def test_markdown_only_when_no_converter_exists(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -271,6 +289,23 @@ class DocxTest(unittest.TestCase):
             self.assertIn("<w:b/>", xml)
             self.assertIn("<w:i/>", xml)
             self.assertIn("Segunda idea", xml)
+
+    def test_render_docx_embeds_a_referenced_image(self):
+        if not doc.has_python_docx():
+            self.skipTest("python-docx no instalado")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            base = Path(temporary)
+            (base / "captura.png").write_bytes(minimal_png())
+            markdown = "# Resumen\n\n![Captura](captura.png)\n"
+            target = base / "con-imagen.docx"
+            doc.render_docx(markdown, target, base)
+            with zipfile.ZipFile(target) as bundle:
+                names = bundle.namelist()
+                media = [n for n in names
+                         if n.startswith("word/media/image") and n.endswith(".png")]
+                xml = bundle.read("word/document.xml").decode("utf-8")
+            self.assertTrue(media, f"Sin imagen incrustada en {names}")
+            self.assertIn("<w:drawing>", xml)
 
 
 def workspace(root, kind="video"):
