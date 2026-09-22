@@ -426,21 +426,43 @@ def publish_document(text, out, name, base, skip_docx):
         return markdown, None, f"Fallo al generar el DOCX ({exc}): la entrega es solo Markdown."
 
 
+def accepted(schema, phrase):
+    """The schema must be the one the user accepted, untouched, and the phrase must be literal."""
+    if not (phrase or "").strip():
+        raise ValueError("Falta --accept con la frase literal del usuario: en modo audio el esquema "
+                         "se acepta antes de redactar.")
+    recorded = schema.get("sha256")
+    # plan_sha256 ignores the sha256 key by contract, so the stored one never feeds itself.
+    computed = common.plan_sha256(schema)
+    if recorded != computed:
+        raise ValueError("El esquema no corresponde a su sha256: se ha modificado a mano. Vuelve a "
+                         "generarlo con plan --kind audio y acéptalo de nuevo.")
+    return computed
+
+
 def report_of(args):
     """Publish the document of one version and answer what was written; document() prints it."""
     work = Path(args.work).resolve()
     number = args.version
     metadata = read_json(work / "metadata.json")
-    out = work / (f"documento-v{number}" if metadata.get("kind") == "audio" else f"v{number}")
-    if not out.is_dir():
-        raise ValueError(f"No existe la carpeta de la versión: {out}")
+    audio = metadata.get("kind") == "audio"
+    out = work / (f"documento-v{number}" if audio else f"v{number}")
     source = Path(args.source) if args.source else work / f"documento-v{number}.md"
     if not source.is_file():
         raise ValueError(f"No existe el documento de partida: {source}")
     if args.revision and not (args.accept or "").strip():
         raise ValueError("Una revisión exige --accept con la frase literal del usuario.")
-    context = context_of(work, number, out, metadata)
+    schema, digest = None, None
+    if audio:
+        schema = read_json(work / f"esquema-v{number}.json")
+        digest = accepted(schema, args.accept)
+    elif not out.is_dir():
+        raise ValueError(f"No existe la carpeta de la versión: {out}")
+    context = context_of(work, number, out, metadata, schema)
     text = expand(source.read_text(encoding="utf-8-sig"), context)
+    if audio and not out.is_dir():
+        common.new_dir(out)
+        common.save(out / "esquema.json", schema)
     revision = next_revision(out) if args.revision else None
     name = "resumen" if revision is None else f"resumen-r{revision}"
     markdown, used, docx_error = publish_document(text, out, name, out, args.no_docx)
@@ -452,7 +474,8 @@ def report_of(args):
             "o ejecuta `python -m pip install python-docx`."))
     # `doc` on every publication; `deliver` belongs to the final handover, not to this subcommand.
     common.history(work, "doc", {"version": number, "revision": revision, "motor": used,
-                                 "archivo": markdown.name, "kind": metadata.get("kind")})
+                                 "archivo": markdown.name, "kind": metadata.get("kind"),
+                                 "sha256": digest, "frase": args.accept})
     return {"markdown": str(markdown),
             "docx": None if used is None else str(markdown.with_suffix(".docx")),
             "motor": used, "revision": revision, "avisos": context["avisos"]}

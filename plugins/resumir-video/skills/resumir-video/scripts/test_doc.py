@@ -385,5 +385,78 @@ class RevisionTest(unittest.TestCase):
             self.assertFalse(list(out.glob("revisiones.json.parcial")))
 
 
+def audio_workspace(root):
+    work = Path(root)
+    source = {"path": "reunión.m4a", "size": 1, "mtime_ns": 2, "sha256": "ab"}
+    (work / "metadata.json").write_text(json.dumps(
+        {"format": {"duration": "300.0"}, "streams": [], "kind": "audio", "audio_stream": 0,
+         "source": source, "avisos": [],
+         "timeline": {"start": 0.0, "origin": 0.0, "rate": None, "fps": None,
+                      "interval": None, "sample_rate": 48000}}), encoding="utf-8")
+    (work / "transcripcion.json").write_text(json.dumps(
+        {"language": "es", "settings": {"model": "small"}, "segments": []}), encoding="utf-8")
+    # Exactly what plan --kind audio publishes.
+    schema = {"version": 1, "parent": None, "kind": "audio", "request": "resume la reunión",
+              "source": source, "audio_stream": 0,
+              "settings": {"target": None, "speed": 1.0, "remove_pauses": False,
+                           "silence_db": -50.0, "rate": None, "sample_rate": 48000,
+                           "tolerance": None},
+              "ideas": [{"numero": 1, "id": 1, "priority": 1, "title": "Alcance ATEX",
+                         "phrase": "cubre zona 1", "reason": "Define el ámbito",
+                         "audio_evidence": "12–45 s", "start": 12.0, "end": 45.0}],
+              "questions": [], "excluded": [], "changes": ["propuesta inicial"], "warnings": []}
+    schema["sha256"] = common.plan_sha256(schema)
+    (work / "esquema-v1.json").write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+    (work / "documento-v1.md").write_text(
+        "# Resumen de la reunión\n\n[[ficha]]\n\nEl alcance se explica en [[t=12.0]].\n",
+        encoding="utf-8")
+    return work
+
+
+class AudioDocumentTest(unittest.TestCase):
+    def test_audio_delivery_needs_the_literal_acceptance(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = audio_workspace(temporary)
+            with self.assertRaisesRegex(ValueError, "--accept"):
+                doc.report_of(doc.arguments(work=work, version=1))
+            self.assertFalse((work / "documento-v1").exists())
+
+    def test_audio_delivery_publishes_the_document_and_the_schema(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = audio_workspace(temporary)
+            report = doc.report_of(doc.arguments(work=work, version=1,
+                                                 accept="adelante, redáctalo"))
+            self.assertEqual(Path(report["markdown"]), work / "documento-v1/resumen.md")
+            text = (work / "documento-v1/resumen.md").read_text(encoding="utf-8")
+            self.assertIn("| Archivo | reunión.m4a |", text)
+            self.assertIn("| Ideas clave | 1 idea |", text)
+            self.assertIn("| Preguntas | 0 preguntas |", text)
+            self.assertIn("El alcance se explica en 0:12.", text)
+            self.assertNotIn("resumen 0:", text)
+            self.assertTrue((work / "documento-v1/esquema.json").is_file())
+            record = json.loads((work / "historial.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual((record["evento"], record["kind"]), ("doc", "audio"))
+            self.assertEqual(record["frase"], "adelante, redáctalo")
+
+    def test_a_hand_edited_schema_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = audio_workspace(temporary)
+            schema = json.loads((work / "esquema-v1.json").read_text(encoding="utf-8"))
+            schema["ideas"][0]["title"] = "Otro título"
+            (work / "esquema-v1.json").write_text(json.dumps(schema, ensure_ascii=False),
+                                                  encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "sha256"):
+                doc.report_of(doc.arguments(work=work, version=1, accept="adelante"))
+            self.assertFalse((work / "documento-v1").exists())
+
+    def test_video_marks_are_refused_in_an_audio_document(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = audio_workspace(temporary)
+            (work / "documento-v1.md").write_text("# Resumen\n\n[[indice]]\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Línea 3: la marca \\[\\[indice\\]\\] no existe"):
+                doc.report_of(doc.arguments(work=work, version=1, accept="adelante"))
+            self.assertFalse((work / "documento-v1").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
