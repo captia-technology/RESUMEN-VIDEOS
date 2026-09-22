@@ -252,5 +252,87 @@ class DocxTest(unittest.TestCase):
             self.assertIn("Segunda idea", xml)
 
 
+def workspace(root, kind="video"):
+    """Minimal work folder: what prepare, plan and render leave behind."""
+    work = Path(root)
+    (work / "v1").mkdir(parents=True)
+    source = {"path": "grabación.mp4", "size": 1, "mtime_ns": 2, "sha256": "ab"}
+    (work / "metadata.json").write_text(json.dumps(
+        {"format": {"duration": "96.0", "start_time": "0.000000"}, "streams": [],
+         "source": source, "kind": kind, "audio_stream": 1, "avisos": [],
+         "timeline": {"start": 0.0, "origin": 0.0, "rate": "25/1", "fps": 25.0,
+                      "interval": 0.04, "sample_rate": 48000}}), encoding="utf-8")
+    (work / "transcripcion.json").write_text(json.dumps(
+        {"language": "es", "settings": {"model": "small"}, "segments": []}), encoding="utf-8")
+    # The published plan, with the agreed key names; doc only reads segments and settings.
+    (work / "v1/seleccion.json").write_text(json.dumps(
+        {"version": 1, "parent": None, "kind": "video", "source": source, "audio_stream": 1,
+         "timeline": {"start": 0.0, "origin": 0.0, "rate": "25/1", "fps": 25.0,
+                      "interval": 0.04, "sample_rate": 48000},
+         "settings": {"target": "10%", "speed": 1.25, "remove_pauses": True, "silence_db": -50.0,
+                      "rate": "25/1", "sample_rate": 48000, "tolerance": 10.0},
+         "segments": [{"id": 1, "numero": 1, "title": "Requisito y excepción",
+                       "start": 10.0, "end": 20.0, "spans": [[10.0, 13.0], [15.0, 20.0]],
+                       "frames": 160, "samples": 307200},
+                      {"id": 2, "numero": 2, "title": "Zona ATEX", "start": 30.0, "end": 36.0,
+                       "spans": [[30.0, 34.0]], "frames": 80, "samples": 153600}],
+         "reserves": [], "estimate": {}, "alternativas": [], "sugerencias": [], "warnings": [],
+         "changes": [], "sha256": "no-comprobado-por-doc"}), encoding="utf-8")
+    (work / "documento-v1.md").write_text(
+        "# Resumen\n\n[[ficha]]\n\n## Índice\n\n[[indice]]\n\n"
+        "El requisito aparece en [[t=11.0]].\n", encoding="utf-8")
+    return work
+
+
+class DocumentTest(unittest.TestCase):
+    def test_video_document_is_published_once_and_never_overwritten(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            self.assertEqual(doc.document(doc.arguments(work=work, version=1)), 0)
+            text = (work / "v1/resumen.md").read_text(encoding="utf-8")
+            self.assertIn("| Archivo | grabación.mp4 |", text)
+            self.assertIn("| Técnicas | 2 cortes · pausas eliminadas · velocidad ×1,25 |", text)
+            self.assertIn("0:11 (resumen 0:00)", text)
+            self.assertNotIn("[[", text)
+            record = json.loads((work / "historial.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual(record["evento"], "doc")
+            self.assertEqual((record["version"], record["revision"]), (1, None))
+            before = text
+            with self.assertRaises(ValueError):
+                doc.report_of(doc.arguments(work=work, version=1))
+            self.assertEqual((work / "v1/resumen.md").read_text(encoding="utf-8"), before)
+            self.assertFalse(list((work / "v1").glob("*.parcial")))
+
+    def test_a_revision_publishes_rM_beside_the_first_delivery(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            doc.report_of(doc.arguments(work=work, version=1))
+            (work / "documento-v1-r2.md").write_text(
+                "# Resumen\n\nCorrige la cifra: son 12 equipos.\n", encoding="utf-8")
+            report = doc.report_of(doc.arguments(
+                work=work, version=1, source=work / "documento-v1-r2.md",
+                revision="corrige la cifra de equipos", accept="la cifra correcta es 12"))
+            self.assertEqual(report["revision"], 2)
+            self.assertEqual(Path(report["markdown"]), work / "v1/resumen-r2.md")
+            self.assertTrue((work / "v1/resumen.md").is_file())
+            rows = json.loads((work / "v1/revisiones.json").read_text(encoding="utf-8"))
+            self.assertEqual(rows[0]["revision"], 2)
+            self.assertEqual(rows[0]["frase"], "la cifra correcta es 12")
+            self.assertEqual(rows[0]["motivo"], "corrige la cifra de equipos")
+            events = [json.loads(line)["evento"] for line
+                      in (work / "historial.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(events, ["doc", "doc"])
+
+    def test_a_revision_needs_the_literal_phrase(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            work = workspace(temporary)
+            doc.report_of(doc.arguments(work=work, version=1))
+            (work / "documento-v1-r2.md").write_text("# Resumen\n\nOtra cosa.\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "--accept"):
+                doc.report_of(doc.arguments(work=work, version=1,
+                                            source=work / "documento-v1-r2.md",
+                                            revision="cambia algo"))
+
+
 if __name__ == "__main__":
     unittest.main()

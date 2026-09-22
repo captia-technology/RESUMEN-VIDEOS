@@ -16,6 +16,7 @@ sys.dont_write_bytecode = True
 import common
 import plan
 import render
+import doc
 from common import (DEFAULT_THREADS, MAX_FRAMES, MIN_PYTHON, cache_dir, duration, encoders, ffmpeg,
                     frame_count, frame_interval, identity, new_dir, output_rate, positive, probe,
                     require_encoders, run, save, seconds, seek_margin, stream_duration, stream_end,
@@ -320,6 +321,7 @@ def build_parser():
     p.set_defaults(run=search)
     plan.register(sub)
     render.register(sub)
+    doc.register(sub)
     return parser
 
 

@@ -346,6 +346,129 @@ def write_runs(paragraph, text):
             run.font.name = "Consolas"
 
 
+def arguments(**values):
+    """Argument holder so the tests can call document() without going through argparse."""
+    defaults = {"work": None, "version": 1, "source": None, "accept": None, "revision": None,
+                "no_docx": False}
+    return argparse.Namespace(**{**defaults, **values})
+
+
+def context_of(work, number, out, metadata, schema=None):
+    base = {"metadata": metadata, "total": common.duration(metadata), "version": number,
+            "out": Path(out), "transcriber": transcriber(work), "avisos": [],
+            "spans": None, "speed": 1.0, "settings": {}, "schema": schema}
+    if metadata.get("kind") == "audio":
+        return base
+    plan = read_json(Path(out) / "seleccion.json")
+    for key in ("segments", "settings"):
+        if key not in plan:
+            raise ValueError(f"El plan publicado no tiene «{key}»: {Path(out) / 'seleccion.json'}")
+    speed = float(plan["settings"].get("speed", 1.0))
+    # The montage's own F rules; metadata only answers when the plan does not carry it.
+    rate = plan["settings"].get("rate")
+    cadence = 1 / common.output_interval(rate) if rate else float(metadata["timeline"]["fps"])
+    base.update(spans=placements(plan["segments"], speed, cadence), speed=speed,
+                settings=plan["settings"])
+    return base
+
+
+def next_revision(out):
+    """Reserve the next resumen-rM number exclusively: same O_CREAT|O_EXCL principle as
+    common.reserve_version (plan 1), adapted to the rM namespace of an already-published version —
+    it does not reuse reserve_version itself, which reserves vN.json, not resumen-rM.md. This
+    replaces a plain glob()+max(), which left a TOCTOU window where two concurrent `doc --revision`
+    calls on the same vN could compute the same M. First revision is 2: the delivery without suffix
+    is the first one; the reservation is the very `.md.parcial` staging file publish_document goes on
+    to fill, so there is no separate sentinel and no throwaway write."""
+    used = [int(p.stem.rsplit("-r", 1)[-1]) for p in Path(out).glob("resumen-r*.md")
+            if p.stem.rsplit("-r", 1)[-1].isdigit()]
+    first = max(used, default=1) + 1
+    for number in range(first, first + common.VERSION_ATTEMPTS):
+        staged = Path(out) / f"resumen-r{number}.md.parcial"
+        try:
+            os.close(os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            continue
+        return number
+    raise ValueError(f"No se pudo reservar una revisión tras {common.VERSION_ATTEMPTS} intentos; "
+                     "otra sesión está publicando una revisión en esta misma versión.")
+
+
+def record_revision(out, number, reason, phrase, source):
+    path = Path(out) / "revisiones.json"
+    rows = read_json(path) if path.is_file() else []
+    rows.append({"revision": number, "motivo": reason, "frase": phrase,
+                 "fecha": datetime.date.today().isoformat(), "origen": Path(source).name})
+    staged = Path(out) / "revisiones.json.parcial"
+    staged.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    # The only index inside a published version that grows: replaced whole, never appended in place.
+    os.replace(staged, path)
+    return rows
+
+
+def publish_document(text, out, name, base, skip_docx):
+    markdown, staged = Path(out) / f"{name}.md", Path(out) / f"{name}.md.parcial"
+    staged.write_text(text, encoding="utf-8")
+    try:
+        common.publish(staged, markdown)
+    except (ValueError, OSError):
+        # A refused publication must not leave a half-written file in a published version.
+        staged.unlink(missing_ok=True)
+        raise
+    if skip_docx:
+        return markdown, None
+    return markdown, to_docx(markdown, Path(out) / f"{name}.docx", base)
+
+
+def report_of(args):
+    """Publish the document of one version and answer what was written; document() prints it."""
+    work = Path(args.work).resolve()
+    number = args.version
+    metadata = read_json(work / "metadata.json")
+    out = work / (f"documento-v{number}" if metadata.get("kind") == "audio" else f"v{number}")
+    if not out.is_dir():
+        raise ValueError(f"No existe la carpeta de la versión: {out}")
+    source = Path(args.source) if args.source else work / f"documento-v{number}.md"
+    if not source.is_file():
+        raise ValueError(f"No existe el documento de partida: {source}")
+    if args.revision and not (args.accept or "").strip():
+        raise ValueError("Una revisión exige --accept con la frase literal del usuario.")
+    context = context_of(work, number, out, metadata)
+    text = expand(source.read_text(encoding="utf-8-sig"), context)
+    revision = next_revision(out) if args.revision else None
+    name = "resumen" if revision is None else f"resumen-r{revision}"
+    markdown, used = publish_document(text, out, name, out, args.no_docx)
+    if revision is not None:
+        record_revision(out, revision, args.revision, args.accept, source)
+    if used is None and not args.no_docx:
+        context["avisos"].append("Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala "
+                                 "Pandoc (pandoc.org) o ejecuta `python -m pip install python-docx`.")
+    # `doc` on every publication; `deliver` belongs to the final handover, not to this subcommand.
+    common.history(work, "doc", {"version": number, "revision": revision, "motor": used,
+                                 "archivo": markdown.name, "kind": metadata.get("kind")})
+    return {"markdown": str(markdown),
+            "docx": None if used is None else str(markdown.with_suffix(".docx")),
+            "motor": used, "revision": revision, "avisos": context["avisos"]}
+
+
+def document(args):
+    """The subcommand: it prints its report and answers 0, like compare."""
+    print(json.dumps(report_of(args), ensure_ascii=False, indent=2))
+    return 0
+
+
+def register(sub):
+    p = sub.add_parser("doc", help="Expande las marcas del documento y publica Markdown y DOCX.")
+    p.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
+    p.add_argument("--version", type=common.positive, required=True,
+                   help="Número de versión: vN en vídeo, documento-vN en audio.")
+    p.add_argument("--source", help="Documento con marcas (por defecto, documento-vN.md).")
+    p.add_argument("--accept", help="Frase literal del usuario; obligatoria en audio y en revisiones.")
+    p.add_argument("--revision", help="Motivo de la revisión; publica resumen-rM junto a la anterior.")
+    p.add_argument("--no-docx", action="store_true", help="Entrega solo Markdown, sin convertir.")
+    p.set_defaults(run=document)
+
+
 def render_docx(markdown, target, base):
     """Headings, paragraphs, lists, tables, emphasis, code and images: the spec's subset."""
     from docx import Document
