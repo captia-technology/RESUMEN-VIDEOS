@@ -321,5 +321,48 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(video.find(self.TRANSCRIPTION, "senal")["total"], 0)
 
 
+class SweepTest(unittest.TestCase):
+    def test_blocks_cover_the_interval_on_the_sampling_grid(self):
+        self.assertEqual(video.sweep_blocks(0, 1800, 15.0),
+                         [(0.0, 600.0, 40), (600.0, 1200.0, 40), (1200.0, 1800.0, 40)])
+        self.assertEqual(video.sweep_blocks(0, 50, 15.0, length=30.0),
+                         [(0.0, 30.0, 2), (30.0, 50.0, 2)])
+        self.assertEqual(video.sweep_blocks(120, 135, 1.0), [(120.0, 135.0, 15)])
+        self.assertEqual(video.sweep_blocks(0, 1.5, 15.0), [(0.0, 1.5, 1)])
+        # Un paso mayor que el bloque no puede producir bloques vacios.
+        self.assertEqual(video.sweep_blocks(0, 90, 40.0, length=30.0),
+                         [(0.0, 40.0, 1), (40.0, 80.0, 1), (80.0, 90.0, 1)])
+
+    def test_names_sheets_and_space(self):
+        self.assertEqual(video.block_name(0), "b00000")
+        self.assertEqual(video.block_name(600.0), "b00600")
+        self.assertEqual(video.block_name(3661.4), "b03661")
+        self.assertEqual([video.sheet_count(n) for n in (0, 1, 25, 26, 40, 50)], [1, 1, 1, 2, 2, 2])
+        self.assertEqual(video.space_needed(40), 40_000_000)
+
+    def test_unfinished_blocks_are_renamed_and_finished_ones_kept(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            done, half = root / "b00000", root / "b00600"
+            done.mkdir()
+            (done / "index.json").write_text("{}", encoding="utf-8")
+            half.mkdir()
+            (half / "frame-0000.jpg").write_bytes(b"x")
+            self.assertEqual(video.clear_partial(done), done)
+            self.assertIsNone(video.clear_partial(half))
+            self.assertFalse(half.exists())
+            self.assertTrue((root / "b00600.parcial" / "frame-0000.jpg").is_file())
+            half.mkdir()
+            (half / "frame-0000.jpg").write_bytes(b"y")
+            self.assertIsNone(video.clear_partial(half))
+            self.assertTrue((root / "b00600.parcial-2").is_dir())
+            self.assertIsNone(video.clear_partial(root / "b01200"))
+            broken = root / "b01800"
+            broken.mkdir()
+            (broken / "index.json").write_text('{"start": 1800.0,', encoding="utf-8")  # truncado
+            self.assertIsNone(video.clear_partial(broken))
+            self.assertTrue((root / "b01800.parcial").is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()

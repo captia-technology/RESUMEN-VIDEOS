@@ -24,6 +24,11 @@ from common import (DEFAULT_THREADS, MAX_FRAMES, MIN_PYTHON, cache_dir, duration
 
 __version__ = "0.1.0"
 
+BLOCK = 600.0
+SHEET = 5
+SHEET_WIDTH = 160
+INDEX_SIDE = 64
+
 
 def check(args):
     # Diagnostic entry point: always prints the report, even when something is broken.
@@ -136,6 +141,52 @@ def packet_warnings(data):
             f"saltos mayores de un fotograma (el mayor, {max(gaps):.3f} s): puede faltar imagen en "
             "el original."))
     return avisos
+
+
+def block_name(start):
+    """Folder of a sweep block, named after its first second."""
+    return f"b{int(start):05d}"
+
+
+def sheet_count(frames, side=SHEET):
+    return max(1, math.ceil(frames / (side * side)))
+
+
+def space_needed(frames):
+    """Bytes to reserve for a sweep: 1 MB per view, the upper bound of the reference."""
+    return frames * 1_000_000
+
+
+def sweep_blocks(start, end, step, *, length=BLOCK):
+    """Blocks of about `length` seconds aligned to the sampling grid: (start, end, frames)."""
+    span = max(step, math.floor(length / step) * step)
+    blocks, a = [], float(start)
+    while a < end:
+        b = min(float(end), a + span)
+        blocks.append((round(a, 6), round(b, 6), frame_count(a, b, step)))
+        a = b
+    return blocks
+
+
+def clear_partial(folder):
+    """A block with a valid index.json is kept; anything else is set aside so it can be redone."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        return None
+    marker = folder / "index.json"
+    if marker.is_file():
+        try:
+            json.loads(marker.read_text(encoding="utf-8"))
+            return folder
+        except (OSError, ValueError):
+            pass  # truncated or corrupt: treat as unfinished, fall through to reset
+    # Nothing is deleted: the images already taken stay available to the agent.
+    spare, number = folder.with_name(f"{folder.name}.parcial"), 1
+    while spare.exists():
+        number += 1
+        spare = folder.with_name(f"{folder.name}.parcial-{number}")
+    folder.rename(spare)
+    return None
 
 
 def frames(args):
