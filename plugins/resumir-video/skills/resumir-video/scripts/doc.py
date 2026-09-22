@@ -295,3 +295,98 @@ def block(name, number, context):
         raise ValueError(f"Línea {number}: la marca [[{name}]] no existe en modo audio.")
     return {"ficha": ficha, "indice": indice, "timeline": timeline,
             "validacion": validacion}[name](context)
+
+
+def has_python_docx():
+    try:
+        import docx  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def engine():
+    """Which converter will be used: Pandoc first, python-docx next, none last."""
+    if common.tool("pandoc"):
+        return "pandoc"
+    return "python-docx" if has_python_docx() else None
+
+
+def to_docx(markdown_path, target, base):
+    """Publish the DOCX beside the Markdown; None means only Markdown is delivered."""
+    target, staged = Path(target), Path(f"{target}.parcial")
+    used = engine()
+    if used is None:
+        return None
+    if used == "pandoc":
+        common.run([common.tool("pandoc"), "--from=markdown", "--to=docx",
+                    f"--resource-path={Path(base).resolve()}", "--output", str(staged),
+                    str(markdown_path)])
+    else:
+        render_docx(Path(markdown_path).read_text(encoding="utf-8"), staged, Path(base))
+    staged.replace(target)
+    return used
+
+
+INLINE = re.compile(r"(\*\*.+?\*\*|(?<!\*)\*[^*]+?\*|`[^`]+`)", re.S)
+IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
+ROW = re.compile(r"^\|(.+)\|\s*$")
+RULE = re.compile(r"^\|[\s:|-]+\|\s*$")
+
+
+def write_runs(paragraph, text):
+    """Bold, italic and inline code of one line; anything else is plain text."""
+    for piece in INLINE.split(text):
+        if not piece:
+            continue
+        run = paragraph.add_run(piece.strip("*`"))
+        run.bold = piece.startswith("**")
+        run.italic = piece.startswith("*") and not piece.startswith("**")
+        if piece.startswith("`"):
+            run.font.name = "Consolas"
+
+
+def render_docx(markdown, target, base):
+    """Headings, paragraphs, lists, tables, emphasis, code and images: the spec's subset."""
+    from docx import Document
+    from docx.shared import Inches
+    document = Document()
+    lines, i = markdown.splitlines(), 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        if not line.strip():
+            i += 1
+        elif line.startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
+            document.add_heading(line[level:].strip(), level=min(level, 4))
+            i += 1
+        elif line.startswith("```"):
+            block, i = [], i + 1
+            while i < len(lines) and not lines[i].startswith("```"):
+                block.append(lines[i])
+                i += 1
+            document.add_paragraph().add_run("\n".join(block)).font.name = "Consolas"
+            i += 1
+        elif IMAGE.match(line):
+            picture = Path(base) / IMAGE.match(line).group(2)
+            if picture.is_file():
+                document.add_picture(str(picture), width=Inches(6))
+            i += 1
+        elif line.lstrip().startswith(("- ", "* ")):
+            write_runs(document.add_paragraph(style="List Bullet"), line.lstrip()[2:])
+            i += 1
+        elif ROW.match(line):
+            rows = []
+            while i < len(lines) and ROW.match(lines[i].rstrip()):
+                if not RULE.match(lines[i].rstrip()):
+                    rows.append([c.strip() for c in ROW.match(lines[i].rstrip()).group(1).split("|")])
+                i += 1
+            grid = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
+            grid.style = "Table Grid"
+            for row, values in zip(grid.rows, rows):
+                for cell, text in zip(row.cells, values):
+                    write_runs(cell.paragraphs[0], text)
+        else:
+            write_runs(document.add_paragraph(), line)
+            i += 1
+    document.save(str(target))

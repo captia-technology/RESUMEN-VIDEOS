@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
+import zipfile
 
 import common
 import doc
@@ -192,6 +194,62 @@ class MarkTest(unittest.TestCase):
     def test_a_doubtful_answer_is_not_a_pending_text(self):
         self.assertEqual(doc.expand("La cifra (pendiente de verificar) es 12.\n", context()),
                          "La cifra (pendiente de verificar) es 12.\n")
+
+
+SAMPLE = """# Resumen
+
+Párrafo con **negrita**, *cursiva* y `código`.
+
+- Primera idea
+- Segunda idea
+
+| # | Origen | Tema |
+| --- | --- | --- |
+| 1 | 0:10–0:20 | Requisito |
+
+```text
+0:00 ▕·····█████▏ 1:36
+```
+"""
+
+
+class DocxTest(unittest.TestCase):
+    def test_markdown_only_when_no_converter_exists(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            base = Path(temporary)
+            (base / "resumen.md").write_text(SAMPLE, encoding="utf-8")
+            with mock.patch.object(doc.common, "tool", return_value=None), \
+                 mock.patch.object(doc, "has_python_docx", return_value=False):
+                self.assertIsNone(doc.to_docx(base / "resumen.md", base / "resumen.docx", base))
+            self.assertFalse((base / "resumen.docx").exists())
+            self.assertFalse(list(base.glob("*.parcial")))
+
+    def test_the_available_engine_produces_a_readable_docx(self):
+        if doc.engine() is None:
+            self.skipTest("Ni Pandoc ni python-docx disponibles")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            base = Path(temporary)
+            (base / "resumen.md").write_text(SAMPLE, encoding="utf-8")
+            used = doc.to_docx(base / "resumen.md", base / "resumen.docx", base)
+            self.assertIn(used, ("pandoc", "python-docx"))
+            with zipfile.ZipFile(base / "resumen.docx") as bundle:
+                xml = bundle.read("word/document.xml").decode("utf-8")
+            self.assertIn("<w:tbl>", xml)
+            self.assertIn("Requisito", xml)
+            self.assertFalse(list(base.glob("*.parcial")))
+
+    def test_the_markdown_subset_covers_the_document(self):
+        if not doc.has_python_docx():
+            self.skipTest("python-docx no instalado")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            base = Path(temporary)
+            doc.render_docx(SAMPLE, base / "fallback.docx", base)
+            with zipfile.ZipFile(base / "fallback.docx") as bundle:
+                xml = bundle.read("word/document.xml").decode("utf-8")
+            self.assertIn("<w:tbl>", xml)
+            self.assertIn("<w:b/>", xml)
+            self.assertIn("<w:i/>", xml)
+            self.assertIn("Segunda idea", xml)
 
 
 if __name__ == "__main__":
