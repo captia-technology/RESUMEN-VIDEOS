@@ -224,6 +224,27 @@ class DocxTest(unittest.TestCase):
             self.assertFalse((base / "resumen.docx").exists())
             self.assertFalse(list(base.glob("*.parcial")))
 
+    def test_a_conversion_crash_mid_write_does_not_leave_a_stray_parcial(self):
+        # A Pandoc crash after it has already started writing the staged file must not leave
+        # a <nombre>.docx.parcial orphaned forever, the same principle publish_document already
+        # applies to its own .md.parcial.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            base = Path(temporary)
+            (base / "resumen.md").write_text(SAMPLE, encoding="utf-8")
+            target = base / "resumen.docx"
+
+            def crash(args, cwd=None):
+                staged = Path(args[args.index("--output") + 1])
+                staged.write_bytes(b"contenido parcial")
+                raise ValueError("pandoc se cayo a mitad")
+
+            with mock.patch.object(doc, "engine", return_value="pandoc"), \
+                 mock.patch.object(doc.common, "run", side_effect=crash):
+                with self.assertRaises(ValueError):
+                    doc.to_docx(base / "resumen.md", target, base)
+            self.assertFalse(target.exists())
+            self.assertFalse(list(base.glob("*.parcial")))
+
     def test_the_available_engine_produces_a_readable_docx(self):
         if doc.engine() is None:
             self.skipTest("Ni Pandoc ni python-docx disponibles")
@@ -356,6 +377,21 @@ class DocumentTest(unittest.TestCase):
             events = [json.loads(line)["evento"] for line
                       in (work / "historial.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(events, ["doc", "doc"])
+
+    def test_a_hand_edited_speed_or_rate_of_zero_raises_a_clear_error(self):
+        # A hand-edited seleccion.json with settings.speed = 0 or settings.rate = "0/1" must
+        # raise ValueError, never let a raw ZeroDivisionError escape past video.main()'s
+        # controlled-exception tuple.
+        for override in ({"speed": 0}, {"rate": "0/1"}):
+            with self.subTest(override=override):
+                with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+                    work = workspace(temporary)
+                    plan_path = work / "v1/seleccion.json"
+                    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                    plan["settings"].update(override)
+                    plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "velocidad|cadencia"):
+                        doc.report_of(doc.arguments(work=work, version=1))
 
 
 class RevisionTest(unittest.TestCase):

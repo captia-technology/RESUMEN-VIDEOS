@@ -365,12 +365,17 @@ def to_docx(markdown_path, target, base):
     used = engine()
     if used is None:
         return None
-    if used == "pandoc":
-        common.run([common.tool("pandoc"), "--from=markdown", "--to=docx",
-                    f"--resource-path={Path(base).resolve()}", "--output", str(staged),
-                    str(markdown_path)])
-    else:
-        render_docx(Path(markdown_path).read_text(encoding="utf-8"), staged, Path(base))
+    try:
+        if used == "pandoc":
+            common.run([common.tool("pandoc"), "--from=markdown", "--to=docx",
+                        f"--resource-path={Path(base).resolve()}", "--output", str(staged),
+                        str(markdown_path)])
+        else:
+            render_docx(Path(markdown_path).read_text(encoding="utf-8"), staged, Path(base))
+    except Exception:
+        # A crash mid-write must not leave a <nombre>.docx.parcial orphaned forever.
+        staged.unlink(missing_ok=True)
+        raise
     staged.replace(target)
     return used
 
@@ -411,9 +416,18 @@ def context_of(work, number, out, metadata, schema=None):
         if key not in plan:
             raise ValueError(f"El plan publicado no tiene «{key}»: {Path(out) / 'seleccion.json'}")
     speed = float(plan["settings"].get("speed", 1.0))
+    corrupt = ValueError("El plan publicado tiene una velocidad o una cadencia no válidas: ¿se ha "
+                         "editado a mano? revisa `settings.speed` y `settings.rate` en el plan.")
+    if speed <= 0:
+        raise corrupt
     # The montage's own F rules; metadata only answers when the plan does not carry it.
     rate = plan["settings"].get("rate")
-    cadence = 1 / common.output_interval(rate) if rate else float(metadata["timeline"]["fps"])
+    try:
+        cadence = 1 / common.output_interval(rate) if rate else float(metadata["timeline"]["fps"])
+    except ZeroDivisionError:
+        cadence = 0.0
+    if cadence <= 0:
+        raise corrupt
     base.update(spans=placements(plan["segments"], speed, cadence), speed=speed,
                 settings=plan["settings"])
     return base
