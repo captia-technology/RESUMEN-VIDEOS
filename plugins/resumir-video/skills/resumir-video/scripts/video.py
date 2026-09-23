@@ -412,6 +412,9 @@ def recover(work, segments, levels, total, language, device, args):
                 recorded["segments"]  # validate shape before trusting the cache
             except (OSError, ValueError, KeyError):
                 recorded = None  # truncated/corrupt: treat as unfinished
+                # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+                # corrupt leftover would turn every retry into the same FileExistsError forever.
+                piece.unlink(missing_ok=True)
         if recorded is None:
             if model is None:
                 model, device = load_model(args)

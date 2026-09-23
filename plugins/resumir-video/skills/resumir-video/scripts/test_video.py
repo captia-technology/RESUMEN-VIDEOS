@@ -533,6 +533,33 @@ class VideoTest(unittest.TestCase):
             self.assertTrue(all(a["start"] <= b["start"]
                                 for a, b in zip(data["segments"], data["segments"][1:])))
 
+    def test_corrupt_gap_is_redone_instead_of_blocking_forever(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            work = root / "transcripcion.parcial"
+            work.mkdir()
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(root / "transcripcion.json"),
+                 "--language", "es", "--device", "cpu"])
+            levels = common.energy(str(audio), root / "energia.f32")
+            total = round(len(levels) * video.LEVEL_STEP, 3)
+            with fake_whisper(Reluctant):
+                segments, device = video.recover(work, [], levels, total, "es", None, arguments)
+            self.assertTrue(any(s.get("recuperado") for s in segments))
+            piece = work / "hueco-000.json"
+            self.assertTrue(piece.is_file())
+            original = piece.read_bytes()
+            piece.write_bytes(original[:len(original) // 2])  # real bytes, truncated for real
+            # Redoing the corrupt gap must not raise FileExistsError on the retry's save(): the
+            # call has to behave exactly as a first attempt on that gap.
+            with fake_whisper(Reluctant):
+                redone, device = video.recover(work, [], levels, total, "es", device, arguments)
+            self.assertTrue(any(s.get("recuperado") for s in redone))
+            self.assertEqual(json.loads(piece.read_text(encoding="utf-8"))["segments"],
+                             [{k: v for k, v in s.items() if k != "recuperado"} for s in redone])
+
 
 class PlanTest(unittest.TestCase):
     def test_missing_encoders_are_reported_before_rendering(self):
