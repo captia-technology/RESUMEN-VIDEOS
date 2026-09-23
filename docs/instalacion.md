@@ -2,7 +2,7 @@
 
 Guía para instalar la skill `resumir-video` en Claude Code, GitHub Copilot y OpenAI Codex, actualizarla y desinstalarla. Las capacidades se describen en [capacidades.md](capacidades.md).
 
-Estado: versión 0.1.0 (2026-09-17). Las órdenes de catálogo se comprobaron con una copia local del repositorio (por ruta y como copia Git que sustituía a `captia-technology/RESUMEN-VIDEOS`); los clientes, sus versiones y los resultados figuran en [plan.md](plan.md#validación-2026-09-17). La instalación desde GitHub (incluidos VS Code, el bloque de equipo y los instaladores de terceros) está pendiente de evidencia hasta publicar el repositorio. Los sistemas de plugins cambian con frecuencia: si una orden no existe en tu versión, actualiza el cliente o usa la [instalación como skill independiente](#5-skill-independiente-sin-plugins).
+Estado: versión 0.2.0 (2026-09-18). Las órdenes de catálogo se comprobaron con una copia local del repositorio (por ruta y como copia Git que sustituía a `captia-technology/RESUMEN-VIDEOS`); los clientes, sus versiones y los resultados figuran en [plan.md](plan.md#validación-2026-09-17). La instalación desde GitHub (incluidos VS Code, el bloque de equipo y los instaladores de terceros) está pendiente de evidencia hasta publicar el repositorio. Los sistemas de plugins cambian con frecuencia: si una orden no existe en tu versión, actualiza el cliente o usa la [instalación como skill independiente](#5-skill-independiente-sin-plugins).
 
 ## Resumen
 

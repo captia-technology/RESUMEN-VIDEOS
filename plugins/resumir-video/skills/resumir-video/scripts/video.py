@@ -24,7 +24,7 @@ from common import (DEFAULT_THREADS, MAX_FRAMES, MIN_PYTHON, cache_dir, duration
                     require_encoders, run, save, seconds, seek_margin, stream_duration, stream_end,
                     streams, tag_seconds, timeline_start, tool, video_stream)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 BLOCK = 600.0
 SHEET = 5

@@ -1,6 +1,6 @@
 # Capacidades
 
-Catálogo de lo que hace la skill `resumir-video` 0.1.0, cómo reparte el trabajo entre el agente y el asistente local, qué entradas admite, qué produce, qué garantiza y cuáles son sus límites. La instalación está en [instalacion.md](instalacion.md); las órdenes exactas y los formatos de archivo, en la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md).
+Catálogo de lo que hace la skill `resumir-video` 0.2.0, cómo reparte el trabajo entre el agente y el asistente local, qué entradas admite, qué produce, qué garantiza y cuáles son sus límites. La instalación está en [instalacion.md](instalacion.md); las órdenes exactas y los formatos de archivo, en la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md).
 
 ## Qué hace
 

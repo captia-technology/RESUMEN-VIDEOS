@@ -1,7 +1,7 @@
 {
   "name": "resumir-video",
-  "version": "0.1.0",
-  "description": "Resume vídeos técnicos locales en un MP4 con fragmentos originales, analizando voz y pantalla (Python 3.10+ y FFmpeg).",
+  "version": "0.2.0",
+  "description": "Resume grabaciones técnicas locales en un MP4 con fragmentos originales y un documento, analizando voz y pantalla, con revisión previa de los cortes (Python 3.10+ y FFmpeg).",
   "author": {
     "name": "CAPTIA TECHNOLOGY S.L."
   },

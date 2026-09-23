@@ -3,7 +3,7 @@
 <img src="docs/img/banner.svg" alt="resumir-video: la línea de tiempo original se condensa en el resumen" width="100%">
 
 <p>
-  <a href="CHANGELOG.md"><img alt="Versión 0.1.0" src="https://img.shields.io/badge/versi%C3%B3n-0.1.0-38BDF8?style=flat-square"></a>
+  <a href="CHANGELOG.md"><img alt="Versión 0.2.0" src="https://img.shields.io/badge/versi%C3%B3n-0.2.0-38BDF8?style=flat-square"></a>
   <a href="LICENSE"><img alt="Licencia MIT" src="https://img.shields.io/badge/licencia-MIT-34D399?style=flat-square"></a>
   <a href="https://github.com/captia-technology/RESUMEN-VIDEOS/actions/workflows/pruebas.yml"><img alt="Pruebas" src="https://github.com/captia-technology/RESUMEN-VIDEOS/actions/workflows/pruebas.yml/badge.svg"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-FBBF24?style=flat-square">
@@ -332,7 +332,7 @@ Sin compromiso de fecha, a partir de la experiencia con grabaciones largas ([det
 
 <div align="center">
 
-**Versión 0.1.0 · Licencia [MIT](LICENSE) · © 2026 CAPTIA TECHNOLOGY S.L.**
+**Versión 0.2.0 · Licencia [MIT](LICENSE) · © 2026 CAPTIA TECHNOLOGY S.L.**
 
 Las figuras se generan con [`scripts/generar_graficos.py`](scripts/generar_graficos.py) a partir de [datos medidos](docs/img/datos.json); las capturas son salidas reales de los clientes.
 

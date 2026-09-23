@@ -2,6 +2,60 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y [versionado semántico](https://semver.org/lang/es/). Al publicar una versión, actualiza el mismo número en los archivos que enumera [docs/instalacion.md](docs/instalacion.md#7-publicar-una-versión-nueva); `tests/test_packaging.py` lo comprueba.
 
+## [0.2.0] - 2026-09-18
+
+Compresión con objetivo, revisión previa obligatoria y entrada de solo audio con documento. Incluye
+cambios **incompatibles** con la 0.1.0 en los valores por defecto y en la forma de montar.
+
+### Incompatible
+
+- Los valores por defecto cambian: el resumen se acelera a ×1,25 y elimina las pausas. Para volver al
+  comportamiento de la 0.1.0, pide `velocidad=1` y `pausas=no`.
+- `render` exige aceptación: `--accept "frase literal del usuario"` o `--directo`. Un plan sin una de
+  las dos se rechaza, y un aviso bloqueante detiene el montaje incluso con `--directo`.
+- La salida ya no es `final/`, sino `vN/` (vídeo) o `documento-vN/` (audio), inmutables.
+- `frames --out` pasa a ser la carpeta de fotogramas del trabajo, con una subcarpeta `bSSSSS/` por
+  bloque; ya no falla si existe, sino que reanuda. Los planes de la 0.1 se importan con
+  `plan --import`.
+
+### Añadido
+
+- Objetivo de compresión en porcentaje o duración (`10 %`, `12 min`, `0:12:00`), con banda de
+  tolerancia, seis estados, alternativas, sugerencias y dieciocho avisos.
+- Propuesta previa (`propuesta-vN.md`) y edición en lenguaje natural antes y después del montaje, con
+  versiones inmutables e `historial.jsonl`.
+- Entrada de solo audio: `plan --kind audio` publica un esquema y `doc` entrega
+  `documento-vN/resumen.md` (+ DOCX si hay Pandoc o python-docx).
+- Documento equivalente junto al MP4, con marcas de tiempo expandidas, timeline e informe de
+  validación; `compare` mide la cobertura de palabras sin bloquear.
+- Subcomandos `plan`, `doc`, `compare` y `search`; módulos `common.py`, `plan.py`, `render.py` y
+  `doc.py`.
+- `frames` barre por bloques en un proceso por bloque, con índice de cambios (`indice.gray`), hojas
+  de contacto y reanudación; en las medidas hechas al desarrollarlo, 50 vistas pasaron de 21,1 s a
+  0,68 s.
+- `transcribe` trabaja por bloques reanudables cortados en el silencio, recupera sin VAD los huecos
+  con sonido, marca los segmentos dudosos, admite `--device auto`, `--dll-dir`, `--block`, `--slack`
+  y `--budget`, y normaliza subtítulos SRT o WebVTT con `--subtitles`.
+- `render` monta por cortes cacheados, con presupuesto reanudable, un reintento ante falta de memoria
+  y validación bloqueante de recuentos, imagen y envolvente antes de publicar; `render --dry-run`
+  estima el coste del montaje (`{reused, new, eta_s}`) sin renderizar, frente a `plan --dry-run`, que
+  muestra el plan propuesto sin escribirlo.
+- `check` informa además de los filtros obligatorios, Pandoc, python-docx, Pillow y la memoria
+  disponible, indicando qué se degrada si falta cada opcional.
+- Referencias nuevas `compresion.md`, `revision.md` y `documento.md`.
+
+### Cambiado
+
+- `--device` de `transcribe` pasa de `cpu` a `auto`: prueba CUDA, avisa y vuelve a CPU.
+  `--compute-type` deja de tener un valor fijo (`int8` en CPU, `float16` en CUDA).
+- La identidad del medio pasa a ser una huella (tamaño, `mtime_ns` y sha256 de los primeros y últimos
+  4 MiB): un plan sigue siendo válido si el archivo se mueve y la huella coincide.
+- `prepare` clasifica el medio (`kind`), guarda la línea temporal y la cadencia, calcula
+  `energia.f32` una sola vez, rechaza el material HDR con un mensaje explícito y deja en
+  `metadata.avisos` lo que detecta el sondeo de paquetes (`fuente_vfr`, `huecos_pts`).
+- La referencia de operación retira «el montaje no se reanuda» y «cada imagen es una búsqueda
+  independiente»: ambas cosas han dejado de ser ciertas.
+
 ## [0.1.0] - 2026-09-17
 
 Primera versión. «Cambiado» y «Corregido» se refieren a las copias manuales sin versionar que había en `.claude/skills` y `.agents/skills` (véase [D-004](docs/decisiones.md#d-004--distribución-como-plugin-multiplataforma)), salvo las entradas sobre `check` e `install.py`: son nuevos en esta versión y recogen los fallos corregidos durante su verificación ([plan](docs/plan.md#validación-2026-09-17)).
