@@ -166,12 +166,9 @@ La validación técnica no certifica la calidad editorial: la revisión de union
 
 ## Limitaciones conocidas
 
-- `render` no se reanuda; un fallo obliga a repetir el montaje en otra carpeta.
-- `transcribe` procesa el audio en una sola pasada y escribe al final; audios de varias horas pueden agotar la memoria (dividir por bloques es manual).
 - El VAD puede omitir habla real; conviene repetir los huecos con `--no-vad`.
 - El índice de 15 s puede no mostrar una diapositiva breve; hay que ampliar el muestreo donde el audio o los cambios lo indiquen.
-- Mover o copiar el vídeo invalida `seleccion.json` hasta actualizar su `source`.
-- Si el proceso se interrumpe, la carpeta de salida queda incompleta y puede conservar una carpeta `cortes-*`: bórrala y usa otra carpeta.
+- La caché `cortes/` crece con cada corte distinto montado; para repetir un montaje desde cero con otros parámetros de codificación, borra esa carpeta a mano.
 - `resumen.mp4` solo contiene la pista de vídeo y la pista de audio elegida: se descartan los subtítulos incrustados, las demás pistas de audio, los capítulos y los metadatos del contenedor.
 - La imagen se convierte a 8 bits 4:2:0 (yuv420p) y una dimensión impar se rellena con un píxel. En grabaciones de pantalla 4:4:4, revisa la legibilidad del texto fino en color.
 - La calidad del resumen depende de la capacidad multimodal del agente y del tiempo disponible para revisar.

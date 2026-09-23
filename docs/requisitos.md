@@ -19,7 +19,7 @@
 | R2 | Propuesta de cortes revisable en lenguaje natural antes y después del montaje | [D-008](decisiones.md#d-008--revisión-previa-con-aceptación-registrada-y-versiones-inmutables) |
 | R3 | Entrada de solo audio: documento en Markdown y, si hay conversor, DOCX | [D-010](decisiones.md#d-010--modo-audio-y-documento-con-motores-opcionales) |
 | R4 | En vídeo, el mismo documento acompaña siempre al MP4 | [D-010](decisiones.md#d-010--modo-audio-y-documento-con-motores-opcionales) |
-| R5 | Se conservan garantías, dependencias, preferencia por subtítulos fiables y pruebas de la 0.1.0 | [D-003](decisiones.md#d-003--skill-autocontenida-con-montaje-local), [D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje) |
+| R5 | Se conservan garantías, dependencias, preferencia por subtítulos fiables y pruebas de la 0.1.0 | [D-003](decisiones.md#d-003--skill-autocontenida-con-montaje-local), [D-004](decisiones.md#d-004--distribución-como-plugin-multiplataforma), [D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje) |
 
 Decisiones de diseño tomadas en la sesión de especificación: A-1 sin objetivo manda el criterio
 editorial; A-2 la revisión previa es obligatoria salvo `directo`; A-3 en modo audio se acepta el

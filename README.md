@@ -278,7 +278,7 @@ Comprueba el entorno con `python3 plugins/resumir-video/skills/resumir-video/scr
 ## 🧪 Desarrollo
 
 ```text
-python3 -B -m unittest discover -s tests                                      # 23 pruebas
+python3 -B -m unittest discover -s tests                                      # 26 pruebas
 python3 -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 claude plugin validate plugins/resumir-video --strict && claude plugin validate . --strict
 python3 -B scripts/generar_graficos.py                                        # regenera los gráficos
