@@ -581,8 +581,17 @@ def transcribe(args):
                 "vad_filter": not args.no_vad, "language": args.language}
     fingerprint = {"settings": settings, "source": audio, "blocks": [[a, b] for a, b in plan]}
     stored = work / "ajustes.json"
+    recorded = None
     if stored.is_file():
-        if json.loads(stored.read_text(encoding="utf-8")) != fingerprint:
+        try:
+            recorded = json.loads(stored.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = None  # truncated/corrupt: treat as unfinished
+            # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+            # corrupt leftover would turn every retry into the same FileExistsError forever.
+            stored.unlink(missing_ok=True)
+    if recorded is not None:
+        if recorded != fingerprint:
             raise Refused("Los ajustes de transcripción no coinciden con los de la parte ya "
                           "hecha; repite la orden con los mismos o elige otra salida.")
     else:

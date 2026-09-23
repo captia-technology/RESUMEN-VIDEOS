@@ -500,6 +500,36 @@ class VideoTest(unittest.TestCase):
             self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
             self.assertFalse((root / "transcripcion.parcial").exists())
 
+    def test_corrupt_settings_is_redone_instead_of_blocking_forever(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es", "--budget", "0"])
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 3)
+            stored = root / "transcripcion.parcial" / "ajustes.json"
+            original = stored.read_bytes()
+            stored.write_bytes(original[:len(original) // 2])  # real bytes, truncated for real
+            # Redoing the corrupt settings file must not raise FileExistsError on the retry's
+            # save(), nor refuse the run as if the settings had actually changed: the call has to
+            # behave exactly as a first attempt at recording the settings, still bounded by budget
+            # and still reusing the block already done.
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+                self.assertEqual(video.transcribe(arguments), 3)
+            self.assertEqual(json.loads(stored.read_text(encoding="utf-8")),
+                             json.loads(original.decode("utf-8")))
+            report = json.loads(printed.getvalue().splitlines()[-1])
+            self.assertEqual(report["pending"], 2)
+            arguments.budget = None
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
+            self.assertFalse((root / "transcripcion.parcial").exists())
+
     def test_a_failed_publish_can_be_retried_without_touching_the_final_output(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
@@ -841,10 +871,12 @@ class CheckTest(unittest.TestCase):
     OK_LINE = ('report[key] for key in ("python_ok", "ffmpeg", "ffprobe", "libx264", "aac", '
               '"filters_ok"))')
 
-    def environment(self, present, engine, faster_whisper=True, pillow=True, target=None):
+    def environment(self, present, engine, faster_whisper=True, pillow=True, memory_free_gb=2.0,
+                    disk_free_gb=2.0, target=None):
         """check with a controlled FFmpeg and a controlled set of optional tools. faster_whisper
-        and Pillow are simulated via sys.modules (present or absent, by request) so the report
-        never depends on what actually happens to be installed on the machine running the suite."""
+        and Pillow are simulated via sys.modules (present or absent, by request), and
+        memory_free_gb/disk_free_gb via their own source hooks, so the report never depends on
+        what actually happens to be installed or free on the machine running the suite."""
         target = target or video
         whisper_module = types.ModuleType("faster_whisper")
         whisper_module.WhisperModel = object
@@ -856,12 +888,17 @@ class CheckTest(unittest.TestCase):
                 mock.patch.object(target.doc, "engine", return_value=engine),
                 mock.patch.object(target.doc, "has_python_docx", return_value=engine is not None),
                 optional_module("faster_whisper", whisper_module if faster_whisper else None),
-                optional_module("PIL", types.ModuleType("PIL") if pillow else None))
+                optional_module("PIL", types.ModuleType("PIL") if pillow else None),
+                mock.patch.object(target, "free_memory_gb", return_value=memory_free_gb),
+                mock.patch.object(target.shutil, "disk_usage",
+                                  return_value=types.SimpleNamespace(free=int(disk_free_gb * 1e9))))
 
-    def report_of(self, present, engine, faster_whisper=True, pillow=True, target=None):
+    def report_of(self, present, engine, faster_whisper=True, pillow=True, memory_free_gb=2.0,
+                  disk_free_gb=2.0, target=None):
         target = target or video
         with contextlib.ExitStack() as stack:
-            for patch in self.environment(present, engine, faster_whisper, pillow, target):
+            for patch in self.environment(present, engine, faster_whisper, pillow, memory_free_gb,
+                                          disk_free_gb, target):
                 stack.enter_context(patch)
             printed = stack.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
             code = target.check(None)
@@ -888,6 +925,37 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(report["missing_filters"], ["tpad", "atempo"])
         self.assertFalse(report["filters_ok"])
 
+    def leaked_ok_tuple_codes(self, extra_key, **environment_kwargs):
+        """Mutates a throwaway copy of video.py so `ok` also depends on `extra_key`, then returns
+        (healthy, leaked): the exit codes from the real video.check and from the mutated copy, for
+        the same, otherwise-passing inputs in environment_kwargs. Shared by the regression tests
+        below, one per optional the hermetic harness must keep out of the `ok` tuple."""
+        source = Path(video.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count(self.OK_LINE), 1)
+        leaking = self.OK_LINE.replace('"filters_ok"))', f'"filters_ok", "{extra_key}"))')
+        mutated_source = source.replace(self.OK_LINE, leaking, 1)
+        with tempfile.TemporaryDirectory(prefix="resumir-video-check-mutation-") as temporary:
+            mutated_path = Path(temporary) / f"video_with_leaked_{extra_key}.py"
+            mutated_path.write_text(mutated_source, encoding="utf-8")
+            name = f"video_with_leaked_{extra_key}_under_test"
+            spec = importlib.util.spec_from_file_location(name, mutated_path)
+            mutated = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mutated
+            try:
+                spec.loader.exec_module(mutated)
+                # Same scenario in both cases: every required piece is fine and the leaked key is
+                # simply falsy (an optional, per spec §3). The real code must stay at 0; the copy
+                # that leaks it into `ok` must not -- this is the check the reviewer ran by hand.
+                healthy, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc", target=video,
+                                            **environment_kwargs)
+                leaked, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc", target=mutated,
+                                           **environment_kwargs)
+                return healthy, leaked
+            finally:
+                sys.modules.pop(name, None)
+        # The mutation lived only in `temporary`, already removed above: nothing on disk or in
+        # sys.modules outlives this test.
+
     def test_a_leaked_optional_in_the_ok_tuple_is_caught_regardless_of_the_machine(self):
         """Regression test for this test class, not for video.py: if `check` ever folds an
         optional (here Pillow) into the tuple that decides `ok`, that must fail loudly -- on any
@@ -895,32 +963,23 @@ class CheckTest(unittest.TestCase):
         mutating a throwaway copy of video.py and confirming the hermetic harness above (which
         forces Pillow absent via sys.modules, not via what is actually installed) does catch it,
         while the real, unmutated video.check stays at 0 for the same inputs."""
-        source = Path(video.__file__).read_text(encoding="utf-8")
-        self.assertEqual(source.count(self.OK_LINE), 1)
-        leaking = self.OK_LINE.replace('"filters_ok"))', '"filters_ok", "pillow"))')
-        mutated_source = source.replace(self.OK_LINE, leaking, 1)
-        with tempfile.TemporaryDirectory(prefix="resumir-video-check-mutation-") as temporary:
-            mutated_path = Path(temporary) / "video_with_leaked_optional.py"
-            mutated_path.write_text(mutated_source, encoding="utf-8")
-            name = "video_with_leaked_optional_under_test"
-            spec = importlib.util.spec_from_file_location(name, mutated_path)
-            mutated = importlib.util.module_from_spec(spec)
-            sys.modules[name] = mutated
-            try:
-                spec.loader.exec_module(mutated)
-                # Same scenario in both cases: every required piece is fine and Pillow is simply
-                # absent (an optional, per spec §3). The real code must stay at 0; the copy that
-                # leaks Pillow into `ok` must not -- this is the check the reviewer ran by hand.
-                healthy, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc",
-                                            pillow=False, target=video)
-                leaked, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc",
-                                           pillow=False, target=mutated)
+        healthy, leaked = self.leaked_ok_tuple_codes("pillow", pillow=False)
+        self.assertEqual(healthy, 0)
+        self.assertEqual(leaked, 1)
+
+    def test_a_leaked_environment_reading_in_the_ok_tuple_is_caught_regardless_of_the_machine(self):
+        """Same regression as above, for memory_free_gb/disk_free_gb: a mutation that folds either
+        into `ok` must fail loudly even though the real value is a number, never None/falsy, on
+        the vast majority of machines running the suite. Proven the same way: the hermetic harness
+        forces the reading low (falsy-adjacent 0.0, via free_memory_gb/shutil.disk_usage, not via
+        what the real machine reports) and confirms the mutated copy breaks while the real,
+        unmutated video.check stays at 0 for the same inputs."""
+        for key, kwargs in (("memory_free_gb", {"memory_free_gb": 0.0}),
+                            ("disk_free_gb", {"disk_free_gb": 0.0})):
+            with self.subTest(key=key):
+                healthy, leaked = self.leaked_ok_tuple_codes(key, **kwargs)
                 self.assertEqual(healthy, 0)
                 self.assertEqual(leaked, 1)
-            finally:
-                sys.modules.pop(name, None)
-        # The mutation lived only in `temporary`, already removed above: nothing on disk or in
-        # sys.modules outlives this test.
 
 
 if __name__ == "__main__":
