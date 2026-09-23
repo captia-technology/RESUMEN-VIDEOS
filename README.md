@@ -151,6 +151,28 @@ Lo que demuestra el ejemplo, más allá del recorte:
 </tr>
 </table>
 
+Este resultado salió de pedirlo sin objetivo (manda el criterio editorial). El mismo vídeo, con otras configuraciones:
+
+<details>
+<summary><b>El mismo vídeo, pedido con otras configuraciones</b></summary>
+
+| Qué cambia | Cómo se pide |
+| --- | --- |
+| Objetivo en porcentaje | «resume `grabaciones/formacion.mp4` al 10 %» |
+| Objetivo en duración absoluta | «resume `grabaciones/formacion.mp4` en 12 minutos» |
+| Sin acelerar la voz | «resume `grabaciones/formacion.mp4`, sin acelerar» |
+| Conservando los silencios | «resume `grabaciones/formacion.mp4`, conserva las pausas» |
+| Velocidad y pausas explícitas a la vez | `/resumir-video "grabaciones/formacion.mp4" velocidad=1,5 pausas=no` |
+| Sin esperar la revisión previa | «resume `grabaciones/formacion.mp4` y móntalo directo, sin preguntarme» |
+| Pista de audio e idioma explícitos | `/resumir-video "grabaciones/formacion.mp4" pista=1 idioma=es` |
+| Forzando la GPU en la transcripción | «resume `grabaciones/formacion.mp4`, usa la GPU si está disponible» |
+| Carpeta de salida propia | «resume `grabaciones/formacion.mp4` en la carpeta `resumenes/formacion-2025`» |
+| Solo audio (se detecta que no hay vídeo, entrega el documento) | «resume `grabaciones/formacion.mp3`» |
+
+Cualquier combinación vale («al 10 %, sin acelerar, y móntalo directo»); ante una petición ambigua, el agente hace una sola pregunta y no aplica nada hasta tener la respuesta. Sintaxis completa en la sección «Invocación» de [`SKILL.md`](plugins/resumir-video/skills/resumir-video/SKILL.md).
+
+</details>
+
 ## ✅ Garantías verificadas
 
 <table>
