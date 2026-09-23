@@ -9,6 +9,8 @@ import platform
 import re
 import shutil
 import sys
+import tempfile
+import time
 
 # Set before the sibling modules load: the skill folder may live in a read-only plugin cache.
 sys.dont_write_bytecode = True
@@ -330,40 +332,124 @@ def gaps(segments, levels, a, b, *, threshold=common.SILENCE_DB, minimum=GAP_MIN
     return loud
 
 
-def transcribe(args):
-    target = Path(args.out).resolve()
-    if target.exists():
-        raise ValueError("La transcripción de salida ya existe.")
-    if not target.parent.is_dir():
-        raise ValueError(f"No existe la carpeta de salida: {target.parent}")
-    audio = identity(args.audio)
-    try:
-        from faster_whisper import WhisperModel
-    except Exception as exc:
-        raise ValueError("Falta faster-whisper. Usa subtítulos existentes o instálalo en un entorno local.") from exc
-    try:
-        model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
-                             cpu_threads=args.threads, num_workers=1,
-                             local_files_only=not args.allow_download)
-    except (OSError, ValueError) as exc:
-        if args.allow_download or Path(args.model).is_dir():
-            raise
-        raise ValueError(f"El modelo {args.model} no está en la caché local: repite la orden con "
-                         f"--allow-download o indica en --model una carpeta CTranslate2 local.\n{exc}") from exc
-    parts, info = model.transcribe(audio["path"], language=args.language,
-                                   beam_size=args.beam_size, vad_filter=not args.no_vad,
+DOUBT_SILENCE = 0.6
+DOUBT_LOGPROB = -1.0
+
+
+def partial_dir(out):
+    """Folder that holds the blocks already transcribed, next to the published file."""
+    return Path(out).with_suffix(".parcial")
+
+
+def block_cut(audio, target, a, b):
+    """Sample-exact PCM slice: faster-whisper reads a file, not a range of one."""
+    ffmpeg("-ss", seconds(a), "-t", seconds(b - a), "-i", audio, "-c:a", "pcm_s16le", target)
+    return target
+
+
+def transcribe_block(model, path, offset, language, args, *, vad=None):
+    """One block, with its times moved back onto the original timeline."""
+    parts, info = model.transcribe(str(path), language=language, beam_size=args.beam_size,
+                                   vad_filter=not args.no_vad if vad is None else vad,
                                    word_timestamps=True)
     segments = []
     for part in parts:
-        segments.append({"start": part.start, "end": part.end, "text": part.text,
-                         "words": [{"start": w.start, "end": w.end, "text": w.word}
-                                   for w in (part.words or [])]})
-        print(f"Transcrito hasta {part.end:.1f} s", flush=True)
-    if not segments:
-        raise ValueError("No se detectó habla; revisa el audio y el contenido visual.")
-    settings = {"model": args.model, "device": args.device, "compute_type": args.compute_type,
-                "beam_size": args.beam_size, "vad_filter": not args.no_vad}
-    save(target, {"language": info.language, "settings": settings, "segments": segments})
+        segment = {"start": round(part.start + offset, 3), "end": round(part.end + offset, 3),
+                   "text": part.text,
+                   "words": [{"start": round(w.start + offset, 3), "end": round(w.end + offset, 3),
+                              "text": w.word} for w in (part.words or [])]}
+        # Doubtful segments are marked, never dropped: the agent decides (spec §11).
+        if (getattr(part, "no_speech_prob", 0.0) > DOUBT_SILENCE
+                or getattr(part, "avg_logprob", 0.0) < DOUBT_LOGPROB):
+            segment["dudoso"] = True
+        segments.append(segment)
+    return {"language": info.language, "segments": segments}
+
+
+def load_model(args):
+    """Model loaded once per call; completed in task 6."""
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        raise ValueError(f"Falta faster-whisper: {exc}") from exc
+    return WhisperModel(args.model, device="cpu", compute_type=args.compute_type or "int8",
+                        cpu_threads=args.threads, num_workers=1,
+                        local_files_only=not args.allow_download), "cpu"
+
+
+def recover(work, segments, levels, total, language, device, args):
+    """Second pass over the stretches the VAD may have dropped; completed in task 6."""
+    return segments, device
+
+
+def transcribe(args):
+    """Resumable transcription: one saved block at a time, published only when every block is in."""
+    target = Path(args.out).resolve()
+    if target.exists():
+        raise Refused("La transcripción de salida ya existe.")
+    if not target.parent.is_dir():
+        raise Refused(f"No existe la carpeta de salida: {target.parent}")
+    audio = identity(args.audio)
+    work = partial_dir(target)
+    work.mkdir(exist_ok=True)
+    levels = common.energy(audio["path"], target.parent / "energia.f32")
+    total = round(len(levels) * LEVEL_STEP, 3)
+    plan = speech_blocks(levels, total, length=args.block, slack=args.slack)
+    settings = {"model": args.model, "compute_type": args.compute_type, "beam_size": args.beam_size,
+                "vad_filter": not args.no_vad, "language": args.language}
+    fingerprint = {"settings": settings, "source": audio, "blocks": [[a, b] for a, b in plan]}
+    stored = work / "ajustes.json"
+    if stored.is_file():
+        if json.loads(stored.read_text(encoding="utf-8")) != fingerprint:
+            raise Refused("Los ajustes de transcripción no coinciden con los de la parte ya "
+                          "hecha; repite la orden con los mismos o elige otra salida.")
+    else:
+        save(stored, fingerprint)
+    # `device` starts unknown; each bloque-NNN.json records the device that produced it, so a
+    # resumption that finds every block already done still ends up with the real device (below),
+    # instead of publishing settings.device as null.
+    model, device, language = None, None, args.language
+    started, done = time.monotonic(), 0
+    for number, (a, b) in enumerate(plan):
+        piece = work / f"bloque-{number:03d}.json"
+        if piece.is_file():
+            try:
+                recorded = json.loads(piece.read_text(encoding="utf-8"))
+                language = language or recorded["language"]
+            except (OSError, ValueError, KeyError):
+                recorded = None  # truncated/corrupt: treat as unfinished
+            if recorded is not None:
+                device = recorded.get("device", device)
+                done += 1
+                continue
+        if args.budget is not None and done and time.monotonic() - started >= args.budget:
+            left = [f"bloque-{i:03d}" for i in range(number, len(plan))]
+            print(json.dumps({"done": done, "total": len(plan), "pending": len(left),
+                              "bloques": left}, ensure_ascii=False))
+            return 3
+        if model is None:
+            model, device = load_model(args)
+        with tempfile.TemporaryDirectory(prefix="bloque-", dir=work) as tmp:
+            cut = block_cut(audio["path"], Path(tmp) / "bloque.wav", a, b)
+            result = transcribe_block(model, cut, a, language, args)
+        # The language is fixed with the first block so the rest cannot drift (spec §11).
+        language = language or result["language"]
+        save(piece, {"index": number, "start": a, "end": b, "device": device, **result})
+        done += 1
+        print(f"Bloque {number + 1}/{len(plan)} hasta {b:.1f} s", flush=True)
+    segments = [segment for number in range(len(plan))
+                for segment in json.loads((work / f"bloque-{number:03d}.json")
+                                          .read_text(encoding="utf-8"))["segments"]]
+    segments, device = recover(work, segments, levels, total, language, device, args)
+    segments.sort(key=lambda segment: (segment["start"], segment["end"]))
+    staged = work / "transcripcion.json"
+    save(staged, {"language": language, "settings": {**settings, "device": device},
+                  "blocks": [{"start": a, "end": b} for a, b in plan],
+                  "segments": segments, "warnings": []})
+    common.publish(staged, target)
+    shutil.rmtree(work)
+    print(target)
+    return 0
 
 
 def show(args):
@@ -458,24 +544,34 @@ def build_parser():
                    help=f"Segundos por bloque, un proceso cada uno (por defecto {BLOCK:.0f}).")
     p.add_argument("--threads", type=positive, default=1,
                    help="Hilos de decodificación por bloque (por defecto 1).")
-    p = sub.add_parser("transcribe", help="Transcribe con faster-whisper y marcas por palabra (opcional).")
+    p = sub.add_parser("transcribe", help="Transcribe por bloques reanudables con faster-whisper, "
+                                          "o normaliza subtítulos existentes.")
+    p.set_defaults(run=transcribe)
     p.add_argument("audio", help="Audio local, normalmente audio.wav de prepare.")
     p.add_argument("--out", required=True, help="JSON de salida nuevo; su carpeta debe existir.")
     p.add_argument("--model", default="small",
                    help="Nombre de modelo o carpeta CTranslate2 local (por defecto small).")
     p.add_argument("--language", help="Código de idioma, p. ej. es (por defecto, detección automática).")
     p.add_argument("--allow-download", action="store_true",
-                   help="Permite descargar el modelo; sin esta opción solo se usan modelos locales o cacheados.")
-    p.add_argument("--device", default="cpu", choices=("cpu", "cuda", "auto"),
-                   help="Dispositivo de inferencia (por defecto cpu).")
-    p.add_argument("--compute-type", default="int8",
-                   help="Tipo de cálculo de CTranslate2, p. ej. int8 o float16 (por defecto int8).")
+                   help="Permite descargar el modelo; sin esta opción solo se usan modelos locales.")
+    p.add_argument("--device", default="auto", choices=("cpu", "cuda", "auto"),
+                   help="Dispositivo de inferencia; auto prueba CUDA y vuelve a CPU (por defecto auto).")
+    p.add_argument("--dll-dir", action="append", metavar="CARPETA",
+                   help="Carpeta de DLL de CUDA/cuDNN en Windows; repetible.")
+    p.add_argument("--compute-type",
+                   help="Tipo de cálculo de CTranslate2 (por defecto int8 en CPU y float16 en CUDA).")
     p.add_argument("--beam-size", type=positive, default=1, help="Tamaño de haz (por defecto 1).")
-    p.add_argument("--no-vad", action="store_true",
-                   help="Desactiva el filtro VAD (útil para recuperar habla omitida).")
+    p.add_argument("--no-vad", action="store_true", help="Desactiva el filtro VAD en todos los bloques.")
     p.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
                    help=f"Hilos de CPU (por defecto {DEFAULT_THREADS}).")
-    p.set_defaults(run=transcribe)
+    p.add_argument("--block", type=float, default=AUDIO_BLOCK,
+                   help=f"Segundos por bloque (por defecto {AUDIO_BLOCK:.0f}).")
+    p.add_argument("--slack", type=float, default=BLOCK_SLACK,
+                   help=f"Margen para buscar el corte silencioso (por defecto {BLOCK_SLACK:.0f}).")
+    p.add_argument("--budget", type=float,
+                   help="Segundos como máximo por llamada; al agotarse devuelve 3 y se reanuda.")
+    p.add_argument("--subtitles", metavar="RUTA",
+                   help="Normaliza un SRT o WebVTT en vez de transcribir (tarea 7).")
     p = sub.add_parser("search", help="Busca en la transcripción sin distinguir tildes ni mayúsculas.")
     p.add_argument("transcription", help="transcripcion.json de la carpeta de trabajo.")
     p.add_argument("query", help="Texto buscado; se comparan minúsculas y sin tildes.")

@@ -1,17 +1,21 @@
 """Integration checks using generated media; no downloads or external services."""
 
 from array import array
+import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
+import wave
 
 import common
 import video
@@ -58,6 +62,58 @@ def gray_at(path, time):
                            "-vf", f"fps=1000:start_time={time:.6f},scale=64:64,format=gray",
                            "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                           capture_output=True, check=True).stdout
+
+
+@contextlib.contextmanager
+def fake_whisper(model):
+    """Stand-in for faster_whisper: the tests never load real weights."""
+    module = types.ModuleType("faster_whisper")
+    module.WhisperModel = model
+    previous = sys.modules.get("faster_whisper")
+    sys.modules["faster_whisper"] = module
+    try:
+        yield
+    finally:
+        sys.modules.pop("faster_whisper", None)
+        if previous is not None:
+            sys.modules["faster_whisper"] = previous
+
+
+class Recorder:
+    """Minimal WhisperModel: one segment per whole second of the block it is given."""
+
+    loads = []
+
+    def __init__(self, name, device="cpu", **rest):
+        Recorder.loads.append(device)
+        if device == "cuda":
+            raise RuntimeError("Library cublas64_12.dll is not found")
+        self.device = device
+
+    def transcribe(self, path, language=None, vad_filter=True, **rest):
+        with wave.open(str(path)) as stream:
+            seconds = stream.getnframes() / stream.getframerate()
+        parts = []
+        for number in range(int(seconds)):
+            word = types.SimpleNamespace(start=number + 0.1, end=number + 0.9,
+                                         word=f" palabra{number}")
+            parts.append(types.SimpleNamespace(start=number + 0.1, end=number + 0.9,
+                                               text=f" palabra{number}", words=[word],
+                                               no_speech_prob=0.0, avg_logprob=-0.2))
+        return iter(parts), types.SimpleNamespace(language=language or "es")
+
+
+def tone(path, seconds, rate=16000):
+    """16 kHz mono PCM: a second of silence at the end of every ten, like a real pause."""
+    samples = array("h")
+    for index in range(seconds * rate):
+        quiet = (index // rate) % 10 == 9
+        samples.append(0 if quiet else int(8000 * math.sin(2 * math.pi * 440 * index / rate)))
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(rate)
+        stream.writeframes(samples.tobytes())
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
@@ -340,6 +396,53 @@ class VideoTest(unittest.TestCase):
             result = invoke(self, "frames", source, "--out", root / "fotogramas", ok=False)
             self.assertEqual(result.returncode, 2)
             self.assertIn("solo audio", result.stderr)
+
+    def test_transcription_runs_in_resumable_blocks(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es", "--budget", "0"])
+            Recorder.loads.clear()
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+                self.assertEqual(video.transcribe(arguments), 3)
+            report = json.loads(printed.getvalue().splitlines()[-1])
+            self.assertEqual((report["done"], report["total"]), (1, 3))
+            self.assertEqual(report["pending"], 2)
+            self.assertEqual(report["bloques"], ["bloque-001", "bloque-002"])
+            self.assertFalse(out.exists())
+            self.assertTrue((root / "transcripcion.parcial" / "bloque-000.json").is_file())
+            arguments.budget = None
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            data = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(Recorder.loads, ["cpu", "cpu"])
+            self.assertEqual([round(b["end"] - b["start"], 3) for b in data["blocks"]],
+                             [9.15, 10.0, 10.85])
+            self.assertEqual(len(data["segments"]), 29)
+            self.assertEqual(data["language"], "es")
+            self.assertTrue(all(a["end"] <= b["start"]
+                                for a, b in zip(data["segments"], data["segments"][1:])))
+            self.assertAlmostEqual(data["segments"][-1]["start"], 28.25, delta=0.01)
+            self.assertFalse((root / "transcripcion.parcial").exists())
+
+    def test_resuming_with_other_settings_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es", "--budget", "0"])
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 3)
+            arguments.beam_size = 5
+            with fake_whisper(Recorder), self.assertRaisesRegex(video.Refused, "no coinciden"):
+                video.transcribe(arguments)
 
 
 class PlanTest(unittest.TestCase):
