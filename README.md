@@ -213,9 +213,9 @@ En una carpeta de trabajo nueva (por defecto `resumenes/<nombre>/`, excluida de 
 
 | Archivo | Qué contiene |
 | --- | --- |
-| `final/resumen.mp4` | El montaje con los fragmentos originales |
-| `final/seleccion.json` | El plan de cortes, con motivo y evidencia de audio y pantalla |
-| `final/resumen.md` | Duraciones, reducción, tabla origen → salida y revisión editorial |
+| `vN/resumen.mp4` | El montaje con los fragmentos originales |
+| `vN/seleccion.json` | El plan de cortes, con motivo y evidencia de audio y pantalla |
+| `vN/resumen.md` | Duraciones, reducción, tabla origen → salida y revisión editorial |
 | `analisis.md` | Inventario del agente: qué se vio, qué se oyó y qué se decidió |
 
 <details>

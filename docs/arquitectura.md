@@ -6,7 +6,6 @@ La unidad distribuible es `plugins/resumir-video/`, y dentro de ella la skill `s
 
 - `SKILL.md`: instrucciones de selección audiovisual y validación editorial, válidas para cualquier agente.
 - `agents/openai.yaml`: metadatos de interfaz de Codex; los demás clientes lo ignoran.
-- `references/operacion.md`: órdenes, requisitos, formatos y límites del asistente.
 - `scripts/common.py`: ejecución de FFmpeg, publicación atómica, cerrojo, identidad y huella, línea
   temporal, energía, interpretación del objetivo, historial y avisos.
 - `scripts/video.py`: punto de entrada y subcomandos `check`, `probe`, `prepare`, `frames`,
