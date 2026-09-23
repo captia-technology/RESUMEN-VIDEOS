@@ -283,6 +283,53 @@ def frames(args):
     return 0
 
 
+LEVEL_STEP = 0.01
+AUDIO_BLOCK = 600.0
+BLOCK_SLACK = 60.0
+GAP_MIN = 2.0
+
+
+def quiet_cut(levels, low, high, *, window=common.MIN_SILENCE):
+    """Instant of [low, high] whose `window` seconds carry the least energy."""
+    width = max(1, round(window / LEVEL_STEP))
+    first, last = max(0, round(low / LEVEL_STEP)), min(len(levels), round(high / LEVEL_STEP))
+    if last - first < width:
+        return round(min(high, len(levels) * LEVEL_STEP), 3)
+    best, position, total = None, first, sum(levels[first:first + width])
+    for index in range(first, last - width + 1):
+        if index > first:
+            total += levels[index + width - 1] - levels[index - 1]
+        if best is None or total < best:
+            best, position = total, index
+    return round((position + width / 2) * LEVEL_STEP, 3)
+
+
+def speech_blocks(levels, total, *, length=AUDIO_BLOCK, slack=BLOCK_SLACK):
+    """Transcription blocks of about `length` seconds, each cut at its quietest window."""
+    edges, start = [0.0], 0.0
+    while total - start > length + slack:
+        start = quiet_cut(levels, start + length - slack, start + length + slack)
+        edges.append(start)
+    return [(a, round(b, 3)) for a, b in zip(edges, edges[1:] + [total])]
+
+
+def gaps(segments, levels, a, b, *, threshold=common.SILENCE_DB, minimum=GAP_MIN):
+    """Stretches of [a, b) with sound and no transcribed word: the VAD may have dropped speech."""
+    empty, edge = [], a
+    for start, end in sorted((s["start"], s["end"]) for s in segments):
+        if start - edge >= minimum:
+            empty.append((edge, start))
+        edge = max(edge, end)
+    if b - edge >= minimum:
+        empty.append((edge, b))
+    loud = []
+    for start, end in empty:
+        window = levels[round(start / LEVEL_STEP):min(len(levels), round(end / LEVEL_STEP))]
+        if sum(1 for level in window if level > threshold) * LEVEL_STEP >= minimum / 2:
+            loud.append((round(start, 3), round(end, 3)))
+    return loud
+
+
 def transcribe(args):
     target = Path(args.out).resolve()
     if target.exists():

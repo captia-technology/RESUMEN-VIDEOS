@@ -1,5 +1,6 @@
 """Integration checks using generated media; no downloads or external services."""
 
+from array import array
 import hashlib
 import io
 import json
@@ -483,6 +484,36 @@ class SweepTest(unittest.TestCase):
             (broken / "index.json").write_text('{"start": 1800.0,', encoding="utf-8")  # truncado
             self.assertIsNone(video.clear_partial(broken))
             self.assertTrue((root / "b01800.parcial").is_dir())
+
+
+class AudioBlockTest(unittest.TestCase):
+    def levels(self, seconds, loud=-20.0, islands=()):
+        """Ten-millisecond levels: loud everywhere except in the given quiet second-long islands."""
+        data = array("f", [loud] * int(seconds / video.LEVEL_STEP))
+        for start in islands:
+            for index in range(int(start / video.LEVEL_STEP), int((start + 1) / video.LEVEL_STEP)):
+                data[index] = -70.0
+        return data
+
+    def test_blocks_are_cut_at_the_quietest_window(self):
+        levels = self.levels(2000, islands=(590.0, 1180.0, 1780.0))
+        blocks = video.speech_blocks(levels, 2000.0)
+        self.assertEqual(blocks, [(0.0, 590.15), (590.15, 1180.15), (1180.15, 1780.15),
+                                  (1780.15, 2000.0)])
+        self.assertEqual(round(sum(b - a for a, b in blocks), 3), 2000.0)
+        self.assertTrue(all(blocks[i][1] == blocks[i + 1][0] for i in range(len(blocks) - 1)))
+        self.assertEqual(video.speech_blocks(self.levels(300), 300.0), [(0.0, 300.0)])
+        self.assertEqual(video.quiet_cut(levels, 540.0, 660.0), 590.15)
+
+    def test_only_gaps_with_sound_are_reported(self):
+        levels = self.levels(300, loud=-70.0)
+        for index in range(20000, 26000):
+            levels[index] = -30.0
+        spoken = [{"start": 0.0, "end": 100.0}, {"start": 150.0, "end": 200.0},
+                  {"start": 260.0, "end": 300.0}]
+        self.assertEqual(video.gaps(spoken, levels, 0.0, 300.0), [(200.0, 260.0)])
+        self.assertEqual(video.gaps([{"start": 0.0, "end": 300.0}], levels, 0.0, 300.0), [])
+        self.assertEqual(video.gaps([], levels, 0.0, 300.0), [(0.0, 300.0)])
 
 
 if __name__ == "__main__":
