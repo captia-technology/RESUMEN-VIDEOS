@@ -161,12 +161,14 @@ Lo que demuestra el ejemplo, más allá del recorte:
 - **Cortes precisos.** Cada fragmento se recodifica a frecuencia constante desde el fotograma más próximo a su inicio; nunca se copia entre fotogramas clave.
 - **Nada se sobrescribe.** Las carpetas de salida deben ser nuevas, el original no se toca y un plan solo monta el archivo exacto para el que se escribió.
 - **Comprobación previa.** La falta de libx264, las fuentes HDR y los contenedores sin índice se detectan **antes** de empezar a montar.
-- **Validación del resultado.** Duraciones de vídeo y audio, suma de cortes y decodificación completa: `resumen.mp4` solo aparece si pasa las tres.
+- **Validación del resultado.** Recuento exacto de fotogramas del vídeo frente a la suma de cortes, desfase vídeo-audio de como máximo 0,1 s y decodificación completa sin errores: `resumen.mp4` solo aparece si pasa las tres.
 
 </td>
 <td><img src="docs/img/sincronia.svg" alt="Desfase de audio acumulado: 93 ms en la primera versión, 5 ms con el audio codificado una vez y 0 ms en la versión final" width="100%"></td>
 </tr>
 </table>
+
+**0.1.0** (2026-09-17):
 
 | Comprobación | Resultado |
 | --- | --- |
@@ -176,7 +178,9 @@ Lo que demuestra el ejemplo, más allá del recorte:
 | Uso de extremo a extremo siguiendo las instrucciones, con revisión de uniones | Sin órdenes fallidas |
 | Revisión adversarial del montaje a 25, 29,97 y 5 fps, con frecuencia variable y MPEG-TS | Tres fallos encontrados y corregidos |
 
-Versiones, órdenes y lo que queda pendiente de evidencia: [plan de validación](docs/plan.md#validación-2026-09-17).
+**0.2.0** (2026-09-18): 27 pruebas de empaquetado e instalador y 280 de la skill (2 omitidas por falta de CUDA/`faster-whisper` en la máquina de esta entrega), `claude plugin validate --strict` y los validadores de Codex correctos, ciclo real de instalación/desinstalación contra el `HOME` del usuario. **Pendiente de evidencia**: la aceptación manual sobre una grabación real en 4K (memoria por corte, tiempo por fase, cobertura de palabras, calibración de umbrales, barrido de 2 h, las diez peticiones de revisión en lenguaje natural y el modo audio de extremo a extremo).
+
+Versiones, órdenes y lo que queda pendiente de evidencia: [validación 0.1.0](docs/plan.md#validación-2026-09-17) · [validación 0.2.0](docs/plan.md#validación-2026-09-18).
 
 ## 🧠 Cómo funciona
 
@@ -207,7 +211,17 @@ El reparto es deliberado: **el agente juzga, el asistente ejecuta**. `video.py` 
 
 ## 🛠 Uso diario
 
-Basta con pedirlo en lenguaje natural («resume este vídeo: `grabaciones/sesion.mp4`, en unos 10 minutos») o invocar la skill con la ruta. El agente comprueba el entorno, extrae la evidencia, analiza, selecciona los cortes con su justificación, monta y entrega.
+Basta con pedirlo en lenguaje natural («resume este vídeo: `grabaciones/sesion.mp4`, en unos 10 minutos») o invocar la skill con la ruta. El agente comprueba el entorno, extrae la evidencia, analiza, selecciona los cortes con su justificación, muestra la propuesta y espera tu aceptación, monta y entrega.
+
+| Qué pides | Cómo se invoca (Claude Code / Copilot; en Codex sustituye `/` por `$`) |
+| --- | --- |
+| Criterio editorial, sin duración fija | `/resumir-video "grabaciones/formacion.mp4"` |
+| Al 10 % de duración | `/resumir-video "grabaciones/formacion.mp4" 10%` |
+| En unos 12 minutos, sin acelerar ni quitar pausas | `/resumir-video "reunion.mp4" 12min velocidad=1 pausas=no` |
+| Sin esperar tu revisión previa | `/resumir-video "clase.mp4" directo` |
+| Solo audio (sin pista de vídeo): entrega el documento, sin montar | `/resumir-video "podcast.mp3"` |
+
+El objetivo, la velocidad y las pausas son opcionales y se combinan libremente; detalle completo de la sintaxis en la sección «Invocación» de [`SKILL.md`](plugins/resumir-video/skills/resumir-video/SKILL.md). Tras leer el archivo, el agente confirma en una línea lo entendido (modo, objetivo en tiempo absoluto y su banda) antes de analizar nada.
 
 En una carpeta de trabajo nueva (por defecto `resumenes/<nombre>/`, excluida de Git):
 
