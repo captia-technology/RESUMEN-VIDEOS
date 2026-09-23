@@ -909,6 +909,27 @@ class ImagePlacementTest(unittest.TestCase):
             self.assertTrue(any(row["distancia"] > render.IMAGE_MARK for row in rows), rows)
 
 
+class LastFramePointTest(unittest.TestCase):
+    def test_the_last_point_sits_half_a_frame_inside_the_cut(self):
+        # 0.2.0 sampled out_end − 1 ms: once muxed, a 9225-frame stream at 30 fps ended at
+        # 307.496 s, before Σ N / F = 307.5 s, so that point had no image and validation failed
+        # with «Las imágenes deben tener el mismo tamaño (0 y 4096)».
+        data = {"source": {"path": "origen.mp4"}, "streams": []}
+        moments = []
+
+        def grab(path, moment, base, margin, target, threads, track=None):
+            moments.append((path, round(moment, 6)))
+            return bytes(4096)
+
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary,                 mock.patch.object(render, "timeline_start", return_value=0.0),                 mock.patch.object(render, "seek_margin", return_value=3.0),                 mock.patch.object(render, "video_stream", return_value={"index": 0}),                 mock.patch.object(render, "gray_frame", side_effect=grab):
+            rows = render.image_placement(data, "final.mp4", [(100.0, 130.0)], 290.0, 307.5,
+                                          temporary, 1, 1 / 30, 1.5)
+        self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
+        self.assertEqual(moments[2], ("final.mp4", round(307.5 - 1 / 60, 6)))
+        self.assertEqual(moments[3], ("origen.mp4", round(130.0 - 1.5 / 60, 6)))
+        self.assertLess(moments[2][1], 307.496)
+
+
 class EnvelopeTest(unittest.TestCase):
     def test_the_reference_is_stretched_by_the_speed(self):
         levels = array.array("f", [float(value) for value in range(10)])

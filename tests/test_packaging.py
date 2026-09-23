@@ -183,7 +183,7 @@ class SkillTest(unittest.TestCase):
     def test_every_script_has_its_tests_and_the_skill_stays_self_contained(self):
         scripts = sorted(p.name for p in (SKILL / "scripts").glob("*.py")
                          if not p.name.startswith("test_"))
-        self.assertEqual(scripts, ["common.py", "doc.py", "plan.py", "render.py", "video.py"])
+        self.assertEqual(scripts, ["common.py", "doc.py", "overlay.py", "plan.py", "render.py", "video.py"])
         for name in scripts:
             if name != "common.py":
                 self.assertTrue((SKILL / "scripts" / f"test_{name}").is_file(), name)

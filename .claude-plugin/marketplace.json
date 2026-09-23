@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Skills de CAPTIA TECHNOLOGY para resumir vídeos técnicos con agentes de IA.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "resumir-video",
       "source": "./plugins/resumir-video",
       "description": "Resume grabaciones técnicas locales en un MP4 con fragmentos originales y un documento, analizando voz y pantalla, con revisión previa de los cortes (Python 3.10+ y FFmpeg).",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "CAPTIA TECHNOLOGY S.L."
       },

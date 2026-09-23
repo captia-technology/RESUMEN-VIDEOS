@@ -23,7 +23,11 @@ porcentaje mínimo alcanzable sin sacrificarlos.
 
 - Un borde que cae sobre voz se lleva al primer silencio de al menos 0,1 s dentro de los 0,6 s
   siguientes, sin invadir la palabra siguiente (su inicio − 0,02 s); el inicio es simétrico. Sin
-  silencio cercano se emite `borde_en_voz`. El ajuste va en orden cronológico y nunca cruza al vecino.
+  silencio cercano (una llamada con ruido de fondo constante) se usan las marcas por palabra: si el
+  borde parte una palabra, se conserva entera cuando la mitad o más cae dentro del corte y se deja
+  fuera en caso contrario, y el borde pasa al hueco contiguo, a 0,15 s como mucho de la palabra y a
+  1 s como mucho del borde original. Solo si tampoco eso es posible (sin marcas, o una palabra
+  demasiado larga) se emite `borde_en_voz`. El ajuste va en orden cronológico y nunca cruza al vecino.
 - Los cortes que quedan contiguos o a menos de un fotograma se fusionan: se conserva el
   identificador menor y la prioridad mayor, y la fusión se anota en `changes`.
 - Pausas: los silencios de 0,30 s o más por debajo de −50 dBFS se sustituyen por un hueco

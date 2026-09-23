@@ -5,7 +5,7 @@
 <rect width="1200" height="352" fill="url(#fondo)"/>
 <rect x="0" y="0" width="1200" height="3" fill="url(#barra)"/>
 <text x="80" y="96" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="52" fill="#E2E8F0" font-weight="700" text-anchor="start">resumir-video</text>
-<text x="432" y="96" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#FBBF24" font-weight="600" text-anchor="start">v0.2.0</text>
+<text x="432" y="96" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#FBBF24" font-weight="600" text-anchor="start">v0.2.1</text>
 <text x="80" y="130" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#94A3B8" font-weight="400" text-anchor="start">Resúmenes de vídeo técnico con fragmentos originales, para agentes de IA</text>
 <rect x="80" y="152" width="174" height="32" rx="16" fill="#0F1B2E" stroke="#1E293B" stroke-width="1"/>
 <text x="167" y="173" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#94A3B8" font-weight="600" text-anchor="middle">Claude Code</text>

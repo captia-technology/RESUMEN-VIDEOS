@@ -19,12 +19,13 @@ import common
 import plan
 import render
 import doc
+import overlay
 from common import (DEFAULT_THREADS, MAX_FRAMES, MIN_PYTHON, cache_dir, duration, encoders, ffmpeg,
                     frame_count, frame_interval, identity, new_dir, output_rate, positive, probe,
                     require_encoders, run, save, seconds, seek_margin, stream_duration, stream_end,
                     streams, tag_seconds, timeline_start, tool, video_stream)
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 BLOCK = 600.0
 SHEET = 5
@@ -422,9 +423,17 @@ def block_cut(audio, target, a, b):
 
 def transcribe_block(model, path, offset, language, args, *, vad=None):
     """One block, with its times moved back onto the original timeline."""
-    parts, info = model.transcribe(str(path), language=language, beam_size=args.beam_size,
-                                   vad_filter=not args.no_vad if vad is None else vad,
-                                   word_timestamps=True)
+    try:
+        parts, info = model.transcribe(str(path), language=language, beam_size=args.beam_size,
+                                       vad_filter=not args.no_vad if vad is None else vad,
+                                       word_timestamps=True)
+        parts = list(parts)  # the generator decodes lazily: memory errors surface here
+    except Exception as exc:
+        if out_of_memory(exc):
+            raise ValueError("Sin memoria durante la transcripción: repite la orden (retoma el "
+                             "bloque pendiente), libera la GPU o usa --device cpu.\n"
+                             f"{exc}") from exc
+        raise
     segments = []
     for part in parts:
         segment = {"start": round(part.start + offset, 3), "end": round(part.end + offset, 3),
@@ -437,6 +446,12 @@ def transcribe_block(model, path, offset, language, args, *, vad=None):
             segment["dudoso"] = True
         segments.append(segment)
     return {"language": info.language, "segments": segments}
+
+
+def out_of_memory(exc):
+    """CUDA/CTranslate2 allocation failures: not to be confused with a model missing locally."""
+    text = str(exc).lower()
+    return isinstance(exc, MemoryError) or "out of memory" in text or "cuda_error_out_of_memory" in text
 
 
 def load_model(args):
@@ -465,6 +480,11 @@ def load_model(args):
             if device != order[-1]:
                 print(f"Aviso: CUDA no disponible ({exc}); se continúa en CPU.", file=sys.stderr)
                 continue
+            if out_of_memory(exc):
+                raise ValueError(f"Sin memoria para el modelo {args.model} en {device}: libera la "
+                                 "GPU (otro proceso la ocupa), repite la orden (retoma donde "
+                                 "quedó) o usa --device cpu o un --compute-type más ligero "
+                                 f"(int8_float16).\n{exc}") from exc
             if not args.allow_download and not Path(args.model).is_dir():
                 raise Refused(f"El modelo {args.model} no está en la caché local: repite la orden "
                               "con --allow-download o indica en --model una carpeta CTranslate2 "
@@ -473,9 +493,11 @@ def load_model(args):
     raise ValueError("Sin dispositivo de inferencia disponible.")
 
 
-def recover(work, segments, levels, total, language, device, args):
-    """Second pass, without VAD, over the stretches that have sound but no transcribed word."""
-    model = None
+def recover(work, segments, levels, total, language, device, args, model=None):
+    """Second pass, without VAD, over the stretches that have sound but no transcribed word.
+
+    `model` reuses the one the blocks already loaded: loading a second copy of a large model
+    while the first is still alive exhausted the GPU memory."""
     for number, (a, b) in enumerate(gaps(segments, levels, 0.0, total)):
         piece = work / f"hueco-{number:03d}.json"
         recorded = None
@@ -634,7 +656,8 @@ def transcribe(args):
     segments = [segment for number in range(len(plan))
                 for segment in json.loads((work / f"bloque-{number:03d}.json")
                                           .read_text(encoding="utf-8"))["segments"]]
-    segments, device = recover(work, segments, levels, total, language, device, args)
+    segments, device = recover(work, segments, levels, total, language, device, args,
+                              model)
     segments.sort(key=lambda segment: (segment["start"], segment["end"]))
     staged = work / "transcripcion.json"
     # A previous attempt may have written this and then failed to publish it: "x" mode would
@@ -781,6 +804,7 @@ def build_parser():
     plan.register(sub)
     render.register(sub)
     doc.register(sub)
+    overlay.register(sub)
     return parser
 
 

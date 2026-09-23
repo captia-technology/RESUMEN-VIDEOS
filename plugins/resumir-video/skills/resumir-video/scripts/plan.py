@@ -211,9 +211,10 @@ def questions_of(draft, total):
 
 def adjusted(segments, levels, words, threshold):
     """Chronological edge adjustment that never crosses a neighbour."""
-    # `adjust_edges` only ever moves the start earlier and the end later, and a validated draft
-    # (check_draft) already guarantees end <= next start, so a <= b holds after the clamp below
-    # with no further fallback needed.
+    # `adjust_edges` moves the start earlier and the end later, except when a word mark drops a
+    # word: then it narrows the cut, but never below 2 * WORD_PAD. A validated draft (check_draft)
+    # already guarantees end <= next start, so the clamp below only ever cuts a widened edge back
+    # to the original one and a < b still holds.
     rows, floor_ = [], 0.0
     for index, segment in enumerate(segments):
         roof = segments[index + 1]["start"] if index + 1 < len(segments) else float("inf")
@@ -291,12 +292,12 @@ def untouched(row):
     return segment.get("visual_only", False) or not segment.get("remove_pauses", True)
 
 
-def spans_of(row, levels, grid, settings):
-    """Frame-aligned spans of one cut once its pauses are removed."""
+def spans_of(row, levels, grid, settings, words=None):
+    """Frame-aligned spans of one cut once its pauses are removed; word onsets are never cut."""
     remove = settings["remove_pauses"] and not untouched(row)
     return common.islands(levels, row["a"], row["b"], interval=grid["interval"],
                           origin=grid["origin"], remove_pauses=remove,
-                          threshold=settings["silence_db"])
+                          threshold=settings["silence_db"], words=words)
 
 
 def split(spans, frames, samples, grid, speed):
@@ -320,11 +321,11 @@ def split(spans, frames, samples, grid, speed):
     return parts
 
 
-def measure(rows, levels, grid, settings):
+def measure(rows, levels, grid, settings, words=None):
     """Spans, N, M and emptiness of every cut; an empty cut goes back to the reserves."""
     rate, speed, sample_rate = grid["fps"], settings["speed"], grid["sample_rate"]
     for row in rows:
-        row["spans"] = spans_of(row, levels, grid, settings)
+        row["spans"] = spans_of(row, levels, grid, settings, words)
         row["length"] = round(sum(end - start for start, end in row["spans"]), 6)
         row["frames"] = common.frames_for(row["length"], rate, speed)
         row["output"] = row["frames"] / rate
@@ -416,7 +417,8 @@ def cut_warnings(row, levels, settings):
         return found
     if row["note"]:
         found.append(common.warning("borde_en_voz", f"El corte {key} no encuentra silencio en los "
-                                    "0,6 s del borde: la unión puede partir una palabra.", cut=key))
+                                    "0,6 s del borde ni hueco entre palabras: la unión puede "
+                                    "partir una palabra.", cut=key))
     if segment.get("visual_only") and row["output"] < SHORT_VISUAL:
         found.append(common.warning("visual_breve", f"El corte visual {key} dura "
                                     f"{comma(row['output'])} s de salida; cuesta leerlo.", cut=key))
@@ -499,7 +501,7 @@ def copies(rows):
             for row in rows]
 
 
-def alternatives(rows, levels, grid, settings, included, total):
+def alternatives(rows, levels, grid, settings, included, total, words=None):
     """The four combinations of speed and pauses, each with its estimate and state."""
     speeds = sorted({1.0, settings["speed"]})
     if len(speeds) == 1:
@@ -508,7 +510,7 @@ def alternatives(rows, levels, grid, settings, included, total):
     for speed in speeds:
         for pauses in (True, False):
             variant = dict(settings, speed=speed, remove_pauses=pauses)
-            report = estimate_of(measure(copies(rows), levels, grid, variant),
+            report = estimate_of(measure(copies(rows), levels, grid, variant, words),
                                  included, variant, total, grid)
             out.append({"velocidad": speed, "pausas": pauses, "salida": report["salida"],
                         "porcentaje": report["porcentaje"], "estado": report["estado"]})
@@ -771,7 +773,7 @@ def changes(work, parent, cuts, notes):
 def video_plan(args, work, data, draft, settings, segments, total, levels, words, grid):
     """The whole section 7 pipeline for a video job."""
     rows, notes = fuse(adjusted(segments, levels, words, settings["silence_db"]), grid["interval"])
-    rows = measure(rows, levels, grid, settings)
+    rows = measure(rows, levels, grid, settings, words)
     included = {row["segment"]["id"] for row in rows
                 if row["segment"].get("included", False) and not row["empty"]}
     # Section 7.4: a cut the agent wanted and the discards emptied goes back to reserves, and that
@@ -810,7 +812,7 @@ def video_plan(args, work, data, draft, settings, segments, total, levels, words
             "settings": settings, "timeline": grid,
             "segments": cuts, "reserves": reserves, "excluidos": draft.get("excluded", []),
             "changes": [], "estimate": report,
-            "alternativas": alternatives(rows, levels, grid, settings, included, total),
+            "alternativas": alternatives(rows, levels, grid, settings, included, total, words),
             "sugerencias": suggestions(rows, included, settings, report),
             "warnings": warnings, "recorrido": bar(rows, included, total)}
     body["changes"] = changes(work, draft.get("parent"), cuts, notes)

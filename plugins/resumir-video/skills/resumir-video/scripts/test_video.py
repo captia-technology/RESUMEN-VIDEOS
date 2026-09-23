@@ -566,6 +566,40 @@ class VideoTest(unittest.TestCase):
         with fake_whisper(Recorder), self.assertRaisesRegex(video.Refused, "no existe"):
             video.load_model(arguments)
 
+    def test_out_of_memory_is_not_reported_as_a_missing_model(self):
+        class Starved(Recorder):
+            def __init__(self, name, device="cpu", **rest):
+                raise RuntimeError("CUDA failed with error out of memory")
+
+        arguments = video.build_parser().parse_args(
+            ["transcribe", "audio.wav", "--out", "transcripcion.json", "--device", "cuda"])
+        with fake_whisper(Starved), self.assertRaises(ValueError) as caught:
+            video.load_model(arguments)
+        self.assertNotIsInstance(caught.exception, video.Refused)
+        self.assertIn("Sin memoria", str(caught.exception))
+        self.assertNotIn("caché", str(caught.exception))
+
+        class Missing(Recorder):
+            def __init__(self, name, device="cpu", **rest):
+                raise RuntimeError("Unable to open file 'model.bin' in model 'large-v3'")
+
+        with fake_whisper(Missing), self.assertRaisesRegex(video.Refused, "caché local"):
+            video.load_model(arguments)
+
+    def test_recovery_reuses_the_model_the_blocks_loaded(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(root / "transcripcion.json"),
+                 "--block", "10", "--slack", "2", "--language", "es", "--device", "cpu"])
+            Reluctant.loads.clear()
+            with fake_whisper(Reluctant), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            # One load for blocks and gaps alike: a second copy exhausted the GPU (0.2.1).
+            self.assertEqual(Reluctant.loads, ["cpu"])
+
     def test_gaps_with_sound_are_transcribed_again_without_vad(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
