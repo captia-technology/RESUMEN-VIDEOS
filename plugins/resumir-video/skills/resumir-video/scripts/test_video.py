@@ -735,5 +735,50 @@ class AudioBlockTest(unittest.TestCase):
         self.assertEqual(video.gaps([], levels, 0.0, 300.0), [(0.0, 300.0)])
 
 
+class SubtitleTest(unittest.TestCase):
+    SRT = ("﻿1\n00:00:01,000 --> 00:00:04,500\nPrimera <i>línea</i>\nsegunda línea\n\n"
+           "2\n00:01:02,25 --> 00:01:05,000\nOtra frase\n")
+    VTT = ("WEBVTT\n\nNOTE una nota\n\ncue-1\n"
+           "00:00:02.000 --> 00:00:03.250 align:start position:10%\nHola\n\n"
+           "00:10:00.000 --> 00:10:02.000\n<v Ana>Texto\n\n"
+           "00:02.000 --> 00:05.000\nSin horas\n")
+
+    def test_srt_and_vtt_become_segments_without_words(self):
+        srt = video.subtitles(self.SRT)
+        self.assertEqual([(s["start"], s["end"]) for s in srt], [(1.0, 4.5), (62.25, 65.0)])
+        self.assertEqual(srt[0]["text"], "Primera línea segunda línea")
+        self.assertEqual(srt[0]["words"], [])
+        vtt = video.subtitles(self.VTT)
+        # WebVTT admite un cue de menos de una hora sin componente de horas (MM:SS.mmm).
+        self.assertEqual([(s["start"], s["end"]) for s in vtt],
+                         [(2.0, 3.25), (2.0, 5.0), (600.0, 602.0)])
+        self.assertEqual([s["text"] for s in vtt], ["Hola", "Sin horas", "Texto"])
+        self.assertEqual(video.subtitles("sin ningún tiempo"), [])
+
+    def test_the_subtitle_branch_publishes_a_transcription_with_its_warning(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "clase.srt"
+            source.write_text(self.SRT, encoding="utf-8")
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(root / "audio.wav"), "--out", str(out),
+                 "--subtitles", str(source), "--language", "es"])
+            with mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            data = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(data["language"], "es")
+            self.assertEqual(data["settings"]["origen"], "subtitulos")
+            self.assertEqual(data["settings"]["archivo"], "clase.srt")
+            self.assertEqual(len(data["segments"]), 2)
+            self.assertEqual([w["codigo"] for w in data["warnings"]], ["sin_marcas_por_palabra"])
+            self.assertFalse(data["warnings"][0]["bloquea"])
+            empty = root / "vacio.srt"
+            empty.write_text("sin tiempos\n", encoding="utf-8")
+            arguments.subtitles, arguments.out = str(empty), str(root / "otra.json")
+            with self.assertRaisesRegex(video.Refused, "no contiene"):
+                video.transcribe(arguments)
+
+
 if __name__ == "__main__":
     unittest.main()

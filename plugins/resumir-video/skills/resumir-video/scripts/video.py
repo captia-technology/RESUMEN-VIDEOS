@@ -430,8 +430,63 @@ def recover(work, segments, levels, total, language, device, args):
     return segments, device
 
 
+CUE = re.compile(r"(?:(\d{1,2}):)?([0-5]\d):([0-5]\d)[.,](\d{1,3})\s*-->\s*"
+                 r"(?:(\d{1,2}):)?([0-5]\d):([0-5]\d)[.,](\d{1,3})")
+TAG = re.compile(r"</?[a-zA-Z][^>]*>|\{\\[^}]*\}")
+
+
+def cue_time(hours, minutes, secs, millis):
+    # WebVTT permite que un cue de menos de una hora omita las horas (`MM:SS.mmm`); cuenta como 0.
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(secs) + int(millis.ljust(3, "0")) / 1000
+
+
+def subtitles(text):
+    """Segments of an SRT or WebVTT file: no per-word marks, no styling tags."""
+    segments = []
+    lines = text.replace("﻿", "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for number, line in enumerate(lines):
+        found = CUE.search(line)
+        if not found:
+            continue
+        start, end = cue_time(*found.groups()[:4]), cue_time(*found.groups()[4:])
+        body = []
+        for following in lines[number + 1:]:
+            if not following.strip() or CUE.search(following):
+                break
+            body.append(TAG.sub("", following).strip())
+        said = " ".join(part for part in body if part).strip()
+        if said and end > start:
+            segments.append({"start": start, "end": end, "text": said, "words": []})
+    segments.sort(key=lambda segment: (segment["start"], segment["end"]))
+    return segments
+
+
+def import_subtitles(args):
+    """Normalize the medium's own subtitles instead of transcribing (spec §5)."""
+    target = Path(args.out).resolve()
+    if target.exists():
+        raise Refused("La transcripción de salida ya existe.")
+    if not target.parent.is_dir():
+        raise Refused(f"No existe la carpeta de salida: {target.parent}")
+    source = Path(identity(args.subtitles)["path"])
+    segments = subtitles(source.read_text(encoding="utf-8-sig", errors="replace"))
+    if not segments:
+        raise Refused(f"{source.name} no contiene ningún bloque con tiempos válidos; "
+                      "comprueba que es SRT o WebVTT.")
+    note = common.warning("sin_marcas_por_palabra",
+                          "La transcripción procede de subtítulos: sin marcas por palabra, los "
+                          "bordes usan los límites de cada segmento.")
+    save(target, {"language": args.language,
+                  "settings": {"origen": "subtitulos", "archivo": source.name},
+                  "blocks": [], "segments": segments, "warnings": [note]})
+    print(target)
+    return 0
+
+
 def transcribe(args):
     """Resumable transcription: one saved block at a time, published only when every block is in."""
+    if args.subtitles:
+        return import_subtitles(args)
     target = Path(args.out).resolve()
     if target.exists():
         raise Refused("La transcripción de salida ya existe.")
