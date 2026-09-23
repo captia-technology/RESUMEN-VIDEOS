@@ -29,7 +29,8 @@ En una carpeta de trabajo nueva que crea el propio asistente (por defecto `resum
 
 - `vN/resumen.mp4`: montaje de los fragmentos originales con audio sincronizado.
 - `vN/seleccion.json`: plan de cortes aceptado, con la frase de aceptación del usuario.
-- `vN/resumen.md` (y `resumen.docx` si hay Pandoc o `python-docx`): duraciones, reducción, tabla origen → salida y revisión editorial.
+- `vN/montaje.md`: informe técnico del montaje — versión, cortes, velocidad, cadencia, duración de salida, desfase vídeo-audio y tabla origen → salida con la distancia de imagen y envolvente de cada corte.
+- `vN/resumen.md` (y `resumen.docx` si hay Pandoc o `python-docx`): documento editorial — ficha, resumen, ideas clave con su tiempo, preguntas y respuestas y qué se ha dejado fuera.
 - `vN/validacion.json`, `vN/cobertura.json` y `vN/timeline.*`: comprobaciones bloqueantes, cobertura de palabras y línea temporal del resumen.
 - Con solo audio no hay montaje: se entrega `documento-vN/resumen.md` (y `.docx`), el mismo documento que en vídeo acompaña siempre al MP4.
 - En la carpeta de trabajo, antes de aceptar: `propuesta-vN.md`, `seleccion-vN.json` (o `esquema-vN.json` en audio) e `historial.jsonl`, junto a `analisis.md`, `metadata.json`, `audio.wav` y, si procede, `transcripcion.json`.

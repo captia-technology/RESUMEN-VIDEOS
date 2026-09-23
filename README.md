@@ -142,11 +142,11 @@ Lo que demuestra el ejemplo, más allá del recorte:
 
 <table>
 <tr valign="top">
-<td width="54%"><img src="docs/img/informe.png" alt="Informe resumen.md con duraciones, reducción y tabla de correspondencias" width="100%"></td>
+<td width="54%"><img src="docs/img/informe.png" alt="Extracto de montaje.md con duraciones y tabla origen → salida, y de resumen.md con las ideas conservadas y las exclusiones" width="100%"></td>
 <td><img src="docs/img/demo-union.png" alt="Los tres últimos fotogramas de un corte y los tres primeros del siguiente" width="100%"></td>
 </tr>
 <tr>
-<td align="center"><sub><code>resumen.md</code>: tiempos de origen y de salida, reducción y revisión editorial.</sub></td>
+<td align="center"><sub><code>montaje.md</code>: duraciones y tabla origen → salida; <code>resumen.md</code>: ideas clave conservadas y qué se excluyó.</sub></td>
 <td align="center"><sub>Cada unión se revisa fotograma a fotograma: ni un fotograma ajeno, ni una frase partida.</sub></td>
 </tr>
 </table>
@@ -215,7 +215,8 @@ En una carpeta de trabajo nueva (por defecto `resumenes/<nombre>/`, excluida de 
 | --- | --- |
 | `vN/resumen.mp4` | El montaje con los fragmentos originales |
 | `vN/seleccion.json` | El plan de cortes, con motivo y evidencia de audio y pantalla |
-| `vN/resumen.md` | Duraciones, reducción, tabla origen → salida y revisión editorial |
+| `vN/montaje.md` | Versión, cortes, velocidad, cadencia, duración de salida, desfase vídeo-audio y tabla origen → salida con la distancia de imagen y envolvente de cada corte |
+| `vN/resumen.md` | Ficha, resumen editorial, ideas clave con su tiempo, preguntas y respuestas y qué se ha dejado fuera |
 | `analisis.md` | Inventario del agente: qué se vio, qué se oyó y qué se decidió |
 
 <details>
