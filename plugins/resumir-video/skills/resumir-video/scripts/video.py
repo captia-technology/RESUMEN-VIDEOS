@@ -454,10 +454,10 @@ def subtitles(text):
             index = number + 1 + offset
             if not following.strip() or CUE.search(following):
                 break
-            # A missing blank separator leaves the next cue's identifier line glued to this
-            # cue's text; if the line right after `following` is itself a cue timing line,
-            # `following` is that identifier, not this cue's text.
-            if index + 1 < len(lines) and CUE.search(lines[index + 1]):
+            # Only a bare digit sequence is discarded as an orphan identifier: SRT numbers its
+            # cues that way, but WebVTT text is never a pure digit string, so real body text
+            # glued to the next cue (WebVTT allows cues with no identifier at all) survives.
+            if following.strip().isdigit() and index + 1 < len(lines) and CUE.search(lines[index + 1]):
                 break
             body.append(TAG.sub("", following).strip())
         said = " ".join(part for part in body if part).strip()

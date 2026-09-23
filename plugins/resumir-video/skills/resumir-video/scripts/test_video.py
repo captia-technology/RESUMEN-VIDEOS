@@ -770,6 +770,25 @@ class SubtitleTest(unittest.TestCase):
         self.assertEqual([(s["start"], s["end"]) for s in segments],
                          [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0)])
 
+    def test_webvtt_cues_without_an_identifier_line_keep_their_own_text(self):
+        # WebVTT no exige un identificador antes de los tiempos; sin línea en blanco, la línea de
+        # tiempos del cue siguiente no debe usarse para descartar como huérfano el cuerpo del cue
+        # actual, ni borrar un cue entero sin identificador (a diferencia de SRT, un cuerpo de
+        # WebVTT nunca es una secuencia de dígitos pura).
+        chained = ("WEBVTT\n\n"
+                  "00:00:01.000 --> 00:00:02.000\nPrimero\n"
+                  "00:00:02.000 --> 00:00:03.000\nSegundo\n"
+                  "00:00:03.000 --> 00:00:04.000\nTercero\n")
+        segments = video.subtitles(chained)
+        self.assertEqual([s["text"] for s in segments], ["Primero", "Segundo", "Tercero"])
+        self.assertEqual([(s["start"], s["end"]) for s in segments],
+                         [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0)])
+        multiline = ("WEBVTT\n\n"
+                    "00:00:01.000 --> 00:00:03.000\nPrimera fila\nSegunda fila\n"
+                    "00:00:03.000 --> 00:00:04.000\nSiguiente\n")
+        joined = video.subtitles(multiline)
+        self.assertEqual([s["text"] for s in joined], ["Primera fila Segunda fila", "Siguiente"])
+
     def test_the_subtitle_branch_publishes_a_transcription_with_its_warning(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
