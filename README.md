@@ -12,7 +12,7 @@
 </p>
 
 **Convierte una grabación técnica de una hora en un vídeo de minutos hecho con los fragmentos originales.**<br>
-Sin narración sintética, sin acelerar la voz y con la evidencia de cada corte anotada.
+Sin narración sintética, con velocidad y pausas configurables, y con la evidencia de cada corte anotada.
 
 [Instalación](#-instalación) · [Demostración](#-demostración-real) · [Garantías](#-garantías-verificadas) · [Cómo funciona](#-cómo-funciona) · [Documentación](docs/)
 
@@ -49,6 +49,9 @@ Una formación grabada, una reunión técnica o una demostración de dos horas c
 | 🎬 **Fragmentos originales** | El resumen es vídeo y audio de la fuente, en su orden, a su resolución y a su velocidad. Sin música, sin voz sintética, sin rótulos. |
 | 🧠 **Criterio audiovisual** | Conserva conceptos, normativa, requisitos, procedimientos, advertencias y **correcciones posteriores**, incluidas las demostraciones visuales sin narración. |
 | 🔍 **Evidencia por corte** | Cada corte declara qué se oye y qué se ve; el informe relaciona tiempos de origen y de salida. |
+| 🎯 **Objetivo configurable** | Pide un porcentaje o una duración; sin objetivo manda el criterio editorial. Por defecto acelera ×1,25 y elimina pausas, ambas configurables. |
+| 📝 **Revisión previa** | `plan` publica una propuesta en lenguaje natural y espera tu aceptación (o `--directo`) antes de montar nada. |
+| 🎙️ **Modo audio y documento** | Con solo audio no se monta vídeo: se entrega un documento en Markdown (y DOCX si hay conversor). En vídeo, el mismo documento acompaña siempre al MP4. |
 | 🔒 **Todo en local** | Python de la biblioteca estándar y FFmpeg. El vídeo no se sube a ningún servicio; la transcripción opcional también es local. |
 | 🧩 **Tres clientes, un paquete** | Claude Code, GitHub Copilot (CLI y VS Code) y OpenAI Codex, con el mismo `SKILL.md`. |
 
@@ -242,7 +245,9 @@ plugins/resumir-video/            Plugin distribuible (única copia de la skill)
 ├── plugin.json                   Manifiesto Agent Plugins 1.0
 ├── .claude-plugin/plugin.json    Manifiesto de Claude Code
 ├── .codex-plugin/plugin.json     Manifiesto e interfaz de Codex
-└── skills/resumir-video/         SKILL.md, referencia de operación y scripts
+└── skills/resumir-video/         SKILL.md y scripts
+    ├── scripts/                  common.py, video.py, plan.py, render.py y doc.py
+    └── references/               operacion.md, compresion.md, revision.md y documento.md
 scripts/install.py                Instalación como skill independiente
 scripts/generar_graficos.py       Gráficos del README a partir de datos medidos
 tests/test_packaging.py           Manifiestos, skill e instalador
@@ -286,7 +291,7 @@ Las pruebas de la skill generan su propio vídeo sintético: no descargan nada y
 <details>
 <summary><b>¿Puede acelerar la voz o quitar pausas para comprimir más?</b></summary>
 
-No en la versión 0.1.0: el montaje conserva la velocidad original y no elimina pausas. Ese modo está en la [hoja de ruta](#-hoja-de-ruta) como opción bajo petición expresa, porque cambia el material y debe decidirlo quien lo pide.
+Sí, y desde la 0.2.0 lo hace **por defecto**: aplica velocidad ×1,25 y elimina pausas para acercarse al objetivo de compresión que pidas (o al criterio editorial, si no pides ninguno). Para desactivarlo, indica `velocidad=1` y `pausas=no` al invocar la skill. Detalle en [D-007](docs/decisiones.md#d-007--compresión-por-defecto-con-objetivo-configurable).
 </details>
 
 <details>
@@ -321,12 +326,7 @@ Sí: `python3 scripts/install.py` copia la skill en las carpetas de skills de ca
 
 ## 🗺 Hoja de ruta
 
-Sin compromiso de fecha, a partir de la experiencia con grabaciones largas ([detalle](docs/capacidades.md#posibles-ampliaciones)):
-
-- Barrido secuencial a 1 fps con detección de cambios de diapositiva, para grabaciones 4K largas.
-- Transcripción por bloques reanudable y montaje reanudable por lotes.
-- Modo opcional de eliminación de pausas y aceleración, solo bajo petición expresa.
-- Reasignación de un plan a un vídeo movido o copiado.
+Los cuatro puntos que figuraban aquí —barrido con detección de cambios, transcripción y montaje reanudables, aceleración/eliminación de pausas y reasignación de planes— ya los entrega la 0.2.0 ([CHANGELOG](CHANGELOG.md)). No hay ampliaciones pendientes de decisión; las prioridades abiertas están en [requisitos.md](docs/requisitos.md#pendiente).
 
 ---
 

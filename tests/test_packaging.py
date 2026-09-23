@@ -180,6 +180,22 @@ class SkillTest(unittest.TestCase):
         for gone in ("No impongas un porcentaje fijo", "No acelera ni recorta la imagen"):
             self.assertNotIn(gone, text)
 
+    def test_the_repository_documents_the_0_2_0_decisions(self):
+        decisions = (ROOT / "docs" / "decisiones.md").read_text(encoding="utf-8")
+        for identifier in ("D-007", "D-008", "D-009", "D-010", "D-011"):
+            self.assertIn(f"## {identifier} — ", decisions)
+        self.assertEqual(decisions.count("Actualización (2026-09-18"), 1)
+        architecture = (ROOT / "docs" / "arquitectura.md").read_text(encoding="utf-8")
+        for module in ("common.py", "plan.py", "render.py", "doc.py"):
+            self.assertIn(module, architecture)
+        # Las tres desviaciones respecto a la especificación quedan registradas en los dos sitios.
+        for note in ("seek_margin", "-copyts", "trim=end="):
+            self.assertIn(note, decisions)
+            self.assertIn(note, architecture)
+        requirements = (ROOT / "docs" / "requisitos.md").read_text(encoding="utf-8")
+        for identifier in ("R1", "R2", "R3", "R4", "R5", "A-1", "A-6", "40 ms", "8 dB"):
+            self.assertIn(identifier, requirements)
+
 
 class InstallerTest(unittest.TestCase):
     def setUp(self):

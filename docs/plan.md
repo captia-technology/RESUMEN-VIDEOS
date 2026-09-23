@@ -10,6 +10,10 @@
 - Versión 0.1.0 empaquetada como plugin para Claude Code, GitHub Copilot y Codex ([D-004](decisiones.md#d-004--distribución-como-plugin-multiplataforma)), con instalador, guía de instalación y catálogo de capacidades.
 - Arreglos de portabilidad y de sincronía de audio en `video.py` ([D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje)).
 - Verificación de la versión 0.1.0 por cliente (sección siguiente), con los arreglos derivados en `video.py`, `install.py` y la documentación ([cambios](../CHANGELOG.md)).
+- Versión 0.2.0: compresión con objetivo, revisión previa con aceptación registrada, modo audio y
+  documento, montaje reanudable y validado, barrido y transcripción por bloques
+  ([especificación](especificaciones/2026-09-18-resumir-video-0.2.0.md), planes 1 a 4 en
+  [docs/planes/](planes/)).
 
 ## Validación (2026-09-17)
 
@@ -41,6 +45,16 @@ No verificado (pendiente de evidencia):
 - Flujo de instalación de VS Code (**Chat: Install Plugin from Source**) y agente en la nube de Copilot.
 - Instaladores de terceros contra GitHub.
 - macOS: no se ha ejecutado `video.py` ni las pruebas automáticas, ni se han comprobado las órdenes de `brew` de la [guía de instalación](instalacion.md#1-requisitos-previos). Linux sí queda cubierto por la integración continua.
+
+## Validación (2026-09-18)
+
+Aceptación manual de la versión 0.2.0 sobre una grabación real, con los umbrales provisionales de
+[requisitos.md](requisitos.md#umbrales-provisionales) recorridos al menos una vez. Pendiente de
+completar en la tarea 13.
+
+| Fecha | Grabación | Objetivo pedido | Frase de aceptación | Resultado |
+| --- | --- | --- | --- | --- |
+| | | | | |
 
 ## Siguiente paso
 

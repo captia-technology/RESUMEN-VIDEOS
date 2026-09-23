@@ -28,6 +28,8 @@ Instala cada skill por **un solo canal** en cada entorno. Si el plugin convive c
 
 Algunas compilaciones de FFmpeg (variantes LGPL, `ffmpeg-free` de Fedora) no incluyen libx264. En Windows, `video.py` necesita los ejecutables `ffmpeg.exe` y `ffprobe.exe` en PATH; un envoltorio `.cmd` o `.bat` no sirve. El agente debe poder inspeccionar imágenes. `faster-whisper` es opcional y se instala solo si hace falta transcribir; véase la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md#transcripción-opcional).
 
+**Opcionales.** Pandoc, `python-docx` y Pillow no son obligatorios; sin ellos la skill se degrada en vez de fallar: sin Pandoc ni `python-docx`, el documento se entrega solo en Markdown (sin DOCX); sin Pillow, el timeline del informe queda solo en texto. `check` informa de cada uno en `degraded`, redactado, pero ninguno de los tres cambia su código de salida. En Windows, si `faster-whisper` no encuentra las DLL de CUDA/cuDNN, pasa su carpeta con `--dll-dir` (repetible) a `transcribe`.
+
 Comprueba el entorno con `video.py check`. La ruta depende de la carpeta desde la que lo ejecutes:
 
 ```text

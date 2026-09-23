@@ -7,8 +7,17 @@ La unidad distribuible es `plugins/resumir-video/`, y dentro de ella la skill `s
 - `SKILL.md`: instrucciones de selección audiovisual y validación editorial, válidas para cualquier agente.
 - `agents/openai.yaml`: metadatos de interfaz de Codex; los demás clientes lo ignoran.
 - `references/operacion.md`: órdenes, requisitos, formatos y límites del asistente.
-- `scripts/video.py`: comprobación del entorno, extracción, transcripción opcional y montaje local con Python estándar y FFmpeg.
-- `scripts/test_video.py`: pruebas reproducibles con vídeo sintético, sin descargas.
+- `scripts/common.py`: ejecución de FFmpeg, publicación atómica, cerrojo, identidad y huella, línea
+  temporal, energía, interpretación del objetivo, historial y avisos.
+- `scripts/video.py`: punto de entrada y subcomandos `check`, `probe`, `prepare`, `frames`,
+  `transcribe` y `search`.
+- `scripts/plan.py`: tramos, estimación, estados, sugerencias, versión y propuesta.
+- `scripts/render.py`: caché de cortes, presupuesto, montaje, ensamblado y validación.
+- `scripts/doc.py`: expansión de marcas, DOCX, timeline y cobertura.
+- `scripts/test_*.py`: pruebas reproducibles con medios sintéticos y un `faster_whisper` simulado,
+  sin descargas.
+- `references/operacion.md`, `compresion.md`, `revision.md` y `documento.md`: órdenes, formatos,
+  límites y procedimientos.
 - `LICENSE.txt`: licencia MIT, para los canales que copian solo la skill.
 
 El plugin añade tres manifiestos con los mismos metadatos, porque cada cliente elige uno:
@@ -30,7 +39,26 @@ Ambos apuntan a `./plugins/resumir-video`. El plugin está en una subcarpeta par
 
 ## Responsabilidades
 
-El agente analiza la evidencia y decide los cortes. El asistente ejecuta esas decisiones sin inferir importancia a partir del silencio o de palabras clave. Audio, imágenes y selección comparten la línea temporal del original. `render` recodifica cada corte de vídeo a frecuencia constante desde el fotograma en pantalla en su inicio, extrae su audio como PCM desde ese mismo inicio y con la duración del vídeo renderizado, y codifica el audio una sola vez. Así cada unión queda con un desfase máximo de medio fotograma, sin acumulación ([D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje)).
+El agente analiza la evidencia, decide los cortes y espera la aceptación del usuario; el asistente
+ejecuta esas decisiones sin inferir importancia a partir del silencio o de palabras clave. `frames`
+barre la imagen en un proceso por bloque y deja un índice de cambios reutilizable; `transcribe`
+trabaja por bloques reanudables cortados en el silencio. `render` monta cada corte en una pasada de
+vídeo y una de audio, los cachea verificados por recuento exacto de fotogramas y muestras, y
+concatena copiando el vídeo y codificando el audio una sola vez, de modo que las uniones no acumulan
+desfase ([D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje),
+[D-009](decisiones.md#d-009--montaje-por-cortes-en-caché-con-recuento-forzado)). Nada se publica sin
+superar la validación bloqueante, y `vN/` y `documento-vN/` son inmutables.
+
+**Desviaciones respecto a la especificación.** Tanto el montaje como el barrido buscan desde
+`S = max(0, inicio − seek_margin(data))` —3 s, o 10 s en contenedores que solo buscan hacia
+delante—, no desde `inicio − 1`; y, al leer con `-ss S -noaccurate_seek -copyts`, los intervalos del
+grafo van en tiempo absoluto del contenedor (`base + s`) en lugar de `s − S`. De ahí que la lectura
+no se acote con `-t` ni con `-to`, que con `-copyts` dejan la cadena en cero fotogramas. En el
+barrido la cierran los recuentos de cada salida; en el montaje hace falta además una guarda
+`trim=end=<base + fin + 1/F>` detrás del `fps` inicial, porque `select` descarta fotogramas en vez de
+cerrar la cadena y sin ella se decodifica el medio entero en cada corte (medido: 1 000 fotogramas
+leídos frente a 153, con la misma salida)
+([D-009](decisiones.md#d-009--montaje-por-cortes-en-caché-con-recuento-forzado)).
 
 La skill resuelve sus recursos respecto a su propio `SKILL.md` y no escribe en su carpeta, que puede ser una caché de plugins de solo lectura. Los materiales de cada trabajo se guardan en una carpeta de trabajo nueva que elige el usuario (por defecto `resumenes/<nombre-del-archivo-sin-extensión>/`). `prepare` crea esa carpeta con su propio `.gitignore` (`*`); la carpeta padre `resumenes/` no recibe ninguno. El entorno virtual de transcripción se comparte en la caché del usuario (`video.py check` indica la ruta).
 

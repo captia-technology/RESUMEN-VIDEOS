@@ -6,7 +6,8 @@ Este repositorio distribuye la skill `resumir-video`: instrucciones para un agen
 
 | Versión | Estado |
 | --- | --- |
-| 0.1.x | Admitida; las correcciones salen en una versión nueva de la serie |
+| 0.2.x | Admitida; las correcciones salen en una versión nueva de la serie |
+| 0.1.x | No admitida: actualiza a la 0.2.x |
 | Anteriores a 0.1.0 | No existen: 0.1.0 es la primera versión publicada |
 
 Las copias manuales y las instaladas con herramientas de terceros no se actualizan solas ([docs/instalacion.md](docs/instalacion.md#5-skill-independiente-sin-plugins)).
