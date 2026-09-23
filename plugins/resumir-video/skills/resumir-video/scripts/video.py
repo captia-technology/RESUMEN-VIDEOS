@@ -367,18 +367,63 @@ def transcribe_block(model, path, offset, language, args, *, vad=None):
 
 
 def load_model(args):
-    """Model loaded once per call; completed in task 6."""
+    """Model loaded once per call; `auto` tries CUDA first and falls back to CPU."""
+    for folder in args.dll_dir or ():
+        path = Path(folder)
+        if not path.is_dir():
+            raise Refused(f"La carpeta de DLL no existe: {path}")
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(str(path.resolve()))
+        else:
+            print(f"Aviso: --dll-dir solo se aplica en Windows; se ignora {path}.", file=sys.stderr)
     try:
         from faster_whisper import WhisperModel
     except Exception as exc:
-        raise ValueError(f"Falta faster-whisper: {exc}") from exc
-    return WhisperModel(args.model, device="cpu", compute_type=args.compute_type or "int8",
-                        cpu_threads=args.threads, num_workers=1,
-                        local_files_only=not args.allow_download), "cpu"
+        raise ValueError("Falta faster-whisper. Usa subtítulos existentes o instálalo en un entorno "
+                         "local.") from exc
+    order = ("cuda", "cpu") if args.device == "auto" else (args.device,)
+    for device in order:
+        compute = args.compute_type or ("float16" if device == "cuda" else "int8")
+        try:
+            return WhisperModel(args.model, device=device, compute_type=compute,
+                                cpu_threads=args.threads, num_workers=1,
+                                local_files_only=not args.allow_download), device
+        except Exception as exc:
+            if device != order[-1]:
+                print(f"Aviso: CUDA no disponible ({exc}); se continúa en CPU.", file=sys.stderr)
+                continue
+            if not args.allow_download and not Path(args.model).is_dir():
+                raise Refused(f"El modelo {args.model} no está en la caché local: repite la orden "
+                              "con --allow-download o indica en --model una carpeta CTranslate2 "
+                              f"local.\n{exc}") from exc
+            raise ValueError(f"No se pudo cargar el modelo {args.model} en {device}: {exc}") from exc
+    raise ValueError("Sin dispositivo de inferencia disponible.")
 
 
 def recover(work, segments, levels, total, language, device, args):
-    """Second pass over the stretches the VAD may have dropped; completed in task 6."""
+    """Second pass, without VAD, over the stretches that have sound but no transcribed word."""
+    model = None
+    for number, (a, b) in enumerate(gaps(segments, levels, 0.0, total)):
+        piece = work / f"hueco-{number:03d}.json"
+        recorded = None
+        if piece.is_file():
+            try:
+                recorded = json.loads(piece.read_text(encoding="utf-8"))
+                recorded["segments"]  # validate shape before trusting the cache
+            except (OSError, ValueError, KeyError):
+                recorded = None  # truncated/corrupt: treat as unfinished
+        if recorded is None:
+            if model is None:
+                model, device = load_model(args)
+            with tempfile.TemporaryDirectory(prefix="hueco-", dir=work) as tmp:
+                cut = block_cut(args.audio, Path(tmp) / "hueco.wav", a, b)
+                found = transcribe_block(model, cut, a, language, args, vad=False)
+            recorded = {"start": a, "end": b, "device": device, **found}
+            save(piece, recorded)
+        # A hueco can also carry the device that produced it (same reasoning as bloque-NNN.json).
+        device = recorded.get("device", device)
+        for segment in recorded["segments"]:
+            segments.append({**segment, "recuperado": True})
     return segments, device
 
 

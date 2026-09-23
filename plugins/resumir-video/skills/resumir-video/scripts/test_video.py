@@ -103,6 +103,15 @@ class Recorder:
         return iter(parts), types.SimpleNamespace(language=language or "es")
 
 
+class Reluctant(Recorder):
+    """Model that drops the second half of each block unless the VAD is off, like a real miss."""
+
+    def transcribe(self, path, language=None, vad_filter=True, **rest):
+        parts, info = super().transcribe(path, language=language, **rest)
+        parts = list(parts)
+        return iter(parts[:len(parts) // 2] if vad_filter else parts), info
+
+
 def tone(path, seconds, rate=16000):
     """16 kHz mono PCM: a second of silence at the end of every ten, like a real pause."""
     samples = array("h")
@@ -405,7 +414,7 @@ class VideoTest(unittest.TestCase):
             out = root / "transcripcion.json"
             arguments = video.build_parser().parse_args(
                 ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
-                 "--language", "es", "--budget", "0"])
+                 "--language", "es", "--budget", "0", "--device", "cpu"])
             Recorder.loads.clear()
             with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
                 self.assertEqual(video.transcribe(arguments), 3)
@@ -492,6 +501,37 @@ class VideoTest(unittest.TestCase):
                 self.assertEqual(video.transcribe(arguments), 0)
             self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
             self.assertFalse((root / "transcripcion.parcial").exists())
+
+    def test_auto_device_falls_back_to_cpu_and_dll_folders_are_checked(self):
+        arguments = video.build_parser().parse_args(
+            ["transcribe", "audio.wav", "--out", "transcripcion.json", "--device", "auto"])
+        Recorder.loads.clear()
+        with fake_whisper(Recorder), mock.patch("sys.stderr", new_callable=io.StringIO) as noted:
+            model, device = video.load_model(arguments)
+        self.assertEqual((Recorder.loads, device), (["cuda", "cpu"], "cpu"))
+        self.assertIn("CUDA", noted.getvalue())
+        self.assertEqual(model.device, "cpu")
+        arguments.dll_dir = ["carpeta-que-no-existe"]
+        with fake_whisper(Recorder), self.assertRaisesRegex(video.Refused, "no existe"):
+            video.load_model(arguments)
+
+    def test_gaps_with_sound_are_transcribed_again_without_vad(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es"])
+            with fake_whisper(Reluctant), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            data = json.loads(out.read_text(encoding="utf-8"))
+            recovered = [s for s in data["segments"] if s.get("recuperado")]
+            self.assertTrue(recovered)
+            self.assertGreater(max(s["end"] for s in data["segments"]), 25)
+            self.assertTrue(all(a["start"] <= b["start"]
+                                for a, b in zip(data["segments"], data["segments"][1:])))
 
 
 class PlanTest(unittest.TestCase):
