@@ -168,6 +168,18 @@ class SkillTest(unittest.TestCase):
         for folder in (".claude/skills", ".agents/skills", ".github/skills", "skills"):
             self.assertFalse((ROOT / folder / "resumir-video").exists(), folder)
 
+    def test_skill_covers_both_modes_and_the_eleven_step_flow(self):
+        text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        data = frontmatter(SKILL / "SKILL.md")
+        for word in ("audio", "documento"):
+            self.assertIn(word, data["description"].lower())
+        for heading in ("## Invocación", "## Modos", "## Flujo"):
+            self.assertIn(heading, text)
+        flow = text.split("## Flujo", 1)[1]
+        self.assertEqual(len(re.findall(r"^\d+\. \*\*", flow, re.M)), 11)
+        for gone in ("No impongas un porcentaje fijo", "No acelera ni recorta la imagen"):
+            self.assertNotIn(gone, text)
+
 
 class InstallerTest(unittest.TestCase):
     def setUp(self):
