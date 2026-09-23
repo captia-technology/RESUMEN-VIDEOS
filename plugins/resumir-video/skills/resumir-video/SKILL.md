@@ -3,7 +3,7 @@ name: resumir-video
 description: Resume grabaciones técnicas locales (ingeniería, formaciones, presentaciones, reuniones). Con vídeo entrega un MP4 hecho con fragmentos originales y un documento equivalente; con solo audio, el documento. Analiza a la vez la voz y la pantalla, propone los cortes con su duración estimada y espera tu revisión antes de montar. Admite duración objetivo, velocidad y pausas configurables. Úsala cuando pidan resumir, condensar o extraer lo esencial de una grabación local, o ante /resumir-video o $resumir-video seguido de una ruta y, opcionalmente, indicaciones como la duración objetivo. Requiere Python 3.10+ y FFmpeg.
 license: MIT
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # Resumir vídeo
@@ -112,7 +112,9 @@ Si falta una capacidad, informa de la dependencia concreta y conserva el trabajo
    personas y material con restricciones de difusión, e indícalo en las limitaciones.
 10. **Expande y convierte.** `doc` sustituye las marcas, genera el timeline y produce el DOCX si hay
     Pandoc o python-docx; si no, entrega solo Markdown y lo anota. `compare` mide la cobertura de
-    palabras y no bloquea.
+    palabras y no bloquea. Si el usuario pide rótulos, el tema sobre el vídeo o la línea temporal
+    dentro de la imagen, ejecuta `rotular` según [Rótulos](references/operacion.md#rótulos): crea
+    la copia derivada `vN-rotulado/` y deja `vN/` intacto.
 11. **Valida y entrega.** Revisa principio, final y todas las uniones con
     [Revisión del resultado](references/operacion.md#revisión-del-resultado); escucha si puedes y, si
     no, dilo en las limitaciones. Contrasta la cobertura con el inventario. Si falta un dato esencial
@@ -127,7 +129,8 @@ Si falta una capacidad, informa de la dependencia concreta y conserva el trabajo
 - **Vídeo:** `vN/resumen.mp4` (fragmentos originales, sin música, voz sintética, transiciones ni
   rótulos), `vN/seleccion.json` con la frase de aceptación, `vN/validacion.json`, `vN/uniones/`,
   `vN/cobertura.json`, `vN/timeline.*` y el documento `vN/resumen.md` (+ `resumen.docx` si hay
-  conversor).
+  conversor). A petición, `vN-rotulado/` con `resumen-rotulado.mp4`, `linea-tiempo.png` y
+  `rotulos.json`.
 - **Audio:** `documento-vN/resumen.md` (+ `resumen.docx`). No se monta audio.
 - Siempre: `propuesta-vN.md`, `seleccion-vN.json` o `esquema-vN.json` e `historial.jsonl` en la
   carpeta de trabajo, con el evento `deliver` que anotas tú al entregar.

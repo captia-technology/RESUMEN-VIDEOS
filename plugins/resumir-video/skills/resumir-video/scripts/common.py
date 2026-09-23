@@ -39,6 +39,9 @@ EDGE_LOOK = 0.08
 EDGE_WINDOW = 0.60
 EDGE_SILENCE = 0.10
 WORD_MARGIN = 0.02
+WORD_PAD = 0.15
+WORD_SHIFT = 1.0
+WORD_ONSET = 0.5
 FULL_SCALE = 32768.0 * 32768.0
 SQUARES = []
 
@@ -547,18 +550,34 @@ def snap(t, interval, origin):
     return round(origin + steps * interval, 6)
 
 
+def spoken(gap, words):
+    """Pieces of a pause gap that no word needs.
+
+    A quiet word («Pero», «Y») can stay under the threshold and look like a pause. The first
+    WORD_ONSET of every word is kept, plus WORD_MARGIN around it; only its onset, because the
+    transcriber often stretches a word's end over the pause that follows it.
+    """
+    pieces = [gap]
+    for word in words:
+        low = word["start"] - WORD_MARGIN
+        high = min(word["end"], word["start"] + WORD_ONSET) + WORD_MARGIN
+        pieces = [part for start, end in pieces
+                  for part in ((start, min(end, low)), (max(start, high), end))
+                  if part[1] - part[0] > 0]
+    return pieces
+
+
 def islands(levels, a, b, *, interval, origin, remove_pauses=True, threshold=SILENCE_DB,
-            min_silence=MIN_SILENCE, margin=PAUSE_MARGIN):
+            min_silence=MIN_SILENCE, margin=PAUSE_MARGIN, words=None):
     """Spans of [a, b) that survive removing pauses, snapped to the frame grid."""
     if remove_pauses:
         spans, cursor = [], a
+        inside = [word for word in words or () if word["end"] > a and word["start"] < b]
         for start, end in silences(levels, a, b, threshold, min_silence):
-            gap = (start + margin, end - margin)
-            if gap[1] - gap[0] <= 0:
-                continue
-            if gap[0] > cursor:
-                spans.append([cursor, gap[0]])
-            cursor = max(cursor, gap[1])
+            for gap in spoken((start + margin, end - margin), inside):
+                if gap[0] > cursor:
+                    spans.append([cursor, gap[0]])
+                cursor = max(cursor, gap[1])
         if b > cursor:
             spans.append([cursor, b])
         spans = [span for span in spans if span[1] - span[0] >= MIN_ISLAND - 1e-9]
@@ -613,13 +632,48 @@ def nearest_silence(levels, edge, direction, limit, threshold):
     return None
 
 
+def word_edge(edge, words, side):
+    """Border moved to the gap between words when the audio has no usable silence.
+
+    `side` is -1 for a start and +1 for an end. An edge inside a word keeps that word when most of
+    it falls inside the cut and drops it otherwise; the new edge sits in the gap next to the word,
+    at most WORD_PAD from it. Returns the edge unchanged when it already lies between words, and
+    None when no option stays within WORD_SHIFT of the original edge.
+    """
+    inside = next((word for word in words if word["start"] < edge < word["end"]), None)
+    if inside is None:
+        return edge
+    before = max((word["end"] for word in words if word["end"] <= inside["start"]), default=None)
+    after = min((word["start"] for word in words if word["start"] >= inside["end"]), default=None)
+    ahead = inside["start"] - WORD_PAD if before is None else max((before + inside["start"]) / 2,
+                                                                  inside["start"] - WORD_PAD)
+    behind = inside["end"] + WORD_PAD if after is None else min((inside["end"] + after) / 2,
+                                                                inside["end"] + WORD_PAD)
+    kept = inside["end"] - edge if side < 0 else edge - inside["start"]
+    keep = 2 * kept >= inside["end"] - inside["start"]
+    # Keeping the word widens the cut (start earlier, end later); dropping it narrows the cut.
+    options = ((max(0.0, ahead), behind) if side < 0 else (behind, ahead))
+    for candidate in (options if keep else options[::-1]):
+        if abs(candidate - edge) <= WORD_SHIFT:
+            return round(candidate, 6)
+    return None
+
+
 def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
-    """Move both edges out of speech; returns the pair and `borde_en_voz` when no silence is near."""
+    """Move both edges out of speech; returns the pair and `borde_en_voz` when no gap is near.
+
+    The first choice is a silence in the audio; when the background never drops below the
+    threshold (a call with constant noise), the word marks place the edge between two words.
+    """
     words = words or []
-    note, start, end = None, a, b
+    note, start, end, by_word = None, a, b, []
     if voiced(levels, max(0.0, a - EDGE_LOOK), a, threshold):
         limit = max((word["end"] for word in words if word["end"] <= a), default=None)
         candidate = nearest_silence(levels, a, -1, limit, threshold)
+        if candidate is None and words:
+            candidate = word_edge(a, words, -1)
+            if candidate is not None and candidate != a:
+                by_word.append("start")
         if candidate is None:
             note = "borde_en_voz"
         else:
@@ -627,10 +681,19 @@ def adjust_edges(a, b, levels, words, *, threshold=SILENCE_DB):
     if voiced(levels, b, b + EDGE_LOOK, threshold):
         limit = min((word["start"] for word in words if word["start"] >= b), default=None)
         candidate = nearest_silence(levels, b, 1, limit, threshold)
+        if candidate is None and words:
+            candidate = word_edge(b, words, 1)
+            if candidate is not None and candidate != b:
+                by_word.append("end")
         if candidate is None:
             note = "borde_en_voz"
         else:
             end = candidate
+    if by_word and end - start < 2 * WORD_PAD:
+        # Dropping words can close a short cut: undo only the moves the word marks made.
+        start = a if "start" in by_word else start
+        end = b if "end" in by_word else end
+        note = "borde_en_voz"
     return start, end, note
 
 

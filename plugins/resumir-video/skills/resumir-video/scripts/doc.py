@@ -278,33 +278,25 @@ def timeline_text(spans, total, width=WIDTH):
         "█ incluido   · fuera del resumen", "```"])
 
 
-def timeline_png(spans, total, path):
-    """Bar of the original with the kept cuts marked; None when Pillow is missing."""
+def timeline_png(spans, total, path, speed=1.0):
+    """Labelled picture: each kept cut in the original, where it lands in the summary and its
+    topic; None when Pillow is missing."""
     path = Path(path)
     if path.exists():
         # A document revision reuses the picture of its version: it never republishes it.
         return path
     try:
-        from PIL import Image, ImageDraw
+        import PIL  # noqa: F401
     except ImportError:
         return None
-    image = Image.new("RGB", (900, 60), (255, 255, 255))
-    draw = ImageDraw.Draw(image)
-    inner = 880
-    draw.rectangle([10, 10, 10 + inner - 1, 49], fill=(228, 228, 228))
-    for span in spans:
-        left = 10 + int(span["start"] / total * inner)
-        right = 10 + max(int(span["start"] / total * inner) + 1, int(span["end"] / total * inner))
-        draw.rectangle([left, 10, min(right, 10 + inner) - 1, 49], fill=(40, 90, 160))
-    staged = path.with_name(f"{path.name}.parcial")
-    image.save(staged, "PNG")
-    staged.replace(path)
-    return path
+    import overlay
+    return overlay.labelled_timeline(overlay.cuts_of(spans), total, speed, path)
 
 
 def timeline(context):
     text = timeline_text(context["spans"], context["total"])
-    picture = timeline_png(context["spans"], context["total"], Path(context["out"]) / "timeline.png")
+    picture = timeline_png(context["spans"], context["total"],
+                           Path(context["out"]) / "timeline.png", context["speed"])
     if picture is None:
         context["avisos"].append("Sin Pillow: el timeline se entrega solo en texto "
                                  "(instálalo con `python -m pip install pillow`).")

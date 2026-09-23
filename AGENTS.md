@@ -36,7 +36,7 @@ claude plugin validate . --strict
 ```
 
 El descubrimiento con `-p "test_*.py"` recoge las pruebas de los cinco módulos de la skill (`common.py`,
-`video.py`, `plan.py`, `render.py` y `doc.py`) en un único `unittest discover`. Usa `-B` para no generar `__pycache__` dentro de la skill: Codex copia tal cual la carpeta de un catálogo local. Si Codex está instalado, sus validadores comprueban el manifiesto y la skill (ambos scripts requieren PyYAML: `python -m pip install pyyaml`). Sintaxis de Bash:
+`video.py`, `plan.py`, `render.py`, `doc.py` y `overlay.py`) en un único `unittest discover`. Usa `-B` para no generar `__pycache__` dentro de la skill: Codex copia tal cual la carpeta de un catálogo local. Si Codex está instalado, sus validadores comprueban el manifiesto y la skill (ambos scripts requieren PyYAML: `python -m pip install pyyaml`). Sintaxis de Bash:
 
 ```text
 PYTHONUTF8=1 python -B "${CODEX_HOME:-$HOME/.codex}/skills/.system/plugin-creator/scripts/validate_plugin.py" plugins/resumir-video

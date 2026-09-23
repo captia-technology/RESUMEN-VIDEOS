@@ -2,7 +2,7 @@
 
 Guía para instalar la skill `resumir-video` en Claude Code, GitHub Copilot y OpenAI Codex, actualizarla y desinstalarla. Las capacidades se describen en [capacidades.md](capacidades.md).
 
-Estado: versión 0.2.0 (2026-09-18). Las órdenes de catálogo se comprobaron con una copia local del repositorio (por ruta y como copia Git que sustituía a `captia-technology/RESUMEN-VIDEOS`); los clientes, sus versiones y los resultados figuran en [plan.md](plan.md#validación-2026-09-17). La instalación desde GitHub (incluidos VS Code, el bloque de equipo y los instaladores de terceros) está pendiente de evidencia hasta publicar el repositorio. Los sistemas de plugins cambian con frecuencia: si una orden no existe en tu versión, actualiza el cliente o usa la [instalación como skill independiente](#5-skill-independiente-sin-plugins).
+Estado: versión 0.2.1 (2026-09-23). Las órdenes de catálogo se comprobaron con una copia local del repositorio (por ruta y como copia Git que sustituía a `captia-technology/RESUMEN-VIDEOS`); los clientes, sus versiones y los resultados figuran en [plan.md](plan.md#validación-2026-09-17). La instalación desde GitHub (incluidos VS Code, el bloque de equipo y los instaladores de terceros) está pendiente de evidencia hasta publicar el repositorio. Los sistemas de plugins cambian con frecuencia: si una orden no existe en tu versión, actualiza el cliente o usa la [instalación como skill independiente](#5-skill-independiente-sin-plugins).
 
 ## Resumen
 
@@ -266,6 +266,7 @@ Los usuarios de plugins reciben la versión con las órdenes de actualización d
 | `error: unexpected argument 'marketplace' found` (o `'list'`), o `error: unrecognized subcommand 'add'` al ejecutar `codex plugin …` | Codex CLI sin soporte completo de plugins (anterior a 0.131). Comprueba `codex --version`; actualiza con `npm install -g @openai/codex@latest` o usa la skill independiente. |
 | Error al añadir el catálogo | Sin acceso al repositorio privado: revisa `gh auth setup-git` o usa la ruta de una copia de trabajo local (no una URL `file://` ni un repositorio bare). |
 | `Filename too long` al añadir un catálogo de GitHub (Windows) | La carpeta de configuración o de caché del cliente tiene una ruta muy larga (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CODEX_HOME`, `COPILOT_HOME` o `COPILOT_CACHE_HOME`). Usa una ruta más corta; `core.longpaths` no lo evita. Con las rutas por defecto no se ha observado. |
+| `Sin memoria para el modelo … en cuda` o `Sin memoria durante la transcripción` | La GPU no tiene memoria libre para el modelo (otro proceso la ocupa, o la tarjeta es pequeña). Repite la orden: retoma el bloque pendiente. Si persiste, usa `--device cpu` o `--compute-type int8_float16`. Hasta la 0.2.0 este fallo se mostraba como «el modelo no está en la caché local». |
 | `"libx264": false` o `FFmpeg no incluye libx264` | Instala una compilación completa de FFmpeg. |
 | `"ffmpeg": null` o `Falta ffmpeg en PATH` | FFmpeg no está en PATH o, en Windows, solo hay un envoltorio `.cmd` o `.bat` (aunque `ffmpeg` funcione en la terminal): pon en PATH los ejecutables `ffmpeg.exe` y `ffprobe.exe`. |
 | `check` muestra un valor en `"error"` | FFmpeg está instalado pero falla al ejecutarse; el texto indica el motivo. Reinstálalo. |

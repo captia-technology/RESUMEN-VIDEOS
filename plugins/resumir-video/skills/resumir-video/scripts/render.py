@@ -437,15 +437,20 @@ def image_distance(left, right):
     return sum(abs(one - two) for one, two in zip(left, right)) / (len(left) * 255)
 
 
-def image_placement(data, final, spans, out_start, out_end, folder, threads):
+def image_placement(data, final, spans, out_start, out_end, folder, threads, interval=None,
+                    speed=1.0):
     """Compare the first and last frame of the cut against the source it claims to come from."""
     source, base = data["source"]["path"], timeline_start(data)
     margin = seek_margin(data)
     # `final` always carries a single video stream (assemble maps it to output 0), but the source
     # may not: pick the same track render_part read, never a stray attached_pic (§8, hallazgo 5).
     origin_track = f"0:{video_stream(data)['index']}"
-    points = (("inicio", out_start, spans[0][0]), ("fin", max(out_start, out_end - 1e-3),
-                                                   max(spans[-1][0], spans[-1][1] - 1e-3)))
+    # The last frame starts one interval before out_end, and once muxed the stream can end a few
+    # ms before Σ N / F (timebase rounding: 307.496 s for 9225 frames at 30 fps), so out_end − 1 ms
+    # may fall past it and yield no image. Half a frame back always lands inside the last frame.
+    back = interval / 2 if interval else 1e-3
+    points = (("inicio", out_start, spans[0][0]), ("fin", max(out_start, out_end - back),
+                                                   max(spans[-1][0], spans[-1][1] - back * speed)))
     rows = []
     with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder,
                                      ignore_cleanup_errors=True) as temporary:
@@ -612,7 +617,7 @@ def validate(data, plan, parts, final, folder, threads):
             spans = [(float(start), float(end)) for start, end in segment["spans"]]
             length = segment["frames"] / cadence
             images = image_placement(data, final, spans, elapsed, elapsed + length, folder,
-                                     threads)
+                                     threads, 1 / cadence, speed)
             sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder,
                                      threads, f"0:{plan['audio_stream']}")
             placements.append({"corte": segment["id"], "titulo": segment["title"],

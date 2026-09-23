@@ -301,6 +301,26 @@ punto 2. Convertir esas fuentes a MP4 o MKV antes de montar reduce ese riesgo. E
 4:4:4, revisa la legibilidad del texto fino tras la conversión; en fuentes de frecuencia variable,
 revisa con especial atención las uniones.
 
+## Rótulos
+
+`vN/resumen.mp4` se entrega sin rótulos. Si el usuario quiere ver sobre la imagen de qué se habla y
+en qué punto del original y del resumen está, crea una copia derivada:
+
+```text
+python3 'SKILL_DIR/scripts/video.py' rotular --work 'TRABAJO' --version N [--labels 'TRABAJO/rotulos-vN.json']
+```
+
+`--labels` es opcional: un objeto JSON `{"id del corte": "rótulo"}` con textos breves (unas 40
+letras) escritos por ti a partir del inventario; sin él se usa el `title` de cada corte. La orden
+publica `vN-rotulado/` con `resumen-rotulado.mp4` (panel inferior con número y tema del corte,
+origen y posición en el resumen, barra del original con los cortes y el actual resaltado, barra del
+resumen numerada y un cursor que avanza), `linea-tiempo.png` (gráfico etiquetado de dónde sale cada
+corte) y `rotulos.json`. Vuelve a codificar el vídeo (libx264, CRF 18) y copia el audio sin tocarlo.
+No sobrescribe una copia existente, no modifica `vN/` y anota el evento `annotate` en
+`historial.jsonl`. Necesita Pillow. Mira un fotograma de la copia antes de entregarla para comprobar
+que los rótulos no tapan nada esencial de la imagen (el panel ocupa la franja inferior, un 16 % del
+alto).
+
 ## Revisión del resultado
 
 Las uniones son los finales de la columna «Salida» de `vN/montaje.md`, salvo el último. Para cada unión `U`, extrae fotogramas de la salida en una carpeta nueva:

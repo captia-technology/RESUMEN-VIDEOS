@@ -305,6 +305,38 @@ class BordesTest(unittest.TestCase):
         self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, []), (1.5, 3.0, None))
         self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, None), (1.5, 3.0, None))
 
+    def test_without_silence_the_edges_fall_between_words(self):
+        # Constant background (a call): no pause anywhere, so only the word marks can help.
+        levels = array.array("f", [-30.0] * 1000)
+        words = [{"start": 1.0, "end": 1.4}, {"start": 1.6, "end": 2.0},
+                 {"start": 5.0, "end": 5.3}, {"start": 5.5, "end": 5.9}]
+        # Start inside «1.6-2.0» with most of the word in the cut: the word is kept whole.
+        # End inside «5.5-5.9» with little of it in the cut: the word is dropped.
+        self.assertEqual(common.adjust_edges(1.7, 5.6, levels, words), (1.5, 5.4, None))
+        # The opposite halves: the start drops «1.6-2.0», the end keeps «5.5-5.9».
+        self.assertEqual(common.adjust_edges(1.9, 5.8, levels, words), (2.15, 6.05, None))
+        # An edge already between two words stays where it is.
+        self.assertEqual(common.adjust_edges(1.5, 5.4, levels, words), (1.5, 5.4, None))
+        # No marks (subtitles): nothing to lean on, the edge is reported as before.
+        self.assertEqual(common.adjust_edges(1.7, 5.6, levels, []), (1.7, 5.6, "borde_en_voz"))
+
+    def test_a_word_edge_never_moves_further_than_a_second(self):
+        long_word = [{"start": 0.0, "end": 3.0}]
+        self.assertIsNone(common.word_edge(1.5, long_word, 1))
+        self.assertEqual(common.word_edge(2.5, long_word, 1), 3.15)
+
+    def test_pause_removal_never_eats_the_onset_of_a_quiet_word(self):
+        # 0.0-1.0 s under the threshold, but the transcript hears «Pero» at 0.5-0.8 s.
+        levels = array.array("f", [-60.0] * 100 + [-20.0] * 200)
+        plain = common.islands(levels, 0.0, 3.0, interval=0.04, origin=0.0)
+        self.assertGreater(plain[0][0], 0.8)
+        kept = common.islands(levels, 0.0, 3.0, interval=0.04, origin=0.0,
+                              words=[{"start": 0.5, "end": 0.8}])
+        self.assertLessEqual(kept[0][0], 0.48)
+        # A word stretched over the pause keeps only its first half second.
+        self.assertEqual(common.spoken((0.0, 3.0), [{"start": 1.0, "end": 2.9}]),
+                         [(0.0, 0.98), (1.52, 3.0)])
+
     def test_silence_beyond_the_window_is_ignored(self):
         # Cut end at b=1.0; the leading pause (0.0, 0.2) keeps the start side untouched (voiced
         # lookback [0.02, 0.1) is silent), isolating the check to EDGE_WINDOW on the end side.

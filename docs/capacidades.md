@@ -1,6 +1,6 @@
 # Capacidades
 
-Catálogo de lo que hace la skill `resumir-video` 0.2.0, cómo reparte el trabajo entre el agente y el asistente local, qué entradas admite, qué produce, qué garantiza y cuáles son sus límites. La instalación está en [instalacion.md](instalacion.md); las órdenes exactas y los formatos de archivo, en la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md).
+Catálogo de lo que hace la skill `resumir-video` 0.2.1, cómo reparte el trabajo entre el agente y el asistente local, qué entradas admite, qué produce, qué garantiza y cuáles son sus límites. La instalación está en [instalacion.md](instalacion.md); las órdenes exactas y los formatos de archivo, en la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md).
 
 ## Qué hace
 
@@ -117,7 +117,11 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 │   ├── cobertura.json          opcional: cobertura de palabras (compare; informativo)
 │   ├── resumen.md               documento de doc: ficha, resumen, ideas clave, preguntas y limitaciones
 │   ├── resumen.docx             opcional: si hay Pandoc o python-docx
-│   └── timeline.*               línea temporal de texto y, con Pillow, timeline.png
+│   └── timeline.*               línea temporal de texto y, con Pillow, timeline.png etiquetado
+├── vN-rotulado/                 opcional (rotular): copia derivada con rótulos; vN/ no cambia
+│   ├── resumen-rotulado.mp4     tema del corte, origen, posición y líneas temporales sobre la imagen
+│   ├── linea-tiempo.png         de dónde sale cada corte y dónde cae en el resumen, con leyenda
+│   └── rotulos.json             rótulo, intervalo de origen e intervalo de salida de cada corte
 └── documento-vN/                único resultado en modo audio: mismo resumen.md/.docx que en vídeo
 ```
 
@@ -143,6 +147,7 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 | `render VIDEO --work DIR --plan JSON` | Monta `vN/resumen.mp4` desde un plan aceptado (`--accept`/`--directo`), con caché de cortes y validación bloqueante; detalle en [revisión](../plugins/resumir-video/skills/resumir-video/references/revision.md). | `vN/resumen.mp4`, `vN/seleccion.json`, `vN/validacion.json`, `vN/uniones/` |
 | `doc --work DIR --version N` | Expande las marcas del documento del agente y publica Markdown y DOCX; detalle en [documento](../plugins/resumir-video/skills/resumir-video/references/documento.md). | En vídeo, `vN/resumen.md`(+`.docx`); en audio, `documento-vN/resumen.md`(+`.docx`) |
 | `compare --work DIR --version N` | Mide la cobertura de palabras del resumen frente al original; informativo, nunca bloquea. | `vN/cobertura.json` |
+| `rotular --work DIR --version N` | Copia derivada del resumen con el tema de cada corte y las líneas temporales del original y del resumen sobre la imagen (`--labels` para rótulos propios); detalle en [operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md#rótulos). | `vN-rotulado/` |
 
 Todas las opciones y sus valores por defecto aparecen con `video.py <subcomando> --help` y en la referencia de operación. `video.py --version` muestra la versión.
 
@@ -152,6 +157,7 @@ Todas las opciones y sus valores por defecto aparecen con `video.py <subcomando>
 - **Plan ligado a su origen, reasignable por huella.** `render` exige que `source` coincida en huella (tamaño, `mtime_ns` y sha256 de los extremos, o del archivo completo si mide 8 MiB o menos) y que `audio_stream` sea un entero que identifique una pista de audio. Si solo cambia `source.path` pero la huella coincide, `render` lo avisa y actualiza `source` en el plan publicado; una huella distinta sigue siendo un error ([D-011](decisiones.md#d-011--identidad-por-huella-y-reasignación-de-planes)).
 - **Plan coherente.** Cortes con tiempos finitos, en orden cronológico, sin solapes (se admiten contiguos), dentro de la pista de vídeo y con título, motivo y evidencias no vacíos.
 - **Comprobaciones previas.** HDR y ausencia de libx264 o AAC se detectan antes de crear la salida.
+- **Bordes entre palabras.** Un borde que cae sobre voz se lleva al silencio más próximo (0,6 s como mucho); si el fondo nunca baja del umbral, como en una videollamada con ruido constante, se lleva al hueco entre palabras según las marcas de la transcripción. Solo sin marcas, o con una palabra de más de 1 s, queda el aviso `borde_en_voz`.
 - **Cortes precisos.** Cada corte se recodifica a frecuencia constante y sin fotogramas B, empezando por el fotograma más próximo a su inicio (a lo sumo medio fotograma de diferencia; nunca copia directa entre fotogramas clave), y debe producir al menos su duración menos dos fotogramas.
 - **Sincronía sin deriva.** Cada corte se produce en dos pasadas de FFmpeg (vídeo H.264 y audio PCM de 24 bits) que se remultiplexan en el mismo MKV sin recodificar, verificadas por recuento exacto de fotogramas y muestras antes de entrar en la caché de `cortes/`; el audio se codifica una sola vez, en el ensamblado final, así que las uniones no acumulan desfase ([D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje), [D-009](decisiones.md#d-009--montaje-por-cortes-en-caché-con-recuento-forzado)). El desfase en cada unión es como máximo de medio fotograma. En una medición del 2026-09-17 con 20 uniones, las duraciones del vídeo y del audio decodificado coincidieron (con el montaje de la primera versión diferían unos 90 ms); la prueba automática admite hasta 50 ms.
 - **Validación del resultado.** Recuento exacto de fotogramas del vídeo frente a la suma de cortes, desfase vídeo-audio de como máximo 0,1 s y decodificación completa sin errores. `resumen.mp4` solo aparece si pasa estas comprobaciones.

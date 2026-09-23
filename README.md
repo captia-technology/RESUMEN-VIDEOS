@@ -3,7 +3,7 @@
 <img src="docs/img/banner.svg" alt="resumir-video: la línea de tiempo original se condensa en el resumen" width="100%">
 
 <p>
-  <a href="CHANGELOG.md"><img alt="Versión 0.2.0" src="https://img.shields.io/badge/versi%C3%B3n-0.2.0-38BDF8?style=flat-square"></a>
+  <a href="CHANGELOG.md"><img alt="Versión 0.2.1" src="https://img.shields.io/badge/versi%C3%B3n-0.2.1-38BDF8?style=flat-square"></a>
   <a href="LICENSE"><img alt="Licencia MIT" src="https://img.shields.io/badge/licencia-MIT-34D399?style=flat-square"></a>
   <a href="https://github.com/captia-technology/RESUMEN-VIDEOS/actions/workflows/pruebas.yml"><img alt="Pruebas" src="https://github.com/captia-technology/RESUMEN-VIDEOS/actions/workflows/pruebas.yml/badge.svg"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-FBBF24?style=flat-square">
@@ -200,6 +200,8 @@ Cualquier combinación vale («al 10 %, sin acelerar, y móntalo directo»); ant
 | Uso de extremo a extremo siguiendo las instrucciones, con revisión de uniones | Sin órdenes fallidas |
 | Revisión adversarial del montaje a 25, 29,97 y 5 fps, con frecuencia variable y MPEG-TS | Tres fallos encontrados y corregidos |
 
+**0.2.1** (2026-09-24): 27 pruebas de empaquetado y 291 de la skill (2 omitidas), validadores correctos y primera grabación real de extremo a extremo (videollamada de 26:25 → 5:13, 19,8 %, 9400/9400 fotogramas, desfase de 2 ms, cobertura media de palabras 0,987) con el nuevo subcomando `rotular`. Detalle en el [CHANGELOG](CHANGELOG.md).
+
 **0.2.0** (2026-09-18): 27 pruebas de empaquetado e instalador y 280 de la skill (2 omitidas por falta de CUDA/`faster-whisper` en la máquina de esta entrega), `claude plugin validate --strict` y los validadores de Codex correctos, ciclo real de instalación/desinstalación contra el `HOME` del usuario. **Pendiente de evidencia**: la aceptación manual sobre una grabación real en 4K (memoria por corte, tiempo por fase, cobertura de palabras, calibración de umbrales, barrido de 2 h, las diez peticiones de revisión en lenguaje natural y el modo audio de extremo a extremo).
 
 Versiones, órdenes y lo que queda pendiente de evidencia: [validación 0.1.0](docs/plan.md#validación-2026-09-17) · [validación 0.2.0](docs/plan.md#validación-2026-09-18).
@@ -369,7 +371,7 @@ Los cuatro puntos que figuraban aquí —barrido con detección de cambios, tran
 
 <div align="center">
 
-**Versión 0.2.0 · Licencia [MIT](LICENSE) · © 2026 CAPTIA TECHNOLOGY S.L.**
+**Versión 0.2.1 · Licencia [MIT](LICENSE) · © 2026 CAPTIA TECHNOLOGY S.L.**
 
 Las figuras se generan con [`scripts/generar_graficos.py`](scripts/generar_graficos.py) a partir de [datos medidos](docs/img/datos.json); las capturas son salidas reales de los clientes.
 

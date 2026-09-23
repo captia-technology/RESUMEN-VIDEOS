@@ -2,6 +2,34 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y [versionado semántico](https://semver.org/lang/es/). Al publicar una versión, actualiza el mismo número en los archivos que enumera [docs/instalacion.md](docs/instalacion.md#7-publicar-una-versión-nueva); `tests/test_packaging.py` lo comprueba.
 
+## [0.2.1] - 2026-09-23
+
+Correcciones halladas en la primera aceptación real (videollamada de 26 min con ruido de fondo
+constante) y rótulos opcionales sobre el resumen.
+
+### Añadido
+
+- `rotular --work W --version N [--labels rotulos.json]`: copia derivada `vN-rotulado/` con el tema
+  de cada corte, su origen y su posición en el resumen, las líneas temporales del original y del
+  resumen con el corte actual resaltado y un cursor que avanza. `vN/resumen.mp4` no se toca.
+- El timeline del documento (`vN/timeline.png`) pasa a ser un gráfico etiquetado: de dónde sale
+  cada corte, dónde cae en el resumen y una leyenda con los temas.
+
+### Corregido
+
+- Bordes que partían palabras cuando el audio no tiene silencios bajo el umbral: `plan` usa ahora
+  las marcas por palabra y lleva el borde al hueco entre palabras; `borde_en_voz` queda para los
+  casos sin marcas o con palabras de más de 1 s.
+- La eliminación de pausas se comía el arranque de palabras dichas en voz baja («Pero», «Y») que
+  quedaban bajo el umbral: con marcas por palabra, el primer medio segundo de cada palabra se
+  conserva siempre.
+- La validación de `render` fallaba («Las imágenes deben tener el mismo tamaño (0 y 4096)») cuando
+  el MP4 muxado terminaba unos milisegundos antes de Σ N / F: el último punto de imagen se toma
+  medio fotograma antes del final.
+- `transcribe` informaba de una falta de memoria de la GPU como «el modelo no está en la caché
+  local». Ahora lo dice como falta de memoria, y la segunda pasada reutiliza el modelo ya cargado en
+  lugar de cargar una segunda copia (la causa de esa falta de memoria).
+
 ## [0.2.0] - 2026-09-18
 
 Compresión con objetivo, revisión previa obligatoria y entrada de solo audio con documento. Incluye
