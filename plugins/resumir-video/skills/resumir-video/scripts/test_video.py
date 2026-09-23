@@ -3,6 +3,7 @@
 from array import array
 import contextlib
 import hashlib
+import importlib.util
 import io
 import json
 import math
@@ -77,6 +78,22 @@ def fake_whisper(model):
         sys.modules.pop("faster_whisper", None)
         if previous is not None:
             sys.modules["faster_whisper"] = previous
+
+
+@contextlib.contextmanager
+def optional_module(name, value):
+    """Force `import <name>` to see `value` (a module) or fail (None), regardless of what is
+    actually installed -- keeps CheckTest hermetic against faster-whisper/Pillow on the real
+    machine running the suite, in both directions (present and absent)."""
+    had_previous, previous = name in sys.modules, sys.modules.get(name)
+    sys.modules[name] = value
+    try:
+        yield
+    finally:
+        if had_previous:
+            sys.modules[name] = previous
+        else:
+            sys.modules.pop(name, None)
 
 
 class Recorder:
@@ -819,39 +836,91 @@ class SubtitleTest(unittest.TestCase):
 
 
 class CheckTest(unittest.TestCase):
-    def environment(self, present, engine):
-        """check with a controlled FFmpeg and a controlled set of optional tools."""
-        return (mock.patch.object(video, "filters", return_value=present),
-                mock.patch.object(video, "encoders", return_value={"libx264", "aac"}),
-                mock.patch.object(video, "tool",
-                                  side_effect=lambda name: None if name == "pandoc" else name),
-                mock.patch.object(video, "run", return_value="ffmpeg version 8.0.1\n"),
-                mock.patch.object(video.doc, "engine", return_value=engine),
-                mock.patch.object(video.doc, "has_python_docx", return_value=engine is not None))
+    # The exact source line that decides `ok`: reused, unmutated, as the needle for the
+    # regression test below, and mutated there to prove a leaked optional would be caught.
+    OK_LINE = ('report[key] for key in ("python_ok", "ffmpeg", "ffprobe", "libx264", "aac", '
+              '"filters_ok"))')
 
-    def report_of(self, present, engine):
+    def environment(self, present, engine, faster_whisper=True, pillow=True, target=None):
+        """check with a controlled FFmpeg and a controlled set of optional tools. faster_whisper
+        and Pillow are simulated via sys.modules (present or absent, by request) so the report
+        never depends on what actually happens to be installed on the machine running the suite."""
+        target = target or video
+        whisper_module = types.ModuleType("faster_whisper")
+        whisper_module.WhisperModel = object
+        return (mock.patch.object(target, "filters", return_value=present),
+                mock.patch.object(target, "encoders", return_value={"libx264", "aac"}),
+                mock.patch.object(target, "tool",
+                                  side_effect=lambda name: None if name == "pandoc" else name),
+                mock.patch.object(target, "run", return_value="ffmpeg version 8.0.1\n"),
+                mock.patch.object(target.doc, "engine", return_value=engine),
+                mock.patch.object(target.doc, "has_python_docx", return_value=engine is not None),
+                optional_module("faster_whisper", whisper_module if faster_whisper else None),
+                optional_module("PIL", types.ModuleType("PIL") if pillow else None))
+
+    def report_of(self, present, engine, faster_whisper=True, pillow=True, target=None):
+        target = target or video
         with contextlib.ExitStack() as stack:
-            for patch in self.environment(present, engine):
+            for patch in self.environment(present, engine, faster_whisper, pillow, target):
                 stack.enter_context(patch)
             printed = stack.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
-            code = video.check(None)
+            code = target.check(None)
         return code, json.loads(printed.getvalue())
 
     def test_the_optional_tools_are_reported_but_never_change_the_exit_code(self):
-        code, report = self.report_of(set(video.REQUIRED_FILTERS), None)
+        code, report = self.report_of(set(video.REQUIRED_FILTERS), None,
+                                       faster_whisper=False, pillow=False)
         self.assertEqual((code, report["ok"]), (0, True))
         self.assertEqual((report["pandoc"], report["python_docx"], report["docx_engine"]),
                          (False, False, None))
+        self.assertEqual((report["faster_whisper"], report["pillow"]), (False, False))
         self.assertTrue(any("Markdown" in note for note in report["degraded"]))
-        code, report = self.report_of(set(video.REQUIRED_FILTERS), "python-docx")
+        code, report = self.report_of(set(video.REQUIRED_FILTERS), "python-docx",
+                                       faster_whisper=True, pillow=True)
         self.assertEqual((code, report["docx_engine"]), (0, "python-docx"))
+        self.assertEqual((report["faster_whisper"], report["pillow"]), (True, True))
         self.assertFalse(any("Markdown" in note for note in report["degraded"]))
 
     def test_a_missing_filter_does_break_the_check(self):
-        code, report = self.report_of(set(video.REQUIRED_FILTERS) - {"tpad", "atempo"}, "pandoc")
+        code, report = self.report_of(set(video.REQUIRED_FILTERS) - {"tpad", "atempo"}, "pandoc",
+                                       faster_whisper=True, pillow=True)
         self.assertEqual((code, report["ok"]), (1, False))
         self.assertEqual(report["missing_filters"], ["tpad", "atempo"])
         self.assertFalse(report["filters_ok"])
+
+    def test_a_leaked_optional_in_the_ok_tuple_is_caught_regardless_of_the_machine(self):
+        """Regression test for this test class, not for video.py: if `check` ever folds an
+        optional (here Pillow) into the tuple that decides `ok`, that must fail loudly -- on any
+        machine, whether or not Pillow happens to be installed where the suite runs. Proven by
+        mutating a throwaway copy of video.py and confirming the hermetic harness above (which
+        forces Pillow absent via sys.modules, not via what is actually installed) does catch it,
+        while the real, unmutated video.check stays at 0 for the same inputs."""
+        source = Path(video.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count(self.OK_LINE), 1)
+        leaking = self.OK_LINE.replace('"filters_ok"))', '"filters_ok", "pillow"))')
+        mutated_source = source.replace(self.OK_LINE, leaking, 1)
+        with tempfile.TemporaryDirectory(prefix="resumir-video-check-mutation-") as temporary:
+            mutated_path = Path(temporary) / "video_with_leaked_optional.py"
+            mutated_path.write_text(mutated_source, encoding="utf-8")
+            name = "video_with_leaked_optional_under_test"
+            spec = importlib.util.spec_from_file_location(name, mutated_path)
+            mutated = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mutated
+            try:
+                spec.loader.exec_module(mutated)
+                # Same scenario in both cases: every required piece is fine and Pillow is simply
+                # absent (an optional, per spec §3). The real code must stay at 0; the copy that
+                # leaks Pillow into `ok` must not -- this is the check the reviewer ran by hand.
+                healthy, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc",
+                                            pillow=False, target=video)
+                leaked, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc",
+                                           pillow=False, target=mutated)
+                self.assertEqual(healthy, 0)
+                self.assertEqual(leaked, 1)
+            finally:
+                sys.modules.pop(name, None)
+        # The mutation lived only in `temporary`, already removed above: nothing on disk or in
+        # sys.modules outlives this test.
 
 
 if __name__ == "__main__":
