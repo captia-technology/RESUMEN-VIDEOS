@@ -444,6 +444,55 @@ class VideoTest(unittest.TestCase):
             with fake_whisper(Recorder), self.assertRaisesRegex(video.Refused, "no coinciden"):
                 video.transcribe(arguments)
 
+    def test_corrupt_block_is_redone_instead_of_blocking_forever(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es", "--budget", "0"])
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 3)
+            piece = root / "transcripcion.parcial" / "bloque-000.json"
+            piece.write_text('{"index": 0, "segments": [', encoding="utf-8")  # truncated on purpose
+            # Redoing the corrupt block must not raise FileExistsError on the retry's save(): the
+            # call has to behave exactly as a first attempt on that block, still bounded by budget.
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+                self.assertEqual(video.transcribe(arguments), 3)
+            report = json.loads(printed.getvalue().splitlines()[-1])
+            self.assertEqual(report["pending"], 2)
+            self.assertEqual(json.loads(piece.read_text(encoding="utf-8"))["index"], 0)
+            arguments.budget = None
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
+            self.assertFalse((root / "transcripcion.parcial").exists())
+
+    def test_a_failed_publish_can_be_retried_without_touching_the_final_output(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es"])
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO), \
+                 mock.patch.object(common, "publish", side_effect=OSError("fallo simulado")):
+                with self.assertRaises(OSError):
+                    video.transcribe(arguments)
+            self.assertFalse(out.exists())
+            staged = root / "transcripcion.parcial" / "transcripcion.json"
+            self.assertTrue(staged.is_file())
+            # Real retry, publish() no longer mocked: save()'s "x" mode must not choke on the
+            # transcripcion.json a previous, failed attempt already left inside the work area.
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
+            self.assertFalse((root / "transcripcion.parcial").exists())
+
 
 class PlanTest(unittest.TestCase):
     def test_missing_encoders_are_reported_before_rendering(self):

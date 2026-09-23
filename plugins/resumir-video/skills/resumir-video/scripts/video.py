@@ -418,6 +418,9 @@ def transcribe(args):
                 language = language or recorded["language"]
             except (OSError, ValueError, KeyError):
                 recorded = None  # truncated/corrupt: treat as unfinished
+                # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+                # corrupt leftover would turn every retry into the same FileExistsError forever.
+                piece.unlink(missing_ok=True)
             if recorded is not None:
                 device = recorded.get("device", device)
                 done += 1
@@ -443,6 +446,10 @@ def transcribe(args):
     segments, device = recover(work, segments, levels, total, language, device, args)
     segments.sort(key=lambda segment: (segment["start"], segment["end"]))
     staged = work / "transcripcion.json"
+    # A previous attempt may have written this and then failed to publish it: "x" mode would
+    # otherwise turn every retry into the same FileExistsError. `target` is what publish() must
+    # never overwrite; `staged` lives inside the resumable `work` area, so redoing it is safe.
+    staged.unlink(missing_ok=True)
     save(staged, {"language": language, "settings": {**settings, "device": device},
                   "blocks": [{"start": a, "end": b} for a, b in plan],
                   "segments": segments, "warnings": []})
