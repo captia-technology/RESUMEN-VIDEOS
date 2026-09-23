@@ -227,11 +227,15 @@ class VideoTest(unittest.TestCase):
         result = subprocess.run([sys.executable, "-B", str(Path(video.__file__)), "check"],
                                 capture_output=True, text=True, encoding="utf-8")
         report = json.loads(result.stdout)
-        self.assertEqual(list(report), ["version", "python", "python_ok", "platform", "ffmpeg", "ffprobe",
-                                        "ffmpeg_version", "libx264", "aac", "faster_whisper",
-                                        "transcription_venv", "disk_free_gb", "error", "ok"])
+        self.assertEqual(list(report), ["version", "python", "python_ok", "platform", "ffmpeg",
+                                        "ffprobe", "ffmpeg_version", "libx264", "aac", "filters_ok",
+                                        "missing_filters", "faster_whisper", "pandoc", "python_docx",
+                                        "docx_engine", "pillow", "transcription_venv",
+                                        "disk_free_gb", "memory_free_gb", "degraded", "error", "ok"])
         self.assertEqual(result.returncode == 0, report["ok"])
         self.assertEqual(report["version"], video.__version__)
+        self.assertEqual(report["missing_filters"], [])
+        self.assertIn(report["docx_engine"], ("pandoc", "python-docx", None))
 
     def test_prepare_classifies_the_medium_and_records_the_timeline(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -812,6 +816,42 @@ class SubtitleTest(unittest.TestCase):
             arguments.subtitles, arguments.out = str(empty), str(root / "otra.json")
             with self.assertRaisesRegex(video.Refused, "no contiene"):
                 video.transcribe(arguments)
+
+
+class CheckTest(unittest.TestCase):
+    def environment(self, present, engine):
+        """check with a controlled FFmpeg and a controlled set of optional tools."""
+        return (mock.patch.object(video, "filters", return_value=present),
+                mock.patch.object(video, "encoders", return_value={"libx264", "aac"}),
+                mock.patch.object(video, "tool",
+                                  side_effect=lambda name: None if name == "pandoc" else name),
+                mock.patch.object(video, "run", return_value="ffmpeg version 8.0.1\n"),
+                mock.patch.object(video.doc, "engine", return_value=engine),
+                mock.patch.object(video.doc, "has_python_docx", return_value=engine is not None))
+
+    def report_of(self, present, engine):
+        with contextlib.ExitStack() as stack:
+            for patch in self.environment(present, engine):
+                stack.enter_context(patch)
+            printed = stack.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
+            code = video.check(None)
+        return code, json.loads(printed.getvalue())
+
+    def test_the_optional_tools_are_reported_but_never_change_the_exit_code(self):
+        code, report = self.report_of(set(video.REQUIRED_FILTERS), None)
+        self.assertEqual((code, report["ok"]), (0, True))
+        self.assertEqual((report["pandoc"], report["python_docx"], report["docx_engine"]),
+                         (False, False, None))
+        self.assertTrue(any("Markdown" in note for note in report["degraded"]))
+        code, report = self.report_of(set(video.REQUIRED_FILTERS), "python-docx")
+        self.assertEqual((code, report["docx_engine"]), (0, "python-docx"))
+        self.assertFalse(any("Markdown" in note for note in report["degraded"]))
+
+    def test_a_missing_filter_does_break_the_check(self):
+        code, report = self.report_of(set(video.REQUIRED_FILTERS) - {"tpad", "atempo"}, "pandoc")
+        self.assertEqual((code, report["ok"]), (1, False))
+        self.assertEqual(report["missing_filters"], ["tpad", "atempo"])
+        self.assertFalse(report["filters_ok"])
 
 
 if __name__ == "__main__":

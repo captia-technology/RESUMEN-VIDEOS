@@ -31,6 +31,62 @@ SHEET = 5
 SHEET_WIDTH = 160
 INDEX_SIDE = 64
 
+FILTER_ROW = re.compile(r"^\s*[A-Z.]{2,3}\s+(\S+)\s+\S+->\S+")
+# Every filter the skill and the montage rely on; checked once so a build cannot fail halfway.
+REQUIRED_FILTERS = ("fps", "split", "scale", "format", "tile", "null", "select", "settb", "setpts",
+                    "tpad", "trim", "pad", "concat", "aresample", "asplit", "atrim", "asetpts",
+                    "atempo", "apad")
+LOW_MEMORY_GB = 2.0
+
+
+def filters():
+    """Filter names of this FFmpeg build; unlike -encoders, the listing has no separator line."""
+    return {found.group(1) for line in run(["ffmpeg", "-hide_banner", "-filters"]).splitlines()
+            if (found := FILTER_ROW.match(line))}
+
+
+def free_memory_gb():
+    """Available memory in GB, or None where it cannot be read without extra packages."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as stream:
+            for line in stream:
+                if line.startswith("MemAvailable:"):
+                    return round(int(line.split()[1]) / 1e6, 1)
+    except OSError:
+        pass
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    class Memory(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    status = Memory()
+    status.dwLength = ctypes.sizeof(Memory)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return round(status.ullAvailPhys / 1e9, 1)
+
+
+def degradations(report):
+    """What is lost for each missing optional, in the order the flow needs it."""
+    notes = []
+    if not report["faster_whisper"]:
+        notes.append("Sin faster-whisper: usa los subtítulos del medio con transcribe --subtitles.")
+    if report["docx_engine"] is None:
+        notes.append("Sin Pandoc ni python-docx: la entrega es solo Markdown, con código 0.")
+    if not report["pillow"]:
+        notes.append("Sin Pillow: el timeline se entrega solo en texto, sin PNG.")
+    if report["memory_free_gb"] is not None and report["memory_free_gb"] < LOW_MEMORY_GB:
+        notes.append(f"Memoria disponible baja ({report['memory_free_gb']:.1f} GB): monta con "
+                     "--threads 1 y divide los cortes de muchos tramos.")
+    return notes
+
 
 def check(args):
     # Diagnostic entry point: always prints the report, even when something is broken.
@@ -39,7 +95,8 @@ def check(args):
     for name in ("ffmpeg", "ffprobe"):
         report[name] = tool(name)
     report["ffmpeg_version"] = report["error"] = None
-    report["libx264"] = report["aac"] = False
+    report["libx264"] = report["aac"] = report["filters_ok"] = False
+    report["missing_filters"] = list(REQUIRED_FILTERS)
     try:
         if report["ffprobe"]:
             run(["ffprobe", "-hide_banner", "-version"])
@@ -48,6 +105,9 @@ def check(args):
             report["ffmpeg_version"] = lines[0] if lines else None
             available = encoders()
             report["libx264"], report["aac"] = "libx264" in available, "aac" in available
+            present = filters()
+            report["missing_filters"] = [name for name in REQUIRED_FILTERS if name not in present]
+            report["filters_ok"] = not report["missing_filters"]
     except (OSError, ValueError) as exc:
         report["error"] = str(exc)
     try:
@@ -55,15 +115,28 @@ def check(args):
         report["faster_whisper"] = True
     except Exception:
         report["faster_whisper"] = False
+    report["pandoc"] = bool(tool("pandoc"))
+    report["python_docx"] = doc.has_python_docx()
+    report["docx_engine"] = doc.engine()
+    try:
+        import PIL  # noqa: F401
+        report["pillow"] = True
+    except Exception:
+        report["pillow"] = False
     report["transcription_venv"] = str(cache_dir() / "venv")
     try:
         report["disk_free_gb"] = round(shutil.disk_usage(os.getcwd()).free / 1e9, 1)
     except OSError:
         report["disk_free_gb"] = None
+    report["memory_free_gb"] = free_memory_gb()
+    report["degraded"] = degradations(report)
+    # The optional tools never change the exit code (spec §3): only Python, FFmpeg and its filters.
     report["ok"] = report["error"] is None and all(
-        report[key] for key in ("python_ok", "ffmpeg", "ffprobe", "libx264", "aac"))
+        report[key] for key in ("python_ok", "ffmpeg", "ffprobe", "libx264", "aac", "filters_ok"))
     order = ("version", "python", "python_ok", "platform", "ffmpeg", "ffprobe", "ffmpeg_version",
-             "libx264", "aac", "faster_whisper", "transcription_venv", "disk_free_gb", "error", "ok")
+             "libx264", "aac", "filters_ok", "missing_filters", "faster_whisper", "pandoc",
+             "python_docx", "docx_engine", "pillow", "transcription_venv", "disk_free_gb",
+             "memory_free_gb", "degraded", "error", "ok")
     print(json.dumps({key: report[key] for key in order}, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
