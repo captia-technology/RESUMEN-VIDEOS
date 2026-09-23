@@ -586,7 +586,7 @@ git commit -m "feat(frames): barre cada bloque en una pasada con índice gris y 
   `video.space_needed`, `video.MAX_FRAMES` (tareas 1 y 2); `video.show`, la función que ya sirve el
   subcomando `probe` desde el plan 1; `common.duration`, `common.new_dir`,
   `common.probe`, `common.save`, `common.stream_end`, `common.video_stream`, `common.positive` y
-  `common.kind` (planes 1 y 3).
+  `common.pictures` (planes 1 y 3).
 - Produces: `video.frames(args) -> int` (0, 2 o 3) y el subparser
   `frames` con `--out`, `--start`, `--end`, `--step`, `--width`, `--block` y `--threads`. Escribe
   `<--out>/bSSSSS/{frame-NNNN.jpg, indice.gray, hoja-NNN.jpg, index.json}`. Con bloques pendientes
@@ -649,7 +649,10 @@ class Refused(ValueError):
 def frames(args):
     """Sequential sweep by blocks: one FFmpeg process each, resumable and bounded per call."""
     data = probe(args.video)
-    if common.kind(data) != "video":
+    # common.kind exige audio incluso para clasificar "video" (una grabación muda no pasa); el
+    # barrido no necesita audio, así que aquí basta con comprobar la pista de imagen directamente
+    # (docs/planes/2026-09-18-resumir-video-0.2.0-4-evidencia-empaquetado.md, tabla de dependencias).
+    if not common.pictures(data):
         raise Refused("El barrido necesita una pista de vídeo; este medio es de solo audio.")
     stream = video_stream(data)
     total = min(duration(data), stream_end(data, stream))
@@ -810,11 +813,16 @@ En `test_extract_edit_and_protect_source`, sustituye el bloque de `frames` por:
 Y en `test_unicode_output_and_edge_times`, sustituye el bloque equivalente por:
 
 ```python
+            # El último fotograma real (5.96) nunca es recuperable: el filtro fps de una sola
+            # pasada necesita un fotograma siguiente para saber cuánto mantener el actual, y el
+            # último no lo tiene (limitación de diseño de sweep_block, tareas 1-2, no un bug).
+            # --step 0.04 coincide con la rejilla de la fuente (25 fps); 5.94 es el penúltimo
+            # fotograma, el límite realmente recuperable de una fuente de 6 s.
             invoke(self, "frames", source, "--out", root / "final-video",
-                   "--start", "5.9", "--end", "5.99", "--step", "0.07")
+                   "--start", "5.9", "--end", "5.95", "--step", "0.04")
             index = json.loads((root / "final-video/b00005/index.json").read_text(encoding="utf-8"))
             self.assertEqual(len(index["frames"]), 2)
-            self.assertAlmostEqual(index["frames"][-1]["time"], 5.97, delta=1e-6)
+            self.assertAlmostEqual(index["frames"][-1]["time"], 5.94, delta=1e-6)
 ```
 
 En `test_held_frames_of_variable_rate_recordings` y `test_forward_only_containers`, cambia las rutas
@@ -1089,7 +1097,7 @@ Añade a `VideoTest` (necesita FFmpeg para cortar cada bloque, no para el modelo
             out = root / "transcripcion.json"
             arguments = video.build_parser().parse_args(
                 ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
-                 "--language", "es", "--budget", "0"])
+                 "--language", "es", "--budget", "0", "--device", "cpu"])
             Recorder.loads.clear()
             with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
                 self.assertEqual(video.transcribe(arguments), 3)
@@ -1183,8 +1191,17 @@ def transcribe(args):
                 "vad_filter": not args.no_vad, "language": args.language}
     fingerprint = {"settings": settings, "source": audio, "blocks": [[a, b] for a, b in plan]}
     stored = work / "ajustes.json"
+    recorded = None
     if stored.is_file():
-        if json.loads(stored.read_text(encoding="utf-8")) != fingerprint:
+        try:
+            recorded = json.loads(stored.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = None  # truncated/corrupt: treat as unfinished
+            # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+            # corrupt leftover would turn every retry into the same FileExistsError forever.
+            stored.unlink(missing_ok=True)
+    if recorded is not None:
+        if recorded != fingerprint:
             raise Refused("Los ajustes de transcripción no coinciden con los de la parte ya "
                           "hecha; repite la orden con los mismos o elige otra salida.")
     else:
@@ -1202,6 +1219,9 @@ def transcribe(args):
                 language = language or recorded["language"]
             except (OSError, ValueError, KeyError):
                 recorded = None  # truncated/corrupt: treat as unfinished
+                # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+                # corrupt leftover would turn every retry into the same FileExistsError forever.
+                piece.unlink(missing_ok=True)
             if recorded is not None:
                 device = recorded.get("device", device)
                 done += 1
@@ -1227,6 +1247,10 @@ def transcribe(args):
     segments, device = recover(work, segments, levels, total, language, device, args)
     segments.sort(key=lambda segment: (segment["start"], segment["end"]))
     staged = work / "transcripcion.json"
+    # A previous attempt may have written this and then failed to publish it: "x" mode would
+    # otherwise turn every retry into the same FileExistsError. `target` is what publish() must
+    # never overwrite; `staged` lives inside the resumable `work` area, so redoing it is safe.
+    staged.unlink(missing_ok=True)
     save(staged, {"language": language, "settings": {**settings, "device": device},
                   "blocks": [{"start": a, "end": b} for a, b in plan],
                   "segments": segments, "warnings": []})
@@ -1328,7 +1352,103 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 
 Esperado: `Ran 1 test ... OK` (la implementación del paso 5 ya compara `ajustes.json`).
 
-- [ ] **Paso 10: Commit**
+- [ ] **Paso 10: Escribir las pruebas de robustez ante corrupción y ante una publicación fallida**
+
+```python
+    def test_corrupt_block_is_redone_instead_of_blocking_forever(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es", "--budget", "0"])
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 3)
+            piece = root / "transcripcion.parcial" / "bloque-000.json"
+            piece.write_text('{"index": 0, "segments": [', encoding="utf-8")  # truncated on purpose
+            # Redoing the corrupt block must not raise FileExistsError on the retry's save(): the
+            # call has to behave exactly as a first attempt on that block, still bounded by budget.
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+                self.assertEqual(video.transcribe(arguments), 3)
+            report = json.loads(printed.getvalue().splitlines()[-1])
+            self.assertEqual(report["pending"], 2)
+            self.assertEqual(json.loads(piece.read_text(encoding="utf-8"))["index"], 0)
+            arguments.budget = None
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
+            self.assertFalse((root / "transcripcion.parcial").exists())
+
+    def test_corrupt_settings_is_redone_instead_of_blocking_forever(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es", "--budget", "0"])
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 3)
+            stored = root / "transcripcion.parcial" / "ajustes.json"
+            original = stored.read_bytes()
+            stored.write_bytes(original[:len(original) // 2])  # real bytes, truncated for real
+            # Redoing the corrupt settings file must not raise FileExistsError on the retry's
+            # save(), nor refuse the run as if the settings had actually changed: the call has to
+            # behave exactly as a first attempt at recording the settings, still bounded by budget
+            # and still reusing the block already done.
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+                self.assertEqual(video.transcribe(arguments), 3)
+            self.assertEqual(json.loads(stored.read_text(encoding="utf-8")),
+                             json.loads(original.decode("utf-8")))
+            report = json.loads(printed.getvalue().splitlines()[-1])
+            self.assertEqual(report["pending"], 2)
+            arguments.budget = None
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
+            self.assertFalse((root / "transcripcion.parcial").exists())
+
+    def test_a_failed_publish_can_be_retried_without_touching_the_final_output(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            out = root / "transcripcion.json"
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(out), "--block", "10", "--slack", "2",
+                 "--language", "es"])
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO), \
+                 mock.patch.object(common, "publish", side_effect=OSError("fallo simulado")):
+                with self.assertRaises(OSError):
+                    video.transcribe(arguments)
+            self.assertFalse(out.exists())
+            staged = root / "transcripcion.parcial" / "transcripcion.json"
+            self.assertTrue(staged.is_file())
+            # Real retry, publish() no longer mocked: save()'s "x" mode must not choke on the
+            # transcripcion.json a previous, failed attempt already left inside the work area.
+            with fake_whisper(Recorder), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(video.transcribe(arguments), 0)
+            self.assertEqual(len(json.loads(out.read_text(encoding="utf-8"))["segments"]), 29)
+            self.assertFalse((root / "transcripcion.parcial").exists())
+```
+
+- [ ] **Paso 11: Ejecutar las tres pruebas y comprobar que pasan**
+
+```text
+python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_video.py" -k test_corrupt_block_is_redone -v
+python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_video.py" -k test_corrupt_settings_is_redone -v
+python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_video.py" -k test_a_failed_publish_can_be_retried -v
+```
+
+Esperado: `OK` en las tres. Un `bloque-NNN.json` o un `ajustes.json` truncado se trata como si nunca
+se hubiera escrito y se borra antes de reintentar, para que el modo `"x"` de `save` no choque contra
+el archivo que dejó el intento anterior; y `transcripcion.json` dentro de `transcripcion.parcial/` se
+borra antes de reconstruirlo, para que un `common.publish` que falló no bloquee el siguiente intento.
+
+- [ ] **Paso 12: Commit**
 
 ```bash
 git add plugins/resumir-video/skills/resumir-video/scripts/video.py \
@@ -1491,6 +1611,9 @@ def recover(work, segments, levels, total, language, device, args):
                 recorded["segments"]  # validate shape before trusting the cache
             except (OSError, ValueError, KeyError):
                 recorded = None  # truncated/corrupt: treat as unfinished
+                # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+                # corrupt leftover would turn every retry into the same FileExistsError forever.
+                piece.unlink(missing_ok=True)
         if recorded is None:
             if model is None:
                 model, device = load_model(args)
@@ -1516,7 +1639,47 @@ Esperado: `Ran 1 test ... OK`. `Reluctant` deja sin palabras la segunda mitad de
 `gaps` las detecta porque el tono sigue por encima de −50 dBFS y la segunda pasada sin VAD las
 recupera, marcadas con `"recuperado": true`.
 
-- [ ] **Paso 9: Ejecutar la suite de la skill entera**
+- [ ] **Paso 9: Escribir la prueba de robustez ante un `hueco-NNN.json` corrupto**
+
+```python
+    def test_corrupt_gap_is_redone_instead_of_blocking_forever(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            audio = root / "audio.wav"
+            tone(audio, 30)
+            work = root / "transcripcion.parcial"
+            work.mkdir()
+            arguments = video.build_parser().parse_args(
+                ["transcribe", str(audio), "--out", str(root / "transcripcion.json"),
+                 "--language", "es", "--device", "cpu"])
+            levels = common.energy(str(audio), root / "energia.f32")
+            total = round(len(levels) * video.LEVEL_STEP, 3)
+            with fake_whisper(Reluctant):
+                segments, device = video.recover(work, [], levels, total, "es", None, arguments)
+            self.assertTrue(any(s.get("recuperado") for s in segments))
+            piece = work / "hueco-000.json"
+            self.assertTrue(piece.is_file())
+            original = piece.read_bytes()
+            piece.write_bytes(original[:len(original) // 2])  # real bytes, truncated for real
+            # Redoing the corrupt gap must not raise FileExistsError on the retry's save(): the
+            # call has to behave exactly as a first attempt on that gap.
+            with fake_whisper(Reluctant):
+                redone, device = video.recover(work, [], levels, total, "es", device, arguments)
+            self.assertTrue(any(s.get("recuperado") for s in redone))
+            self.assertEqual(json.loads(piece.read_text(encoding="utf-8"))["segments"],
+                             [{k: v for k, v in s.items() if k != "recuperado"} for s in redone])
+```
+
+- [ ] **Paso 10: Ejecutar la prueba y comprobar que pasa**
+
+```text
+python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_video.py" -k test_corrupt_gap_is_redone -v
+```
+
+Esperado: `Ran 1 test ... OK`. Un `hueco-NNN.json` truncado se trata como si nunca se hubiera
+escrito y se borra antes de reintentar, con el mismo criterio que `bloque-NNN.json` en la tarea 5.
+
+- [ ] **Paso 11: Ejecutar la suite de la skill entera**
 
 ```text
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
@@ -1524,7 +1687,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 
 Esperado: `OK`.
 
-- [ ] **Paso 10: Commit**
+- [ ] **Paso 12: Commit**
 
 ```bash
 git add plugins/resumir-video/skills/resumir-video/scripts/video.py \
@@ -1577,6 +1740,40 @@ class SubtitleTest(unittest.TestCase):
                          [(2.0, 3.25), (2.0, 5.0), (600.0, 602.0)])
         self.assertEqual([s["text"] for s in vtt], ["Hola", "Sin horas", "Texto"])
         self.assertEqual(video.subtitles("sin ningún tiempo"), [])
+
+    def test_a_cue_without_a_blank_separator_does_not_swallow_the_next_identifier(self):
+        # Algunas herramientas de recorte/reexportación omiten la línea en blanco entre cues; el
+        # identificador numérico del cue siguiente no debe colarse como texto del anterior. De
+        # paso, un cue de duración cero y otro con los tiempos invertidos, intercalados sin
+        # separador entre cues válidos, se descartan sin contaminar a sus vecinos.
+        run_together = ("1\n00:00:01,000 --> 00:00:02,000\nUno\n"
+                        "2\n00:00:02,000 --> 00:00:02,000\nCero\n"
+                        "3\n00:00:04,000 --> 00:00:03,000\nInvertido\n"
+                        "4\n00:00:02,000 --> 00:00:03,000\nDos\n"
+                        "5\n00:00:03,000 --> 00:00:04,000\nTres\n")
+        segments = video.subtitles(run_together)
+        self.assertEqual([s["text"] for s in segments], ["Uno", "Dos", "Tres"])
+        self.assertEqual([(s["start"], s["end"]) for s in segments],
+                         [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0)])
+
+    def test_webvtt_cues_without_an_identifier_line_keep_their_own_text(self):
+        # WebVTT no exige un identificador antes de los tiempos; sin línea en blanco, la línea de
+        # tiempos del cue siguiente no debe usarse para descartar como huérfano el cuerpo del cue
+        # actual, ni borrar un cue entero sin identificador (a diferencia de SRT, un cuerpo de
+        # WebVTT nunca es una secuencia de dígitos pura).
+        chained = ("WEBVTT\n\n"
+                  "00:00:01.000 --> 00:00:02.000\nPrimero\n"
+                  "00:00:02.000 --> 00:00:03.000\nSegundo\n"
+                  "00:00:03.000 --> 00:00:04.000\nTercero\n")
+        segments = video.subtitles(chained)
+        self.assertEqual([s["text"] for s in segments], ["Primero", "Segundo", "Tercero"])
+        self.assertEqual([(s["start"], s["end"]) for s in segments],
+                         [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0)])
+        multiline = ("WEBVTT\n\n"
+                    "00:00:01.000 --> 00:00:03.000\nPrimera fila\nSegunda fila\n"
+                    "00:00:03.000 --> 00:00:04.000\nSiguiente\n")
+        joined = video.subtitles(multiline)
+        self.assertEqual([s["text"] for s in joined], ["Primera fila Segunda fila", "Siguiente"])
 
     def test_the_subtitle_branch_publishes_a_transcription_with_its_warning(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -1636,8 +1833,14 @@ def subtitles(text):
             continue
         start, end = cue_time(*found.groups()[:4]), cue_time(*found.groups()[4:])
         body = []
-        for following in lines[number + 1:]:
+        for offset, following in enumerate(lines[number + 1:]):
+            index = number + 1 + offset
             if not following.strip() or CUE.search(following):
+                break
+            # Only a bare digit sequence is discarded as an orphan identifier: SRT numbers its
+            # cues that way, but WebVTT text is never a pure digit string, so real body text
+            # glued to the next cue (WebVTT allows cues with no identifier at all) survives.
+            if following.strip().isdigit() and index + 1 < len(lines) and CUE.search(lines[index + 1]):
                 break
             body.append(TAG.sub("", following).strip())
         said = " ".join(part for part in body if part).strip()
@@ -1690,9 +1893,11 @@ rama `--subtitles` no autodetecta idioma porque no hay audio que analizar.
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_video.py" -k SubtitleTest -v
 ```
 
-Esperado: `Ran 2 tests ... OK`. El analizador tolera BOM, milisegundos de dos dígitos, etiquetas
+Esperado: `Ran 4 tests ... OK`. El analizador tolera BOM, milisegundos de dos dígitos, etiquetas
 `<i>` y `<v Ana>`, `NOTE`, identificador de cue, ajustes de posición tras los tiempos y cues WebVTT
-sin componente de horas (`MM:SS.mmm`). Limitación conocida: el grupo de horas admite hasta 2
+sin componente de horas (`MM:SS.mmm`); un cue sin línea en blanco tras el anterior no contamina su
+texto, y un identificador huérfano solo se descarta cuando es una secuencia de dígitos pura, para no
+borrar cuerpos de WebVTT sin identificador. Limitación conocida: el grupo de horas admite hasta 2
 dígitos (no 3 o más), un caso extremo sin impacto práctico en vídeos de formación o reuniones.
 
 - [ ] **Paso 6: Ejecutar la suite completa de la skill y la del repositorio**
@@ -1756,43 +1961,145 @@ nueva y añade sus comprobaciones:
         self.assertIn(report["docx_engine"], ("pandoc", "python-docx", None))
 ```
 
+Añade también, justo debajo de `fake_whisper` (requiere `import importlib.util` entre las
+importaciones del archivo), el ayudante que mantiene el informe simulado independiente de lo que
+haya realmente instalado en la máquina que ejecuta la suite:
+
+```python
+@contextlib.contextmanager
+def optional_module(name, value):
+    """Force `import <name>` to see `value` (a module) or fail (None), regardless of what is
+    actually installed -- keeps CheckTest hermetic against faster-whisper/Pillow on the real
+    machine running the suite, in both directions (present and absent)."""
+    had_previous, previous = name in sys.modules, sys.modules.get(name)
+    sys.modules[name] = value
+    try:
+        yield
+    finally:
+        if had_previous:
+            sys.modules[name] = previous
+        else:
+            sys.modules.pop(name, None)
+```
+
 Y añade al final del archivo una clase nueva (no necesita FFmpeg: todo está simulado):
 
 ```python
 class CheckTest(unittest.TestCase):
-    def environment(self, present, engine):
-        """check with a controlled FFmpeg and a controlled set of optional tools."""
-        return (mock.patch.object(video, "filters", return_value=present),
-                mock.patch.object(video, "encoders", return_value={"libx264", "aac"}),
-                mock.patch.object(video, "tool",
-                                  side_effect=lambda name: None if name == "pandoc" else name),
-                mock.patch.object(video, "run", return_value="ffmpeg version 8.0.1\n"),
-                mock.patch.object(video.doc, "engine", return_value=engine),
-                mock.patch.object(video.doc, "has_python_docx", return_value=engine is not None))
+    # The exact source line that decides `ok`: reused, unmutated, as the needle for the
+    # regression test below, and mutated there to prove a leaked optional would be caught.
+    OK_LINE = ('report[key] for key in ("python_ok", "ffmpeg", "ffprobe", "libx264", "aac", '
+              '"filters_ok"))')
 
-    def report_of(self, present, engine):
+    def environment(self, present, engine, faster_whisper=True, pillow=True, memory_free_gb=2.0,
+                    disk_free_gb=2.0, target=None):
+        """check with a controlled FFmpeg and a controlled set of optional tools. faster_whisper
+        and Pillow are simulated via sys.modules (present or absent, by request), and
+        memory_free_gb/disk_free_gb via their own source hooks, so the report never depends on
+        what actually happens to be installed or free on the machine running the suite."""
+        target = target or video
+        whisper_module = types.ModuleType("faster_whisper")
+        whisper_module.WhisperModel = object
+        return (mock.patch.object(target, "filters", return_value=present),
+                mock.patch.object(target, "encoders", return_value={"libx264", "aac"}),
+                mock.patch.object(target, "tool",
+                                  side_effect=lambda name: None if name == "pandoc" else name),
+                mock.patch.object(target, "run", return_value="ffmpeg version 8.0.1\n"),
+                mock.patch.object(target.doc, "engine", return_value=engine),
+                mock.patch.object(target.doc, "has_python_docx", return_value=engine is not None),
+                optional_module("faster_whisper", whisper_module if faster_whisper else None),
+                optional_module("PIL", types.ModuleType("PIL") if pillow else None),
+                mock.patch.object(target, "free_memory_gb", return_value=memory_free_gb),
+                mock.patch.object(target.shutil, "disk_usage",
+                                  return_value=types.SimpleNamespace(free=int(disk_free_gb * 1e9))))
+
+    def report_of(self, present, engine, faster_whisper=True, pillow=True, memory_free_gb=2.0,
+                  disk_free_gb=2.0, target=None):
+        target = target or video
         with contextlib.ExitStack() as stack:
-            for patch in self.environment(present, engine):
+            for patch in self.environment(present, engine, faster_whisper, pillow, memory_free_gb,
+                                          disk_free_gb, target):
                 stack.enter_context(patch)
             printed = stack.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
-            code = video.check(None)
+            code = target.check(None)
         return code, json.loads(printed.getvalue())
 
     def test_the_optional_tools_are_reported_but_never_change_the_exit_code(self):
-        code, report = self.report_of(set(video.REQUIRED_FILTERS), None)
+        code, report = self.report_of(set(video.REQUIRED_FILTERS), None,
+                                       faster_whisper=False, pillow=False)
         self.assertEqual((code, report["ok"]), (0, True))
         self.assertEqual((report["pandoc"], report["python_docx"], report["docx_engine"]),
                          (False, False, None))
+        self.assertEqual((report["faster_whisper"], report["pillow"]), (False, False))
         self.assertTrue(any("Markdown" in note for note in report["degraded"]))
-        code, report = self.report_of(set(video.REQUIRED_FILTERS), "python-docx")
+        code, report = self.report_of(set(video.REQUIRED_FILTERS), "python-docx",
+                                       faster_whisper=True, pillow=True)
         self.assertEqual((code, report["docx_engine"]), (0, "python-docx"))
+        self.assertEqual((report["faster_whisper"], report["pillow"]), (True, True))
         self.assertFalse(any("Markdown" in note for note in report["degraded"]))
 
     def test_a_missing_filter_does_break_the_check(self):
-        code, report = self.report_of(set(video.REQUIRED_FILTERS) - {"tpad", "atempo"}, "pandoc")
+        code, report = self.report_of(set(video.REQUIRED_FILTERS) - {"tpad", "atempo"}, "pandoc",
+                                       faster_whisper=True, pillow=True)
         self.assertEqual((code, report["ok"]), (1, False))
         self.assertEqual(report["missing_filters"], ["tpad", "atempo"])
         self.assertFalse(report["filters_ok"])
+
+    def leaked_ok_tuple_codes(self, extra_key, **environment_kwargs):
+        """Mutates a throwaway copy of video.py so `ok` also depends on `extra_key`, then returns
+        (healthy, leaked): the exit codes from the real video.check and from the mutated copy, for
+        the same, otherwise-passing inputs in environment_kwargs. Shared by the regression tests
+        below, one per optional the hermetic harness must keep out of the `ok` tuple."""
+        source = Path(video.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count(self.OK_LINE), 1)
+        leaking = self.OK_LINE.replace('"filters_ok"))', f'"filters_ok", "{extra_key}"))')
+        mutated_source = source.replace(self.OK_LINE, leaking, 1)
+        with tempfile.TemporaryDirectory(prefix="resumir-video-check-mutation-") as temporary:
+            mutated_path = Path(temporary) / f"video_with_leaked_{extra_key}.py"
+            mutated_path.write_text(mutated_source, encoding="utf-8")
+            name = f"video_with_leaked_{extra_key}_under_test"
+            spec = importlib.util.spec_from_file_location(name, mutated_path)
+            mutated = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mutated
+            try:
+                spec.loader.exec_module(mutated)
+                # Same scenario in both cases: every required piece is fine and the leaked key is
+                # simply falsy (an optional, per spec §3). The real code must stay at 0; the copy
+                # that leaks it into `ok` must not -- this is the check the reviewer ran by hand.
+                healthy, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc", target=video,
+                                            **environment_kwargs)
+                leaked, _ = self.report_of(set(video.REQUIRED_FILTERS), "pandoc", target=mutated,
+                                           **environment_kwargs)
+                return healthy, leaked
+            finally:
+                sys.modules.pop(name, None)
+        # The mutation lived only in `temporary`, already removed above: nothing on disk or in
+        # sys.modules outlives this test.
+
+    def test_a_leaked_optional_in_the_ok_tuple_is_caught_regardless_of_the_machine(self):
+        """Regression test for this test class, not for video.py: if `check` ever folds an
+        optional (here Pillow) into the tuple that decides `ok`, that must fail loudly -- on any
+        machine, whether or not Pillow happens to be installed where the suite runs. Proven by
+        mutating a throwaway copy of video.py and confirming the hermetic harness above (which
+        forces Pillow absent via sys.modules, not via what is actually installed) does catch it,
+        while the real, unmutated video.check stays at 0 for the same inputs."""
+        healthy, leaked = self.leaked_ok_tuple_codes("pillow", pillow=False)
+        self.assertEqual(healthy, 0)
+        self.assertEqual(leaked, 1)
+
+    def test_a_leaked_environment_reading_in_the_ok_tuple_is_caught_regardless_of_the_machine(self):
+        """Same regression as above, for memory_free_gb/disk_free_gb: a mutation that folds either
+        into `ok` must fail loudly even though the real value is a number, never None/falsy, on
+        the vast majority of machines running the suite. Proven the same way: the hermetic harness
+        forces the reading low (falsy-adjacent 0.0, via free_memory_gb/shutil.disk_usage, not via
+        what the real machine reports) and confirms the mutated copy breaks while the real,
+        unmutated video.check stays at 0 for the same inputs."""
+        for key, kwargs in (("memory_free_gb", {"memory_free_gb": 0.0}),
+                            ("disk_free_gb", {"disk_free_gb": 0.0})):
+            with self.subTest(key=key):
+                healthy, leaked = self.leaked_ok_tuple_codes(key, **kwargs)
+                self.assertEqual(healthy, 0)
+                self.assertEqual(leaked, 1)
 ```
 
 `test_video.py` ya importa `io`, `json`, `mock` y `unittest`; añade `import contextlib` si la
@@ -2026,7 +2333,7 @@ por:
 
 ```text
 - Nada publicado se sobrescribe. Solo `prepare --work` exige una carpeta **nueva**: si ya existe, se detiene con `La carpeta ya existe y no se sobrescribe; indica una carpeta nueva (p. ej., con el sufijo -2): <ruta>`. Dentro de ella, `frames`, `transcribe` y `render` **reanudan**: saltan lo terminado, apartan lo incompleto con el sufijo `.parcial` y publican por renombrado atómico. Las carpetas `vN/` y `documento-vN/` y los JSON publicados son inmutables.
-- Un trabajo que se queda a medias por presupuesto termina con código 3 e imprime `{"done", "total", "pending", "bloques"}`, con `pending` entero y `bloques` con los nombres que faltan: repite la misma orden para continuar.
+- Un trabajo que se queda a medias por presupuesto termina con código 3 e imprime `{"done", "total", "pending", "bloques"}`, con `pending` entero y `bloques` con los nombres que faltan: repite la misma orden para continuar. En `frames`, `done` y `total` son acumulados de todo el intervalo pedido, incluidas llamadas anteriores: es el criterio natural de un barrido reanudable sobre un rango fijo. En `render`, que reanuda desde una caché de cortes, cuentan solo lo que esa llamada concreta monta, no lo ya cacheado: es una diferencia intencional entre ambos, no un error.
 ```
 
 - [ ] **Paso 4: Actualizar la tabla de `check` de «Comprobar el entorno»**
@@ -2122,8 +2429,12 @@ Con `--subtitles` no se carga ningún modelo: se normaliza un SRT o WebVTT del p
 Sustituye `El montaje no se reanuda: un fallo obliga a repetirlo en otra carpeta.` por:
 
 ```text
-El montaje se reanuda: cada corte verificado queda en `cortes/<clave>.mkv` y `--budget` limita el tiempo por llamada, que devuelve 3 con lo que falta. Un cerrojo exclusivo impide dos montajes a la vez sobre el mismo trabajo.
-Órdenes de `render`: `--accept 'frase literal del usuario'` o `--directo` autorizan el montaje, `--budget` lo acota por llamada y `--dry-run` estima el coste imprimiendo `{reused, new, eta_s}` —cortes reutilizables, cortes nuevos y segundos— sin montar nada. No lo confundas con `plan --dry-run`: `plan --dry-run` muestra el plan propuesto sin escribirlo; `render --dry-run` estima el coste del montaje sin renderizar.
+El montaje se reanuda: `--budget` limita el tiempo por llamada y, si se agota, devuelve 3 con
+`{"done", "total", "pending", "bloques"}` —contando solo lo que esa llamada concreta monta, no lo ya
+cacheado— para repetir la misma orden. Un cerrojo exclusivo impide dos montajes a la vez sobre el mismo
+trabajo. `render --dry-run` estima el coste sin montar nada, imprimiendo `{reused, new, eta_s}` —cortes
+reutilizables, cortes nuevos y segundos—; no lo confundas con `plan --dry-run`, que muestra el plan
+propuesto sin escribirlo.
 ```
 
 Y borra la frase `Cada imagen es una búsqueda independiente: no decodifica horas completas ni carga
@@ -2583,9 +2894,7 @@ Sustituye la sección «Flujo» entera por:
 En «Entorno y portabilidad», añade al final del primer párrafo de referencias:
 
 ```markdown
-Lee [references/operacion.md](references/operacion.md) antes de ejecutar el asistente, y
-[compresion.md](references/compresion.md), [revision.md](references/revision.md) y
-[documento.md](references/documento.md) cuando llegues a esos pasos.
+Lee también [compresion.md](references/compresion.md), [revision.md](references/revision.md) y [documento.md](references/documento.md) cuando llegues a esos pasos.
 ```
 
 Y sustituye la sección «Entregables» por:
@@ -2986,7 +3295,7 @@ las decisiones de diseño y los umbrales provisionales:
 | R2 | Propuesta de cortes revisable en lenguaje natural antes y después del montaje | [D-008](decisiones.md#d-008--revisión-previa-con-aceptación-registrada-y-versiones-inmutables) |
 | R3 | Entrada de solo audio: documento en Markdown y, si hay conversor, DOCX | [D-010](decisiones.md#d-010--modo-audio-y-documento-con-motores-opcionales) |
 | R4 | En vídeo, el mismo documento acompaña siempre al MP4 | [D-010](decisiones.md#d-010--modo-audio-y-documento-con-motores-opcionales) |
-| R5 | Se conservan garantías, dependencias, preferencia por subtítulos fiables y pruebas de la 0.1.0 | [D-003](decisiones.md#d-003--skill-autocontenida-con-montaje-local), [D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje) |
+| R5 | Se conservan garantías, dependencias, preferencia por subtítulos fiables y pruebas de la 0.1.0 | [D-003](decisiones.md#d-003--skill-autocontenida-con-montaje-local), [D-004](decisiones.md#d-004--distribución-como-plugin-multiplataforma), [D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje) |
 
 Decisiones de diseño tomadas en la sesión de especificación: A-1 sin objetivo manda el criterio
 editorial; A-2 la revisión previa es obligatoria salvo `directo`; A-3 en modo audio se acepta el
@@ -3026,7 +3335,9 @@ de voz se resuelven por grabación cuando sea necesario.
 
 - [ ] **Paso 5: Actualizar `docs/arquitectura.md`**
 
-En «Unidad distribuible», sustituye las dos líneas de `scripts/` por:
+En «Unidad distribuible», borra la línea `- references/operacion.md: órdenes, requisitos, formatos y
+límites del asistente.` (la sustituye la línea de referencias del bloque siguiente) y sustituye las
+dos líneas de `scripts/` por:
 
 ```markdown
 - `scripts/common.py`: ejecución de FFmpeg, publicación atómica, cerrojo, identidad y huella, línea
