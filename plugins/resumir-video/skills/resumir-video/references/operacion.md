@@ -116,7 +116,6 @@ Usa después `VENV/Scripts/python.exe` en Windows o `VENV/bin/python` en macOS/L
 
 ```text
 <python-del-entorno> -m pip install faster-whisper
-<python-del-entorno> 'SKILL_DIR/scripts/video.py' transcribe 'TRABAJO/audio.wav' --out 'TRABAJO/transcripcion.json' --model small --language es --allow-download
 ```
 
 Sin `--allow-download`, un modelo que no está en caché termina con un error que pide repetir la orden con esa opción o indicar en `--model` una carpeta CTranslate2 local, y no se crea la salida. Si `faster-whisper` no puede importarse, por cualquier motivo, el error es `Falta faster-whisper…`.
@@ -148,7 +147,7 @@ Con `--subtitles` no se carga ningún modelo: se normaliza un SRT o WebVTT del p
 `sin_marcas_por_palabra`. Comprueba antes su sincronía con el método de
 [Sincronización y huecos sin escuchar](#sincronización-y-huecos-sin-escuchar).
 
-El asistente no importa SRT/VTT: el agente puede leerlos directamente y usarlos para decidir los cortes. No vuelvas a transcribir sin necesidad. La transcripción es evidencia del audio, nunca evidencia visual.
+Si el medio trae subtítulos, usa `transcribe --subtitles` para normalizarlos a `transcripcion.json` en vez de transcribir con un modelo: es más rápido y preserva el texto original. No vuelvas a transcribir sin necesidad. La transcripción es evidencia del audio, nunca evidencia visual.
 
 ### Sincronización y huecos sin escuchar
 
