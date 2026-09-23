@@ -148,13 +148,68 @@ class SkillTest(unittest.TestCase):
         text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         for target in re.findall(r"\]\(([^)#]+)\)", text):
             self.assertTrue((SKILL / target).is_file(), target)
-        for relative in ("scripts/video.py", "scripts/test_video.py", "agents/openai.yaml"):
+        for relative in ("scripts/common.py", "scripts/video.py", "scripts/plan.py",
+                         "scripts/render.py", "scripts/doc.py", "scripts/test_video.py",
+                         "references/operacion.md", "references/compresion.md",
+                         "references/revision.md", "references/documento.md",
+                         "agents/openai.yaml"):
             self.assertTrue((SKILL / relative).is_file(), relative)
+
+    def test_the_references_describe_the_0_2_0_behaviour(self):
+        operation = (SKILL / "references" / "operacion.md").read_text(encoding="utf-8")
+        for gone in ("El montaje no se reanuda", "Cada imagen es una búsqueda independiente"):
+            self.assertNotIn(gone, operation)
+        for present in ("bSSSSS", "indice.gray", "hoja-", "--budget", "--dll-dir",
+                        "missing_filters", "degraded", "bloques"):
+            self.assertIn(present, operation)
 
     def test_repository_has_a_single_copy_of_the_skill(self):
         # A project copy would shadow the plugin in Copilot and duplicate it in Codex.
         for folder in (".claude/skills", ".agents/skills", ".github/skills", "skills"):
             self.assertFalse((ROOT / folder / "resumir-video").exists(), folder)
+
+    def test_skill_covers_both_modes_and_the_eleven_step_flow(self):
+        text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        data = frontmatter(SKILL / "SKILL.md")
+        for word in ("audio", "documento"):
+            self.assertIn(word, data["description"].lower())
+        for heading in ("## Invocación", "## Modos", "## Flujo"):
+            self.assertIn(heading, text)
+        flow = text.split("## Flujo", 1)[1]
+        self.assertEqual(len(re.findall(r"^\d+\. \*\*", flow, re.M)), 11)
+        for gone in ("No impongas un porcentaje fijo", "No acelera ni recorta la imagen"):
+            self.assertNotIn(gone, text)
+
+    def test_every_script_has_its_tests_and_the_skill_stays_self_contained(self):
+        scripts = sorted(p.name for p in (SKILL / "scripts").glob("*.py")
+                         if not p.name.startswith("test_"))
+        self.assertEqual(scripts, ["common.py", "doc.py", "plan.py", "render.py", "video.py"])
+        for name in scripts:
+            if name != "common.py":
+                self.assertTrue((SKILL / "scripts" / f"test_{name}").is_file(), name)
+        self.assertFalse(list(SKILL.rglob("__pycache__")))
+        entry = (SKILL / "scripts" / "video.py").read_text(encoding="utf-8")
+        self.assertIn("sys.dont_write_bytecode = True", entry)
+        # La skill no puede depender de la documentación del repositorio.
+        for path in SKILL.rglob("*.md"):
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotIn("](../../../../docs/", path.read_text(encoding="utf-8"))
+
+    def test_the_repository_documents_the_0_2_0_decisions(self):
+        decisions = (ROOT / "docs" / "decisiones.md").read_text(encoding="utf-8")
+        for identifier in ("D-007", "D-008", "D-009", "D-010", "D-011"):
+            self.assertIn(f"## {identifier} — ", decisions)
+        self.assertEqual(decisions.count("Actualización (2026-09-18"), 1)
+        architecture = (ROOT / "docs" / "arquitectura.md").read_text(encoding="utf-8")
+        for module in ("common.py", "plan.py", "render.py", "doc.py"):
+            self.assertIn(module, architecture)
+        # Las tres desviaciones respecto a la especificación quedan registradas en los dos sitios.
+        for note in ("seek_margin", "-copyts", "trim=end="):
+            self.assertIn(note, decisions)
+            self.assertIn(note, architecture)
+        requirements = (ROOT / "docs" / "requisitos.md").read_text(encoding="utf-8")
+        for identifier in ("R1", "R2", "R3", "R4", "R5", "A-1", "A-6", "40 ms", "8 dB"):
+            self.assertIn(identifier, requirements)
 
 
 class InstallerTest(unittest.TestCase):

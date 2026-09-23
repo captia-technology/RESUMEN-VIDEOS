@@ -3,7 +3,7 @@
 <img src="docs/img/banner.svg" alt="resumir-video: la línea de tiempo original se condensa en el resumen" width="100%">
 
 <p>
-  <a href="CHANGELOG.md"><img alt="Versión 0.1.0" src="https://img.shields.io/badge/versi%C3%B3n-0.1.0-38BDF8?style=flat-square"></a>
+  <a href="CHANGELOG.md"><img alt="Versión 0.2.0" src="https://img.shields.io/badge/versi%C3%B3n-0.2.0-38BDF8?style=flat-square"></a>
   <a href="LICENSE"><img alt="Licencia MIT" src="https://img.shields.io/badge/licencia-MIT-34D399?style=flat-square"></a>
   <a href="https://github.com/captia-technology/RESUMEN-VIDEOS/actions/workflows/pruebas.yml"><img alt="Pruebas" src="https://github.com/captia-technology/RESUMEN-VIDEOS/actions/workflows/pruebas.yml/badge.svg"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-FBBF24?style=flat-square">
@@ -12,7 +12,7 @@
 </p>
 
 **Convierte una grabación técnica de una hora en un vídeo de minutos hecho con los fragmentos originales.**<br>
-Sin narración sintética, sin acelerar la voz y con la evidencia de cada corte anotada.
+Sin narración sintética, con velocidad y pausas configurables, y con la evidencia de cada corte anotada.
 
 [Instalación](#-instalación) · [Demostración](#-demostración-real) · [Garantías](#-garantías-verificadas) · [Cómo funciona](#-cómo-funciona) · [Documentación](docs/)
 
@@ -49,6 +49,9 @@ Una formación grabada, una reunión técnica o una demostración de dos horas c
 | 🎬 **Fragmentos originales** | El resumen es vídeo y audio de la fuente, en su orden, a su resolución y a su velocidad. Sin música, sin voz sintética, sin rótulos. |
 | 🧠 **Criterio audiovisual** | Conserva conceptos, normativa, requisitos, procedimientos, advertencias y **correcciones posteriores**, incluidas las demostraciones visuales sin narración. |
 | 🔍 **Evidencia por corte** | Cada corte declara qué se oye y qué se ve; el informe relaciona tiempos de origen y de salida. |
+| 🎯 **Objetivo configurable** | Pide un porcentaje o una duración; sin objetivo manda el criterio editorial. Por defecto acelera ×1,25 y elimina pausas, ambas configurables. |
+| 📝 **Revisión previa** | `plan` publica una propuesta en lenguaje natural y espera tu aceptación (o `--directo`) antes de montar nada. |
+| 🎙️ **Modo audio y documento** | Con solo audio no se monta vídeo: se entrega un documento en Markdown (y DOCX si hay conversor). En vídeo, el mismo documento acompaña siempre al MP4. |
 | 🔒 **Todo en local** | Python de la biblioteca estándar y FFmpeg. El vídeo no se sube a ningún servicio; la transcripción opcional también es local. |
 | 🧩 **Tres clientes, un paquete** | Claude Code, GitHub Copilot (CLI y VS Code) y OpenAI Codex, con el mismo `SKILL.md`. |
 
@@ -139,11 +142,11 @@ Lo que demuestra el ejemplo, más allá del recorte:
 
 <table>
 <tr valign="top">
-<td width="54%"><img src="docs/img/informe.png" alt="Informe resumen.md con duraciones, reducción y tabla de correspondencias" width="100%"></td>
+<td width="54%"><img src="docs/img/informe.png" alt="Extracto de montaje.md con duraciones y tabla origen → salida, y de resumen.md con las ideas conservadas y las exclusiones" width="100%"></td>
 <td><img src="docs/img/demo-union.png" alt="Los tres últimos fotogramas de un corte y los tres primeros del siguiente" width="100%"></td>
 </tr>
 <tr>
-<td align="center"><sub><code>resumen.md</code>: tiempos de origen y de salida, reducción y revisión editorial.</sub></td>
+<td align="center"><sub><code>montaje.md</code>: duraciones y tabla origen → salida; <code>resumen.md</code>: ideas clave conservadas y qué se excluyó.</sub></td>
 <td align="center"><sub>Cada unión se revisa fotograma a fotograma: ni un fotograma ajeno, ni una frase partida.</sub></td>
 </tr>
 </table>
@@ -210,9 +213,10 @@ En una carpeta de trabajo nueva (por defecto `resumenes/<nombre>/`, excluida de 
 
 | Archivo | Qué contiene |
 | --- | --- |
-| `final/resumen.mp4` | El montaje con los fragmentos originales |
-| `final/seleccion.json` | El plan de cortes, con motivo y evidencia de audio y pantalla |
-| `final/resumen.md` | Duraciones, reducción, tabla origen → salida y revisión editorial |
+| `vN/resumen.mp4` | El montaje con los fragmentos originales |
+| `vN/seleccion.json` | El plan de cortes, con motivo y evidencia de audio y pantalla |
+| `vN/montaje.md` | Versión, cortes, velocidad, cadencia, duración de salida, desfase vídeo-audio y tabla origen → salida con la distancia de imagen y envolvente de cada corte |
+| `vN/resumen.md` | Ficha, resumen editorial, ideas clave con su tiempo, preguntas y respuestas y qué se ha dejado fuera |
 | `analisis.md` | Inventario del agente: qué se vio, qué se oyó y qué se decidió |
 
 <details>
@@ -242,7 +246,9 @@ plugins/resumir-video/            Plugin distribuible (única copia de la skill)
 ├── plugin.json                   Manifiesto Agent Plugins 1.0
 ├── .claude-plugin/plugin.json    Manifiesto de Claude Code
 ├── .codex-plugin/plugin.json     Manifiesto e interfaz de Codex
-└── skills/resumir-video/         SKILL.md, referencia de operación y scripts
+└── skills/resumir-video/         SKILL.md y scripts
+    ├── scripts/                  common.py, video.py, plan.py, render.py y doc.py
+    └── references/               operacion.md, compresion.md, revision.md y documento.md
 scripts/install.py                Instalación como skill independiente
 scripts/generar_graficos.py       Gráficos del README a partir de datos medidos
 tests/test_packaging.py           Manifiestos, skill e instalador
@@ -273,7 +279,7 @@ Comprueba el entorno con `python3 plugins/resumir-video/skills/resumir-video/scr
 ## 🧪 Desarrollo
 
 ```text
-python3 -B -m unittest discover -s tests                                      # 23 pruebas
+python3 -B -m unittest discover -s tests                                      # pruebas de empaquetado e instalador
 python3 -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"
 claude plugin validate plugins/resumir-video --strict && claude plugin validate . --strict
 python3 -B scripts/generar_graficos.py                                        # regenera los gráficos
@@ -286,7 +292,7 @@ Las pruebas de la skill generan su propio vídeo sintético: no descargan nada y
 <details>
 <summary><b>¿Puede acelerar la voz o quitar pausas para comprimir más?</b></summary>
 
-No en la versión 0.1.0: el montaje conserva la velocidad original y no elimina pausas. Ese modo está en la [hoja de ruta](#-hoja-de-ruta) como opción bajo petición expresa, porque cambia el material y debe decidirlo quien lo pide.
+Sí, y desde la 0.2.0 lo hace **por defecto**: aplica velocidad ×1,25 y elimina pausas para acercarse al objetivo de compresión que pidas (o al criterio editorial, si no pides ninguno). Para desactivarlo, indica `velocidad=1` y `pausas=no` al invocar la skill. Detalle en [D-007](docs/decisiones.md#d-007--compresión-por-defecto-con-objetivo-configurable).
 </details>
 
 <details>
@@ -321,18 +327,13 @@ Sí: `python3 scripts/install.py` copia la skill en las carpetas de skills de ca
 
 ## 🗺 Hoja de ruta
 
-Sin compromiso de fecha, a partir de la experiencia con grabaciones largas ([detalle](docs/capacidades.md#posibles-ampliaciones)):
-
-- Barrido secuencial a 1 fps con detección de cambios de diapositiva, para grabaciones 4K largas.
-- Transcripción por bloques reanudable y montaje reanudable por lotes.
-- Modo opcional de eliminación de pausas y aceleración, solo bajo petición expresa.
-- Reasignación de un plan a un vídeo movido o copiado.
+Los cuatro puntos que figuraban aquí —barrido con detección de cambios, transcripción y montaje reanudables, aceleración/eliminación de pausas y reasignación de planes— ya los entrega la 0.2.0 ([CHANGELOG](CHANGELOG.md)). No hay ampliaciones pendientes de decisión; las prioridades abiertas están en [requisitos.md](docs/requisitos.md#pendiente).
 
 ---
 
 <div align="center">
 
-**Versión 0.1.0 · Licencia [MIT](LICENSE) · © 2026 CAPTIA TECHNOLOGY S.L.**
+**Versión 0.2.0 · Licencia [MIT](LICENSE) · © 2026 CAPTIA TECHNOLOGY S.L.**
 
 Las figuras se generan con [`scripts/generar_graficos.py`](scripts/generar_graficos.py) a partir de [datos medidos](docs/img/datos.json); las capturas son salidas reales de los clientes.
 

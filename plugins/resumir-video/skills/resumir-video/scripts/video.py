@@ -6,232 +6,86 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
-import subprocess
 import sys
 import tempfile
+import time
 
-__version__ = "0.1.0"
+# Set before the sibling modules load: the skill folder may live in a read-only plugin cache.
+sys.dont_write_bytecode = True
 
-MIN_PYTHON = (3, 10)
-MAX_FRAMES = 600
-HDR_TRANSFERS = ("smpte2084", "arib-std-b67")
-SEEK_MARGIN = 3.0
-# Demuxers without an index seek forward to the next keyframe, so they need a wider margin.
-FORWARD_SEEK = ("mpegts", "mpegtsraw", "mpeg", "m2ts", "mts")
-FORWARD_MARGIN = 10.0
-DEFAULT_THREADS = min(4, os.cpu_count() or 1)
+import common
+import plan
+import render
+import doc
+from common import (DEFAULT_THREADS, MAX_FRAMES, MIN_PYTHON, cache_dir, duration, encoders, ffmpeg,
+                    frame_count, frame_interval, identity, new_dir, output_rate, positive, probe,
+                    require_encoders, run, save, seconds, seek_margin, stream_duration, stream_end,
+                    streams, tag_seconds, timeline_start, tool, video_stream)
 
+__version__ = "0.2.0"
 
-def tool(name):
-    """Absolute path of an FFmpeg program that can be started without a shell, or None."""
-    # On Windows a .cmd/.bat shim cannot be launched safely without cmd.exe: only real executables count.
-    return shutil.which(f"{name}.exe" if os.name == "nt" else name)
+BLOCK = 600.0
+SHEET = 5
+SHEET_WIDTH = 160
+INDEX_SIDE = 64
 
-
-def run(args, cwd=None):
-    args = [str(x) for x in args]
-    if args[0] in ("ffmpeg", "ffprobe"):
-        args[0] = tool(args[0]) or args[0]
-    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          encoding="utf-8", errors="replace", cwd=cwd) as process:
-        try:
-            stdout, stderr = process.communicate()
-        except BaseException:
-            # Wait for the child so Windows releases its files before temporary folders are removed.
-            process.kill()
-            process.wait()
-            raise
-    if process.returncode:
-        raise ValueError(f"{Path(args[0]).stem} falló (código {process.returncode}):\n{stderr[-4000:]}".rstrip())
-    return stdout
+FILTER_ROW = re.compile(r"^\s*[A-Z.]{2,3}\s+(\S+)\s+\S+->\S+")
+# Every filter the skill and the montage rely on; checked once so a build cannot fail halfway.
+REQUIRED_FILTERS = ("fps", "split", "scale", "format", "tile", "null", "select", "settb", "setpts",
+                    "tpad", "trim", "pad", "concat", "aresample", "asplit", "atrim", "asetpts",
+                    "atempo", "apad")
+LOW_MEMORY_GB = 2.0
 
 
-def ffmpeg(*args, cwd=None):
-    return run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-n", *args], cwd=cwd)
+def filters():
+    """Filter names of this FFmpeg build; unlike -encoders, the listing has no separator line."""
+    return {found.group(1) for line in run(["ffmpeg", "-hide_banner", "-filters"]).splitlines()
+            if (found := FILTER_ROW.match(line))}
 
 
-def save(path, data):
-    with Path(path).open("x", encoding="utf-8") as stream:
-        json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
-
-
-def seconds(value):
-    # str(float) may produce exponents such as 1e-05, which ffmpeg rejects.
-    return f"{value:.6f}"
-
-
-def identity(path):
-    path = Path(path).resolve(strict=True)
-    if not path.is_file():
-        raise ValueError("La entrada debe ser un archivo local.")
-    info = path.stat()
-    return {"path": str(path), "size": info.st_size, "mtime_ns": info.st_mtime_ns}
-
-
-def probe(path):
-    source = identity(path)
-    data = json.loads(run(["ffprobe", "-v", "error", "-show_format", "-show_streams",
-                           "-of", "json", source["path"]]))
-    data["source"] = source
-    return data
-
-
-def duration(data):
+def free_memory_gb():
+    """Available memory in GB, or None where it cannot be read without extra packages."""
     try:
-        value = float(data["format"]["duration"])
-    except (KeyError, TypeError, ValueError):
-        raise ValueError("Duración desconocida o no válida.") from None
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError("Duración desconocida o no válida.")
-    return value
-
-
-def tag_seconds(stream):
-    """Matroska/WebM expose a track length only as a DURATION tag (HH:MM:SS.nnnnnnnnn)."""
-    for key, text in (stream.get("tags") or {}).items():
-        if key.upper() == "DURATION" or key.upper().startswith("DURATION-"):
-            try:
-                hours, minutes, secs = str(text).strip().split(":")
-                return int(hours) * 3600 + int(minutes) * 60 + float(secs)
-            except ValueError:
-                return None
-    return None
-
-
-def stream_duration(data, stream):
-    """Duration of one stream, bounded by the container; falls back to the container."""
-    total = duration(data)
-    try:
-        value = float(stream.get("duration"))
-    except (TypeError, ValueError):
-        value = tag_seconds(stream)
-    if value is None or not math.isfinite(value) or value <= 0:
-        return total
-    return min(value, total)
-
-
-def stream_end(data, stream):
-    """Where one stream ends on the timeline used by `ffmpeg -ss` (relative to the container start)."""
-    try:
-        offset = float(stream.get("start_time") or 0) - float(data["format"].get("start_time") or 0)
-    except (TypeError, ValueError):
-        offset = 0.0
-    if not math.isfinite(offset) or offset < 0:
-        offset = 0.0
-    return min(offset + stream_duration(data, stream), duration(data))
-
-
-def timeline_start(data):
-    """Absolute timestamp that `ffmpeg -ss 0` refers to: the container adds its own start."""
-    try:
-        value = float(data["format"].get("start_time"))
-    except (TypeError, ValueError):
-        return 0.0
-    return value if math.isfinite(value) else 0.0
-
-
-def seek_margin(data):
-    """Seconds decoded before a target so the frame on screen at it is always available."""
-    names = str(data["format"].get("format_name", "")).split(",")
-    return FORWARD_MARGIN if any(name in FORWARD_SEEK for name in names) else SEEK_MARGIN
-
-
-def landing(data, video, seek, threads=1):
-    """Absolute time of the first frame decoded after seeking, or None if it cannot be read."""
-    # showinfo logs to stderr, so this call cannot go through run().
-    args = [tool("ffmpeg") or "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin",
-            "-threads", str(threads), "-ss", seconds(seek), "-noaccurate_seek", "-copyts",
-            "-i", data["source"]["path"], "-map", f"0:{video['index']}", "-an", "-sn", "-dn",
-            "-frames:v", "1", "-vf", "showinfo", "-f", "null", "-"]
-    result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    for token in result.stderr.split():
-        if token.startswith("pts_time:"):
-            try:
-                return float(token.partition(":")[2])
-            except ValueError:
-                return None
-    return None
-
-
-def rate_of(video, key):
-    num, _, den = str(video.get(key, "")).partition("/")
-    try:
-        rate = float(num) / float(den or 1)
-    except (ValueError, ZeroDivisionError):
+        with open("/proc/meminfo", encoding="ascii") as stream:
+            for line in stream:
+                if line.startswith("MemAvailable:"):
+                    return round(int(line.split()[1]) / 1e6, 1)
+    except OSError:
+        pass
+    if sys.platform != "win32":
         return None
-    return rate if math.isfinite(rate) and rate > 0 else None
+    import ctypes
+
+    class Memory(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    status = Memory()
+    status.dwLength = ctypes.sizeof(Memory)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return round(status.ullAvailPhys / 1e9, 1)
 
 
-def frame_interval(video):
-    rate = rate_of(video, "avg_frame_rate") or rate_of(video, "r_frame_rate")
-    return 1 / rate if rate else 0.1
-
-
-def output_rate(video):
-    """Constant rate for rendered cuts: the stream's base rate when plausible."""
-    for key in ("r_frame_rate", "avg_frame_rate"):
-        rate = rate_of(video, key)
-        if rate and rate <= 120:
-            return video[key]
-    return "30"
-
-
-def output_interval(rate):
-    """Seconds per frame of the constant rate that output_rate returned."""
-    num, _, den = str(rate).partition("/")
-    return float(den or 1) / float(num)
-
-
-def video_stream(data):
-    videos = [s for s in data["streams"] if s["codec_type"] == "video"
-              and not s.get("disposition", {}).get("attached_pic")]
-    if len(videos) != 1:
-        raise ValueError("Se requiere exactamente una pista de vídeo; selecciona una fuente normalizada.")
-    return videos[0]
-
-
-def streams(data, audio_index=None):
-    video = video_stream(data)
-    audios = [s for s in data["streams"] if s["codec_type"] == "audio"]
-    if audio_index is not None:
-        audios = [s for s in audios if s["index"] == audio_index]
-    if not audios:
-        raise ValueError("No hay una pista de audio válida para analizar al ponente.")
-    return video, audios[0]
-
-
-def encoders():
-    lines = run(["ffmpeg", "-hide_banner", "-encoders"]).splitlines()
-    start = next((i for i, line in enumerate(lines) if line.strip().startswith("---")), -1)
-    return {line.split()[1] for line in lines[start + 1:] if len(line.split()) > 1}
-
-
-def require_encoders(*names):
-    missing = [name for name in names if name not in encoders()]
-    if missing:
-        raise ValueError(f"FFmpeg no incluye {', '.join(missing)}; instala una compilación "
-                         "con libx264 y AAC (ejecuta el subcomando check).")
-
-
-def cache_dir():
-    if os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Caches"
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return base / "resumir-video"
-
-
-def new_dir(path):
-    path = Path(path).resolve()
-    try:
-        path.mkdir(parents=True, exist_ok=False)
-    except FileExistsError:
-        raise ValueError("La carpeta ya existe y no se sobrescribe; indica una carpeta nueva "
-                         f"(p. ej., con el sufijo -2): {path}") from None
-    return path
+def degradations(report):
+    """What is lost for each missing optional, in the order the flow needs it."""
+    notes = []
+    if not report["faster_whisper"]:
+        notes.append("Sin faster-whisper: usa los subtítulos del medio con transcribe --subtitles.")
+    if report["docx_engine"] is None:
+        notes.append("Sin Pandoc ni python-docx: la entrega es solo Markdown, con código 0.")
+    if not report["pillow"]:
+        notes.append("Sin Pillow: el timeline se entrega solo en texto, sin PNG.")
+    if report["memory_free_gb"] is not None and report["memory_free_gb"] < LOW_MEMORY_GB:
+        notes.append(f"Memoria disponible baja ({report['memory_free_gb']:.1f} GB): monta con "
+                     "--threads 1 y divide los cortes de muchos tramos.")
+    return notes
 
 
 def check(args):
@@ -241,7 +95,8 @@ def check(args):
     for name in ("ffmpeg", "ffprobe"):
         report[name] = tool(name)
     report["ffmpeg_version"] = report["error"] = None
-    report["libx264"] = report["aac"] = False
+    report["libx264"] = report["aac"] = report["filters_ok"] = False
+    report["missing_filters"] = list(REQUIRED_FILTERS)
     try:
         if report["ffprobe"]:
             run(["ffprobe", "-hide_banner", "-version"])
@@ -250,6 +105,9 @@ def check(args):
             report["ffmpeg_version"] = lines[0] if lines else None
             available = encoders()
             report["libx264"], report["aac"] = "libx264" in available, "aac" in available
+            present = filters()
+            report["missing_filters"] = [name for name in REQUIRED_FILTERS if name not in present]
+            report["filters_ok"] = not report["missing_filters"]
     except (OSError, ValueError) as exc:
         report["error"] = str(exc)
     try:
@@ -257,306 +115,672 @@ def check(args):
         report["faster_whisper"] = True
     except Exception:
         report["faster_whisper"] = False
+    report["pandoc"] = bool(tool("pandoc"))
+    report["python_docx"] = doc.has_python_docx()
+    report["docx_engine"] = doc.engine()
+    try:
+        import PIL  # noqa: F401
+        report["pillow"] = True
+    except Exception:
+        report["pillow"] = False
     report["transcription_venv"] = str(cache_dir() / "venv")
     try:
         report["disk_free_gb"] = round(shutil.disk_usage(os.getcwd()).free / 1e9, 1)
     except OSError:
         report["disk_free_gb"] = None
+    report["memory_free_gb"] = free_memory_gb()
+    report["degraded"] = degradations(report)
+    # The optional tools never change the exit code (spec §3): only Python, FFmpeg and its filters.
     report["ok"] = report["error"] is None and all(
-        report[key] for key in ("python_ok", "ffmpeg", "ffprobe", "libx264", "aac"))
+        report[key] for key in ("python_ok", "ffmpeg", "ffprobe", "libx264", "aac", "filters_ok"))
     order = ("version", "python", "python_ok", "platform", "ffmpeg", "ffprobe", "ffmpeg_version",
-             "libx264", "aac", "faster_whisper", "transcription_venv", "disk_free_gb", "error", "ok")
+             "libx264", "aac", "filters_ok", "missing_filters", "faster_whisper", "pandoc",
+             "python_docx", "docx_engine", "pillow", "transcription_venv", "disk_free_gb",
+             "memory_free_gb", "degraded", "error", "ok")
     print(json.dumps({key: report[key] for key in order}, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
 
 def prepare(args):
-    data = probe(args.video)
-    _, audio = streams(data, args.audio_stream)
-    out = new_dir(args.work)
+    data = common.probe(args.video)
+    data["kind"] = common.kind(data)
+    common.duration(data)
+    if data["kind"] == "video":
+        reject_hdr(common.pictures(data)[0])
+    sounds = [s for s in data["streams"] if s["codec_type"] == "audio"]
+    if args.audio_stream is not None:
+        sounds = [s for s in sounds if s["index"] == args.audio_stream]
+        if not sounds:
+            raise ValueError(f"No hay una pista de audio con el índice global {args.audio_stream}; "
+                             "consulta probe.")
+    audio = sounds[0]
+    data["audio_stream"] = audio["index"]
+    # Identity and fingerprint live together in `source`, the shape the published plan carries.
+    data["source"] = {**data["source"], **common.fingerprint(data["source"]["path"])}
+    # common.timeline answers both modes; in audio it leaves rate, fps and interval at null.
+    data["timeline"] = common.timeline(data)
+    if data["timeline"]["sample_rate"] <= 0:
+        raise ValueError(f"La pista de audio {audio['index']} no declara una frecuencia de muestreo "
+                         "válida; consulta probe y elige otra con --audio-stream.")
+    data["avisos"] = packet_warnings(data)
+    out = common.new_dir(args.work)
     # Job folders hold confidential frames and transcripts: keep them out of version control.
     (out / ".gitignore").write_text("*\n", encoding="utf-8")
-    data["audio_stream"] = audio["index"]
-    save(out / "metadata.json", data)
-    ffmpeg("-i", data["source"]["path"], "-map", f"0:{audio['index']}",
-           "-vn", "-af", "aresample=16000:async=1:first_pts=0", "-ac", "1",
-           "-c:a", "pcm_s16le", out / "audio.wav")
+    common.save(out / "metadata.json", data)
+    common.ffmpeg("-i", data["source"]["path"], "-map", f"0:{audio['index']}",
+                  "-vn", "-af", "aresample=16000:async=1:first_pts=0", "-ac", "1",
+                  "-c:a", "pcm_s16le", out / "audio.wav")
+    common.energy(out / "audio.wav", out / "energia.f32")
     print(out)
 
 
-def frame_count(start, end, step):
-    """Samples in the half-open range [start, end); rounding absorbs float noise such as 0.24 / 0.04."""
-    return max(1, math.ceil(round((end - start) / step, 9)))
+PACKETS = 600
+GAP_FACTOR = 1.5
+
+
+def reject_hdr(picture):
+    """HDR needs its own colour path: the standard montage would wash the picture out (section 12)."""
+    transfer = picture.get("color_transfer")
+    if transfer in common.HDR_TRANSFERS:
+        raise ValueError(f"Fuente HDR ({transfer}): el montaje estándar no conserva su curva de "
+                         "color. Convierte el original a SDR antes de resumirlo.")
+
+
+def packet_times(path, index):
+    """Presentation stamps of the first PACKETS packets of one track; the probe stops there."""
+    report = json.loads(common.run(
+        ["ffprobe", "-v", "error", "-select_streams", str(index), "-show_entries", "packet=pts_time",
+         "-read_intervals", f"%+#{PACKETS}", "-of", "json", str(path)]))
+    return sorted(float(packet["pts_time"]) for packet in report.get("packets") or []
+                  if packet.get("pts_time") not in (None, "N/A"))
+
+
+def packet_warnings(data):
+    """Variable cadence and PTS gaps of the picture track, probed once and carried in metadata."""
+    if data["kind"] == "audio":
+        return []
+    picture = common.pictures(data)[0]
+    avisos = []
+    if picture.get("avg_frame_rate") != picture.get("r_frame_rate"):
+        avisos.append(common.warning(
+            "fuente_vfr", f"La cadencia declarada no es constante (r_frame_rate "
+            f"{picture.get('r_frame_rate')}, avg_frame_rate {picture.get('avg_frame_rate')}): el "
+            "montaje fija F y normaliza con el filtro fps."))
+    interval = data["timeline"]["interval"]
+    times = packet_times(data["source"]["path"], picture["index"])
+    # A gap of one interval is the normal spacing; 1,5 absorbs the rounding of the container.
+    gaps = [round(b - a, 6) for a, b in zip(times, times[1:]) if b - a > GAP_FACTOR * interval]
+    if gaps:
+        avisos.append(common.warning(
+            "huecos_pts", f"El sondeo de los primeros {len(times)} paquetes encuentra {len(gaps)} "
+            f"saltos mayores de un fotograma (el mayor, {max(gaps):.3f} s): puede faltar imagen en "
+            "el original."))
+    return avisos
+
+
+def block_name(start):
+    """Folder of a sweep block, named after its first second."""
+    return f"b{int(start):05d}"
+
+
+def sheet_count(frames, side=SHEET):
+    return max(1, math.ceil(frames / (side * side)))
+
+
+def space_needed(frames):
+    """Bytes to reserve for a sweep: 1 MB per view, the upper bound of the reference."""
+    return frames * 1_000_000
+
+
+def sweep_blocks(start, end, step, *, length=BLOCK):
+    """Blocks of about `length` seconds aligned to the sampling grid: (start, end, frames)."""
+    span = max(step, math.floor(length / step) * step)
+    blocks, a = [], float(start)
+    while a < end:
+        b = min(float(end), a + span)
+        blocks.append((round(a, 6), round(b, 6), frame_count(a, b, step)))
+        a = b
+    return blocks
+
+
+def sweep_block(data, stream, folder, a, b, step, width, *, threads=1):
+    """One FFmpeg process per block: JPEG views, gray index and contact sheets."""
+    count = frame_count(a, b, step)
+    base, margin = timeline_start(data), seek_margin(data)
+    scale = f"scale=w='min({width},iw)':h=-2" if width else "null"
+    # The rate has to stay an exact ratio and the rounding has to be `up`: 1/15 written as 0.066667
+    # shifts the grid, and the default rounding returns the last frame of each bucket, about half a
+    # step later. Both were measured against a source whose luminance encodes its own instant.
+    graph = (f"[0:{stream['index']}]fps=1/{seconds(step)}:"
+             f"start_time={seconds(base + a)}:round=up,split=3[j][g][t];"
+             f"[j]{scale}[jo];"
+             f"[g]scale={INDEX_SIDE}:{INDEX_SIDE},format=gray[go];"
+             f"[t]scale={SHEET_WIDTH}:-2,tile={SHEET}x{SHEET}:padding=2:margin=2[to]")
+    # No -t and no -to: with -copyts both cut the block short. The frame counts bound the work.
+    ffmpeg("-threads", threads, "-ss", seconds(max(0.0, a - margin)),
+           "-noaccurate_seek", "-copyts", "-i", data["source"]["path"],
+           "-filter_complex", graph,
+           "-map", "[jo]", "-frames:v", count, "-q:v", "2", "-start_number", "0",
+           folder / "frame-%04d.jpg",
+           "-map", "[go]", "-frames:v", count, "-f", "rawvideo", "-pix_fmt", "gray",
+           folder / "indice.gray",
+           "-map", "[to]", "-frames:v", sheet_count(count), "-q:v", "3", "-start_number", "0",
+           folder / "hoja-%03d.jpg")
+    images = sorted(folder.glob("frame-*.jpg"))
+    index = folder / "indice.gray"
+    # FFmpeg exits 0 when an instant falls past the last frame, so the count is checked here.
+    if len(images) != count or index.stat().st_size != count * INDEX_SIDE * INDEX_SIDE:
+        raise ValueError(f"El bloque {a:.3f}-{b:.3f} s produjo {len(images)} de {count} imágenes; "
+                         "ajusta el intervalo al final real de la pista de vídeo.")
+    return {"start": a, "end": b, "step": step,
+            "frames": [{"time": round(a + i * step, 6), "file": image.name}
+                       for i, image in enumerate(images)]}
+
+
+def clear_partial(folder):
+    """A block with a valid index.json is kept; anything else is set aside so it can be redone."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        return None
+    marker = folder / "index.json"
+    if marker.is_file():
+        try:
+            json.loads(marker.read_text(encoding="utf-8"))
+            return folder
+        except (OSError, ValueError):
+            pass  # truncated or corrupt: treat as unfinished, fall through to reset
+    # Nothing is deleted: the images already taken stay available to the agent.
+    spare, number = folder.with_name(f"{folder.name}.parcial"), 1
+    while spare.exists():
+        number += 1
+        spare = folder.with_name(f"{folder.name}.parcial-{number}")
+    folder.rename(spare)
+    return None
+
+
+class Refused(ValueError):
+    """Invalid arguments the caller must fix for `frames`: exit code 2, not the generic 1 of a
+    controlled error."""
 
 
 def frames(args):
+    """Sequential sweep by blocks: one FFmpeg process each, resumable and bounded per call."""
     data = probe(args.video)
-    video = video_stream(data)
-    total = duration(data)
+    # common.kind exige audio incluso para clasificar "video" (una grabación muda no pasa); el
+    # barrido no necesita audio, así que aquí basta con comprobar la pista de imagen directamente
+    # (docs/planes/2026-09-18-resumir-video-0.2.0-4-evidencia-empaquetado.md, tabla de dependencias).
+    if not common.pictures(data):
+        raise Refused("El barrido necesita una pista de vídeo; este medio es de solo audio.")
+    stream = video_stream(data)
+    total = min(duration(data), stream_end(data, stream))
     end = total if args.end is None else args.end
-    if not all(math.isfinite(x) for x in (args.start, end, args.step)):
-        raise ValueError("Tiempos no finitos.")
-    if not 0 <= args.start < end <= total or args.step <= 0 or args.width < 0:
-        raise ValueError(f"Intervalo, paso o anchura no válidos (duración: {total:.3f} s).")
-    count = frame_count(args.start, end, args.step)
-    if count > MAX_FRAMES:
-        raise ValueError(f"Extrae como máximo {MAX_FRAMES} imágenes por llamada; "
-                         "divide el análisis en bloques.")
-    # Seeking at or beyond the last frame yields no image; use the last decodable instant.
-    last = round(max(0.0, stream_end(data, video) - frame_interval(video)), 6)
-    base, margin = timeline_start(data), seek_margin(data)
-    out = new_dir(args.out)
-    index = []
-    scale = f",scale=w='min({args.width},iw)':h=-2" if args.width else ""
-    for i in range(count):
-        time = min(round(args.start + i * args.step, 6), last)
-        target = out / f"frame-{i:04d}-{time:.3f}.jpg"
-        # Decoding from before the target and selecting on the container's own timeline yields the
-        # frame on screen at `time`, also when a variable-rate recording holds one frame for seconds
-        # or the demuxer can only seek forward.
-        ffmpeg("-ss", seconds(max(0.0, time - margin)), "-noaccurate_seek", "-copyts",
-               "-i", data["source"]["path"], "-map", f"0:{video['index']}", "-frames:v", "1",
-               "-vf", f"fps=1000:start_time={seconds(base + time)}{scale}", "-q:v", "2", target)
-        if not target.exists():
-            raise ValueError(f"No se obtuvo imagen en {time:.3f} s.")
-        index.append({"time": time, "file": target.name})
-    save(out / "index.json", {"source": data["source"], "frames": index})
-    print(out / "index.json")
+    if not all(math.isfinite(x) for x in (args.start, end, args.step, args.block)):
+        raise Refused("Tiempos no finitos.")
+    if not 0 <= args.start < end <= total or args.step <= 0 or args.width < 0 or args.block <= 0:
+        raise Refused("Intervalo, paso, anchura o bloque no válidos "
+                      f"(la pista de vídeo llega a {total:.3f} s).")
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    plan = sweep_blocks(args.start, end, args.step, length=args.block)
+    todo = [row for row in plan if clear_partial(out / block_name(row[0])) is None]
+    if todo and max(count for _, _, count in todo) > MAX_FRAMES:
+        # El mensaje instruye a corregir --block/--step: es la misma categoría "bloque" que las
+        # demás guardas de argumentos de esta función, así que también da código 2, no el 1 genérico.
+        raise Refused(f"Un bloque supera las {MAX_FRAMES} imágenes por llamada; "
+                      "reduce --block o aumenta --step.")
+    needed = 2 * space_needed(sum(count for _, _, count in todo))
+    free = shutil.disk_usage(out).free
+    if free < needed:
+        raise Refused(f"Espacio insuficiente para el barrido: hacen falta unos {needed / 1e9:.1f} "
+                      f"GB y hay {free / 1e9:.1f} GB libres; reduce el intervalo o trabaja en "
+                      "otra unidad.")
+    done = sum(count for _, _, count in plan) - sum(count for _, _, count in todo)
+    remaining = []
+    for a, b, count in todo:
+        if remaining or done + count > MAX_FRAMES:
+            remaining.append(block_name(a))
+            continue
+        folder = new_dir(out / block_name(a))
+        save(folder / "index.json",
+             sweep_block(data, stream, folder, a, b, args.step, args.width, threads=args.threads))
+        done += count
+        print(f"Bloque {block_name(a)} ({a:.3f}-{b:.3f} s): {count} imágenes", flush=True)
+    if remaining:
+        # `pending` cuenta; `bloques` nombra. La forma del código 3 es la misma en toda la skill.
+        # A diferencia del código 3 de `render` (que cuenta solo lo que esa llamada monta), aquí
+        # `done`/`total` son acumulados de todo el intervalo pedido: es el criterio natural para
+        # un barrido reanudable sobre un rango fijo.
+        print(json.dumps({"done": done, "total": sum(count for _, _, count in plan),
+                          "pending": len(remaining), "bloques": remaining}, ensure_ascii=False))
+        print("Error: presupuesto agotado; repite la misma orden para continuar.", file=sys.stderr)
+        return 3
+    print(out)
+    return 0
 
 
-def transcribe(args):
-    target = Path(args.out).resolve()
-    if target.exists():
-        raise ValueError("La transcripción de salida ya existe.")
-    if not target.parent.is_dir():
-        raise ValueError(f"No existe la carpeta de salida: {target.parent}")
-    audio = identity(args.audio)
-    try:
-        from faster_whisper import WhisperModel
-    except Exception as exc:
-        raise ValueError("Falta faster-whisper. Usa subtítulos existentes o instálalo en un entorno local.") from exc
-    try:
-        model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
-                             cpu_threads=args.threads, num_workers=1,
-                             local_files_only=not args.allow_download)
-    except (OSError, ValueError) as exc:
-        if args.allow_download or Path(args.model).is_dir():
-            raise
-        raise ValueError(f"El modelo {args.model} no está en la caché local: repite la orden con "
-                         f"--allow-download o indica en --model una carpeta CTranslate2 local.\n{exc}") from exc
-    parts, info = model.transcribe(audio["path"], language=args.language,
-                                   beam_size=args.beam_size, vad_filter=not args.no_vad,
+LEVEL_STEP = 0.01
+AUDIO_BLOCK = 600.0
+BLOCK_SLACK = 60.0
+GAP_MIN = 2.0
+
+
+def quiet_cut(levels, low, high, *, window=common.MIN_SILENCE):
+    """Instant of [low, high] whose `window` seconds carry the least energy."""
+    width = max(1, round(window / LEVEL_STEP))
+    first, last = max(0, round(low / LEVEL_STEP)), min(len(levels), round(high / LEVEL_STEP))
+    if last - first < width:
+        return round(min(high, len(levels) * LEVEL_STEP), 3)
+    best, position, total = None, first, sum(levels[first:first + width])
+    for index in range(first, last - width + 1):
+        if index > first:
+            total += levels[index + width - 1] - levels[index - 1]
+        if best is None or total < best:
+            best, position = total, index
+    return round((position + width / 2) * LEVEL_STEP, 3)
+
+
+def speech_blocks(levels, total, *, length=AUDIO_BLOCK, slack=BLOCK_SLACK):
+    """Transcription blocks of about `length` seconds, each cut at its quietest window."""
+    edges, start = [0.0], 0.0
+    while total - start > length + slack:
+        start = quiet_cut(levels, start + length - slack, start + length + slack)
+        edges.append(start)
+    return [(a, round(b, 3)) for a, b in zip(edges, edges[1:] + [total])]
+
+
+def gaps(segments, levels, a, b, *, threshold=common.SILENCE_DB, minimum=GAP_MIN):
+    """Stretches of [a, b) with sound and no transcribed word: the VAD may have dropped speech."""
+    empty, edge = [], a
+    for start, end in sorted((s["start"], s["end"]) for s in segments):
+        if start - edge >= minimum:
+            empty.append((edge, start))
+        edge = max(edge, end)
+    if b - edge >= minimum:
+        empty.append((edge, b))
+    loud = []
+    for start, end in empty:
+        window = levels[round(start / LEVEL_STEP):min(len(levels), round(end / LEVEL_STEP))]
+        if sum(1 for level in window if level > threshold) * LEVEL_STEP >= minimum / 2:
+            loud.append((round(start, 3), round(end, 3)))
+    return loud
+
+
+DOUBT_SILENCE = 0.6
+DOUBT_LOGPROB = -1.0
+
+
+def partial_dir(out):
+    """Folder that holds the blocks already transcribed, next to the published file."""
+    return Path(out).with_suffix(".parcial")
+
+
+def block_cut(audio, target, a, b):
+    """Sample-exact PCM slice: faster-whisper reads a file, not a range of one."""
+    ffmpeg("-ss", seconds(a), "-t", seconds(b - a), "-i", audio, "-c:a", "pcm_s16le", target)
+    return target
+
+
+def transcribe_block(model, path, offset, language, args, *, vad=None):
+    """One block, with its times moved back onto the original timeline."""
+    parts, info = model.transcribe(str(path), language=language, beam_size=args.beam_size,
+                                   vad_filter=not args.no_vad if vad is None else vad,
                                    word_timestamps=True)
     segments = []
     for part in parts:
-        segments.append({"start": part.start, "end": part.end, "text": part.text,
-                         "words": [{"start": w.start, "end": w.end, "text": w.word}
-                                   for w in (part.words or [])]})
-        print(f"Transcrito hasta {part.end:.1f} s", flush=True)
-    if not segments:
-        raise ValueError("No se detectó habla; revisa el audio y el contenido visual.")
-    settings = {"model": args.model, "device": args.device, "compute_type": args.compute_type,
-                "beam_size": args.beam_size, "vad_filter": not args.no_vad}
-    save(target, {"language": info.language, "settings": settings, "segments": segments})
+        segment = {"start": round(part.start + offset, 3), "end": round(part.end + offset, 3),
+                   "text": part.text,
+                   "words": [{"start": round(w.start + offset, 3), "end": round(w.end + offset, 3),
+                              "text": w.word} for w in (part.words or [])]}
+        # Doubtful segments are marked, never dropped: the agent decides (spec §11).
+        if (getattr(part, "no_speech_prob", 0.0) > DOUBT_SILENCE
+                or getattr(part, "avg_logprob", 0.0) < DOUBT_LOGPROB):
+            segment["dudoso"] = True
+        segments.append(segment)
+    return {"language": info.language, "segments": segments}
 
 
-def validate_plan(plan, source, total):
-    if plan.get("source") != source:
-        planned = plan.get("source") if isinstance(plan.get("source"), dict) else {}
-        changed = [key for key in ("path", "size", "mtime_ns") if planned.get(key) != source[key]]
-        raise ValueError(f"El plan no corresponde al archivo actual (difiere: {', '.join(changed) or 'source'}). "
-                         "Copia source de metadata.json; si es el mismo vídeo pero movido, copiado o con otra "
-                         "fecha de modificación, cópialo de un probe nuevo de ese archivo.")
-    segments = plan.get("segments")
-    if not isinstance(segments, list) or not segments:
-        raise ValueError("El plan requiere segmentos.")
-    previous = 0.0
-    for number, segment in enumerate(segments, start=1):
-        if not isinstance(segment, dict):
-            raise ValueError(f"El corte {number} debe ser un objeto.")
-        start, end = segment.get("start"), segment.get("end")
-        if any(type(x) not in (int, float) or not math.isfinite(x) for x in (start, end)):
-            raise ValueError(f"Los tiempos del corte {number} deben ser segundos numéricos finitos.")
-        if not previous <= start < end <= total:
-            raise ValueError(f"El corte {number} está desordenado, solapado o fuera de la pista de vídeo "
-                             f"(termina en {total:.3f} s).")
-        for key in ("title", "reason", "audio_evidence", "visual_evidence"):
-            if not isinstance(segment.get(key), str) or not segment[key].strip():
-                raise ValueError(f"Falta {key} en el corte {number}.")
-        previous = end
+def load_model(args):
+    """Model loaded once per call; `auto` tries CUDA first and falls back to CPU."""
+    for folder in args.dll_dir or ():
+        path = Path(folder)
+        if not path.is_dir():
+            raise Refused(f"La carpeta de DLL no existe: {path}")
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(str(path.resolve()))
+        else:
+            print(f"Aviso: --dll-dir solo se aplica en Windows; se ignora {path}.", file=sys.stderr)
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        raise ValueError("Falta faster-whisper. Usa subtítulos existentes o instálalo en un entorno "
+                         "local.") from exc
+    order = ("cuda", "cpu") if args.device == "auto" else (args.device,)
+    for device in order:
+        compute = args.compute_type or ("float16" if device == "cuda" else "int8")
+        try:
+            return WhisperModel(args.model, device=device, compute_type=compute,
+                                cpu_threads=args.threads, num_workers=1,
+                                local_files_only=not args.allow_download), device
+        except Exception as exc:
+            if device != order[-1]:
+                print(f"Aviso: CUDA no disponible ({exc}); se continúa en CPU.", file=sys.stderr)
+                continue
+            if not args.allow_download and not Path(args.model).is_dir():
+                raise Refused(f"El modelo {args.model} no está en la caché local: repite la orden "
+                              "con --allow-download o indica en --model una carpeta CTranslate2 "
+                              f"local.\n{exc}") from exc
+            raise ValueError(f"No se pudo cargar el modelo {args.model} en {device}: {exc}") from exc
+    raise ValueError("Sin dispositivo de inferencia disponible.")
+
+
+def recover(work, segments, levels, total, language, device, args):
+    """Second pass, without VAD, over the stretches that have sound but no transcribed word."""
+    model = None
+    for number, (a, b) in enumerate(gaps(segments, levels, 0.0, total)):
+        piece = work / f"hueco-{number:03d}.json"
+        recorded = None
+        if piece.is_file():
+            try:
+                recorded = json.loads(piece.read_text(encoding="utf-8"))
+                recorded["segments"]  # validate shape before trusting the cache
+            except (OSError, ValueError, KeyError):
+                recorded = None  # truncated/corrupt: treat as unfinished
+                # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+                # corrupt leftover would turn every retry into the same FileExistsError forever.
+                piece.unlink(missing_ok=True)
+        if recorded is None:
+            if model is None:
+                model, device = load_model(args)
+            with tempfile.TemporaryDirectory(prefix="hueco-", dir=work) as tmp:
+                cut = block_cut(args.audio, Path(tmp) / "hueco.wav", a, b)
+                found = transcribe_block(model, cut, a, language, args, vad=False)
+            recorded = {"start": a, "end": b, "device": device, **found}
+            save(piece, recorded)
+        # A hueco can also carry the device that produced it (same reasoning as bloque-NNN.json).
+        device = recorded.get("device", device)
+        for segment in recorded["segments"]:
+            segments.append({**segment, "recuperado": True})
+    return segments, device
+
+
+CUE = re.compile(r"(?:(\d{1,2}):)?([0-5]\d):([0-5]\d)[.,](\d{1,3})\s*-->\s*"
+                 r"(?:(\d{1,2}):)?([0-5]\d):([0-5]\d)[.,](\d{1,3})")
+TAG = re.compile(r"</?[a-zA-Z][^>]*>|\{\\[^}]*\}")
+
+
+def cue_time(hours, minutes, secs, millis):
+    # WebVTT permite que un cue de menos de una hora omita las horas (`MM:SS.mmm`); cuenta como 0.
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(secs) + int(millis.ljust(3, "0")) / 1000
+
+
+def subtitles(text):
+    """Segments of an SRT or WebVTT file: no per-word marks, no styling tags."""
+    segments = []
+    lines = text.replace("﻿", "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for number, line in enumerate(lines):
+        found = CUE.search(line)
+        if not found:
+            continue
+        start, end = cue_time(*found.groups()[:4]), cue_time(*found.groups()[4:])
+        body = []
+        for offset, following in enumerate(lines[number + 1:]):
+            index = number + 1 + offset
+            if not following.strip() or CUE.search(following):
+                break
+            # Only a bare digit sequence is discarded as an orphan identifier: SRT numbers its
+            # cues that way, but WebVTT text is never a pure digit string, so real body text
+            # glued to the next cue (WebVTT allows cues with no identifier at all) survives.
+            if following.strip().isdigit() and index + 1 < len(lines) and CUE.search(lines[index + 1]):
+                break
+            body.append(TAG.sub("", following).strip())
+        said = " ".join(part for part in body if part).strip()
+        if said and end > start:
+            segments.append({"start": start, "end": end, "text": said, "words": []})
+    segments.sort(key=lambda segment: (segment["start"], segment["end"]))
     return segments
 
 
-def stamp(value):
-    millis = round(value * 1000)
-    hours, rest = divmod(millis, 3600000)
-    minutes, rest = divmod(rest, 60000)
-    secs, ms = divmod(rest, 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
-
-
-def listing(path, names):
-    path.write_text("".join(f"file '{name}'\n" for name in names), encoding="utf-8")
-
-
-def verify(path, expected, threads):
-    result = probe(path)
-    video, audio = streams(result)
-    lengths = [stream_duration(result, video), stream_duration(result, audio)]
-    if abs(lengths[0] - expected) > 0.25 or abs(lengths[0] - lengths[1]) > 0.1:
-        raise ValueError(f"Duración final inesperada (vídeo {lengths[0]:.3f} s, audio "
-                         f"{lengths[1]:.3f} s, esperado {expected:.3f} s).")
-    ffmpeg("-xerror", "-threads", str(threads), "-i", path,
-           "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-")
-    return duration(result)
-
-
-def render(args):
-    data = probe(args.video)
-    plan = json.loads(Path(args.plan).read_text(encoding="utf-8-sig"))
-    if not isinstance(plan, dict):
-        raise ValueError("El plan debe ser un objeto JSON.")
-    if type(plan.get("audio_stream")) is not int:
-        raise ValueError("Selecciona audio_stream con el índice global de la pista de voz.")
-    video, audio = streams(data, plan["audio_stream"])
-    segments = validate_plan(plan, data["source"], stream_end(data, video))
-    if video.get("color_transfer") in HDR_TRANSFERS:
-        raise ValueError("Fuente HDR: requiere una ruta de color específica antes del montaje estándar.")
-    require_encoders("libx264", "aac")
-    source, threads, rate = data["source"]["path"], str(args.threads), output_rate(video)
-    base, margin, interval = timeline_start(data), seek_margin(data), output_interval(rate)
-    guarded = margin == FORWARD_MARGIN
-    out = new_dir(args.out)
-    save(out / "seleccion.json", plan)
-    rows = []
-    elapsed = 0.0
-    try:
-        # ignore_cleanup_errors: on Windows an interrupted child may still hold a file; keep the
-        # KeyboardInterrupt instead of replacing it with a cleanup error.
-        with tempfile.TemporaryDirectory(prefix="cortes-", dir=out, ignore_cleanup_errors=True) as tmp:
-            folder = Path(tmp)
-            names = [f"clip-{i:05d}" for i in range(len(segments))]
-            for i, (segment, name) in enumerate(zip(segments, names)):
-                clip = folder / f"{name}.mp4"
-                length = segment["end"] - segment["start"]
-                seek = max(0.0, segment["start"] - margin)
-                landed = landing(data, video, seek, args.threads) if guarded else None
-                if landed is not None and landed > base + segment["start"] + 1e-6:
-                    raise ValueError(
-                        f"El corte {i + 1} ({segment['start']:.3f}–{segment['end']:.3f} s) no se puede "
-                        f"situar: tras buscar en {seek:.3f} s, el contenedor entrega el primer fotograma "
-                        f"{landed - base - segment['start']:.3f} s más tarde (fotogramas clave muy "
-                        "espaciados y búsqueda solo hacia delante). Convierte la fuente a MP4 o MKV.")
-                # Constant-rate output from the frame closest to `start` (at most half a frame away),
-                # decoding from before it and selecting on the container's own timeline: joins stay in
-                # sync, held frames of variable-rate sources survive and forward-only demuxers work.
-                ffmpeg("-threads", threads, "-ss", seconds(seek), "-noaccurate_seek", "-copyts",
-                       "-i", source, "-t", seconds(length),
-                       "-map", f"0:{video['index']}", "-an", "-sn", "-dn",
-                       "-map_metadata", "-1", "-map_chapters", "-1",
-                       "-vf", f"fps={rate}:start_time={seconds(base + segment['start'])},"
-                              "setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                       "-filter_threads", threads, "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-                       # Without B-frames every clip has DTS == PTS, so the concatenation below stays
-                       # monotonic: mixing reorder delays truncated short cuts.
-                       "-bf", "0", "-pix_fmt", "yuv420p", "-threads", threads, clip)
-                try:
-                    actual = duration(probe(clip))
-                except ValueError:
-                    actual = 0.0
-                if actual <= 0 or actual < length - 2 * interval:
-                    raise ValueError(f"El corte {i + 1} ({segment['start']:.3f}–{segment['end']:.3f} s) "
-                                     f"solo produjo {actual:.3f} s de vídeo.")
-                # Audio is cut to the exact rendered video length and kept as PCM, so the
-                # single AAC encode below has no per-clip priming overlap or drift at joins.
-                ffmpeg("-ss", seconds(segment["start"]), "-i", source, "-t", seconds(actual),
-                       "-map", f"0:{audio['index']}", "-vn", "-sn", "-dn", "-map_metadata", "-1",
-                       "-af", "aresample=async=1:first_pts=0,apad", "-c:a", "pcm_s24le",
-                       folder / f"{name}.wav")
-                rows.append((segment, elapsed, elapsed + actual))
-                elapsed += actual
-                print(f"Corte {i + 1}/{len(segments)}", flush=True)
-            listing(folder / "video.txt", [f"{name}.mp4" for name in names])
-            listing(folder / "audio.txt", [f"{name}.wav" for name in names])
-            staged = folder / "resumen.mp4"
-            # Relative names run from the folder: the concat demuxer parses list paths as URLs ('#', '?').
-            ffmpeg("-f", "concat", "-safe", "1", "-i", "video.txt",
-                   "-f", "concat", "-safe", "1", "-i", "audio.txt",
-                   "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
-                   "-c:a", "aac", "-b:a", "192k", "-threads", threads,
-                   "-movflags", "+faststart", staged.name, cwd=folder)
-            final_duration = verify(staged, elapsed, args.threads)
-            target = out / "resumen.mp4"
-            staged.rename(target)
-    except (ValueError, OSError) as exc:
-        raise ValueError(f"{exc}\nSalida incompleta en {out}; corrige el motivo y usa otra carpeta.") from exc
-    total = duration(data)
-    lines = ["# Resumen de vídeo", "", f"Origen: `{Path(source).name}`", "",
-             f"Duración original: {stamp(total)}. Final: {stamp(final_duration)}. "
-             f"Reducción: {100 * (1 - final_duration / total):.1f}%. Cortes: {len(segments)}.", "",
-             "| Origen | Salida | Tema |", "| --- | --- | --- |"]
-    for segment, start, end in rows:
-        title = segment["title"].replace("|", "\\|").replace("\n", " ")
-        lines.append(f"| {stamp(segment['start'])}–{stamp(segment['end'])} | "
-                     f"{stamp(start)}–{stamp(end)} | {title} |")
-    lines += ["", "Validación técnica: pistas presentes, duraciones de vídeo y audio coherentes "
-              "y decodificación completa verificadas.", "",
-              "Revisión editorial pendiente: completar tras revisar audio, imágenes, uniones y cobertura.",
-              "Indicar aquí los temas conservados y las limitaciones reales de la revisión.", ""]
-    (out / "resumen.md").write_text("\n".join(lines), encoding="utf-8")
+def import_subtitles(args):
+    """Normalize the medium's own subtitles instead of transcribing (spec §5)."""
+    target = Path(args.out).resolve()
+    if target.exists():
+        raise Refused("La transcripción de salida ya existe.")
+    if not target.parent.is_dir():
+        raise Refused(f"No existe la carpeta de salida: {target.parent}")
+    source = Path(identity(args.subtitles)["path"])
+    segments = subtitles(source.read_text(encoding="utf-8-sig", errors="replace"))
+    if not segments:
+        raise Refused(f"{source.name} no contiene ningún bloque con tiempos válidos; "
+                      "comprueba que es SRT o WebVTT.")
+    note = common.warning("sin_marcas_por_palabra",
+                          "La transcripción procede de subtítulos: sin marcas por palabra, los "
+                          "bordes usan los límites de cada segmento.")
+    save(target, {"language": args.language,
+                  "settings": {"origen": "subtitulos", "archivo": source.name},
+                  "blocks": [], "segments": segments, "warnings": [note]})
     print(target)
+    return 0
 
 
-def positive(value):
-    number = int(value)
-    if number < 1:
-        raise argparse.ArgumentTypeError("debe ser un entero positivo")
-    return number
+def transcribe(args):
+    """Resumable transcription: one saved block at a time, published only when every block is in."""
+    if args.subtitles:
+        return import_subtitles(args)
+    target = Path(args.out).resolve()
+    if target.exists():
+        raise Refused("La transcripción de salida ya existe.")
+    if not target.parent.is_dir():
+        raise Refused(f"No existe la carpeta de salida: {target.parent}")
+    audio = identity(args.audio)
+    work = partial_dir(target)
+    work.mkdir(exist_ok=True)
+    levels = common.energy(audio["path"], target.parent / "energia.f32")
+    total = round(len(levels) * LEVEL_STEP, 3)
+    plan = speech_blocks(levels, total, length=args.block, slack=args.slack)
+    settings = {"model": args.model, "compute_type": args.compute_type, "beam_size": args.beam_size,
+                "vad_filter": not args.no_vad, "language": args.language}
+    fingerprint = {"settings": settings, "source": audio, "blocks": [[a, b] for a, b in plan]}
+    stored = work / "ajustes.json"
+    recorded = None
+    if stored.is_file():
+        try:
+            recorded = json.loads(stored.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = None  # truncated/corrupt: treat as unfinished
+            # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+            # corrupt leftover would turn every retry into the same FileExistsError forever.
+            stored.unlink(missing_ok=True)
+    if recorded is not None:
+        if recorded != fingerprint:
+            raise Refused("Los ajustes de transcripción no coinciden con los de la parte ya "
+                          "hecha; repite la orden con los mismos o elige otra salida.")
+    else:
+        save(stored, fingerprint)
+    # `device` starts unknown; each bloque-NNN.json records the device that produced it, so a
+    # resumption that finds every block already done still ends up with the real device (below),
+    # instead of publishing settings.device as null.
+    model, device, language = None, None, args.language
+    started, done = time.monotonic(), 0
+    for number, (a, b) in enumerate(plan):
+        piece = work / f"bloque-{number:03d}.json"
+        if piece.is_file():
+            try:
+                recorded = json.loads(piece.read_text(encoding="utf-8"))
+                language = language or recorded["language"]
+            except (OSError, ValueError, KeyError):
+                recorded = None  # truncated/corrupt: treat as unfinished
+                # Cleared now, not left for save() below: its "x" mode never overwrites, so a
+                # corrupt leftover would turn every retry into the same FileExistsError forever.
+                piece.unlink(missing_ok=True)
+            if recorded is not None:
+                device = recorded.get("device", device)
+                done += 1
+                continue
+        if args.budget is not None and done and time.monotonic() - started >= args.budget:
+            left = [f"bloque-{i:03d}" for i in range(number, len(plan))]
+            print(json.dumps({"done": done, "total": len(plan), "pending": len(left),
+                              "bloques": left}, ensure_ascii=False))
+            return 3
+        if model is None:
+            model, device = load_model(args)
+        with tempfile.TemporaryDirectory(prefix="bloque-", dir=work) as tmp:
+            cut = block_cut(audio["path"], Path(tmp) / "bloque.wav", a, b)
+            result = transcribe_block(model, cut, a, language, args)
+        # The language is fixed with the first block so the rest cannot drift (spec §11).
+        language = language or result["language"]
+        save(piece, {"index": number, "start": a, "end": b, "device": device, **result})
+        done += 1
+        print(f"Bloque {number + 1}/{len(plan)} hasta {b:.1f} s", flush=True)
+    segments = [segment for number in range(len(plan))
+                for segment in json.loads((work / f"bloque-{number:03d}.json")
+                                          .read_text(encoding="utf-8"))["segments"]]
+    segments, device = recover(work, segments, levels, total, language, device, args)
+    segments.sort(key=lambda segment: (segment["start"], segment["end"]))
+    staged = work / "transcripcion.json"
+    # A previous attempt may have written this and then failed to publish it: "x" mode would
+    # otherwise turn every retry into the same FileExistsError. `target` is what publish() must
+    # never overwrite; `staged` lives inside the resumable `work` area, so redoing it is safe.
+    staged.unlink(missing_ok=True)
+    save(staged, {"language": language, "settings": {**settings, "device": device},
+                  "blocks": [{"start": a, "end": b} for a, b in plan],
+                  "segments": segments, "warnings": []})
+    common.publish(staged, target)
+    shutil.rmtree(work)
+    print(target)
+    return 0
+
+
+def show(args):
+    """`probe`: every track and the file identity, as JSON on standard output."""
+    print(json.dumps(probe(args.video), ensure_ascii=False, indent=2))
+
+
+SPACES = re.compile(r"\s+")
+
+
+def normal(text):
+    return SPACES.sub(" ", common.strip_accents(text).casefold()).strip()
+
+
+def haystack(segment):
+    """Normalised text of a segment and, per character, the word it belongs to."""
+    words = segment.get("words") or []
+    if not words:
+        text = normal(segment.get("text", ""))
+        return text, [None] * len(text)
+    pieces, owners = [], []
+    for index, word in enumerate(words):
+        piece = normal(word.get("text", ""))
+        if not piece:
+            continue
+        if pieces:
+            pieces.append(" ")
+            owners.append(index)
+        pieces.append(piece)
+        owners.extend([index] * len(piece))
+    return "".join(pieces), owners
+
+
+def find(data, query, context=1, limit=20):
+    needle = normal(query)
+    if not needle:
+        raise ValueError("Indica un texto de búsqueda no vacío.")
+    segments, hits = data.get("segments") or [], []
+    for number, segment in enumerate(segments):
+        text, owners = haystack(segment)
+        words = segment.get("words") or []
+        position = text.find(needle)
+        while position >= 0 and len(hits) < limit:
+            owner = owners[position] if position < len(owners) else None
+            start = words[owner]["start"] if owner is not None and owner < len(words) else segment["start"]
+            around = segments[max(0, number - context):number + context + 1]
+            hits.append({"segmento": number, "inicio": round(float(start), 3),
+                         "fin": round(float(segment["end"]), 3),
+                         "texto": str(segment.get("text", "")).strip(),
+                         "contexto": " ".join(str(s.get("text", "")).strip() for s in around)})
+            position = text.find(needle, position + len(needle))
+    return {"consulta": query, "normalizada": needle, "total": len(hits), "coincidencias": hits}
+
+
+def search(args):
+    path = Path(args.transcription)
+    if not path.is_file():
+        raise ValueError(f"No existe la transcripción: {path}")
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    print(json.dumps(find(data, args.query, args.context, args.max), ensure_ascii=False, indent=2))
 
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="video.py", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("check", help="Comprueba Python, FFmpeg (libx264, AAC), faster-whisper y espacio libre; imprime JSON.")
+    p = sub.add_parser("check", help="Comprueba Python, FFmpeg (libx264, AAC), faster-whisper y espacio libre; imprime JSON.")
+    p.set_defaults(run=check)
     p = sub.add_parser("probe", help="Muestra en JSON todas las pistas y la identidad del archivo.")
     p.add_argument("video", help="Vídeo local.")
+    p.set_defaults(run=show)
     p = sub.add_parser("prepare", help="Crea la carpeta de trabajo con metadata.json y audio.wav (16 kHz mono).")
     p.add_argument("video", help="Vídeo local.")
     p.add_argument("--work", required=True, help="Carpeta de trabajo nueva; se crea y no debe existir.")
     p.add_argument("--audio-stream", type=int,
                    help="Índice global de la pista de voz según probe (por defecto, la primera de audio).")
-    p = sub.add_parser("frames", help="Extrae fotogramas JPEG en [start, end) cada step segundos, con index.json.")
+    p.set_defaults(run=prepare)
+    p = sub.add_parser("frames", help="Barre [start, end) por bloques: vistas JPEG, índice gris y "
+                                      "hojas de contacto; reanudable.")
+    p.set_defaults(run=frames)
     p.add_argument("video", help="Vídeo local.")
-    p.add_argument("--out", required=True, help="Carpeta de salida nueva; se crea y no debe existir.")
+    p.add_argument("--out", required=True,
+                   help="Carpeta de fotogramas (normalmente TRABAJO/fotogramas); se crea si falta y "
+                        "se reutiliza para reanudar.")
     p.add_argument("--start", type=float, default=0, help="Inicio en segundos (por defecto 0).")
-    p.add_argument("--end", type=float, help="Fin en segundos, excluido (por defecto, la duración).")
+    p.add_argument("--end", type=float,
+                   help="Fin en segundos, excluido (por defecto, el final de la pista de vídeo).")
     p.add_argument("--step", type=float, default=15, help="Paso en segundos (por defecto 15).")
     p.add_argument("--width", type=int, default=1280,
-                   help="Anchura máxima en píxeles; 0 conserva la resolución original (por defecto 1280).")
-    p = sub.add_parser("transcribe", help="Transcribe con faster-whisper y marcas por palabra (opcional).")
+                   help="Anchura máxima en píxeles; 0 conserva la resolución (por defecto 1280).")
+    p.add_argument("--block", type=float, default=BLOCK,
+                   help=f"Segundos por bloque, un proceso cada uno (por defecto {BLOCK:.0f}).")
+    p.add_argument("--threads", type=positive, default=1,
+                   help="Hilos de decodificación por bloque (por defecto 1).")
+    p = sub.add_parser("transcribe", help="Transcribe por bloques reanudables con faster-whisper, "
+                                          "o normaliza subtítulos existentes.")
+    p.set_defaults(run=transcribe)
     p.add_argument("audio", help="Audio local, normalmente audio.wav de prepare.")
     p.add_argument("--out", required=True, help="JSON de salida nuevo; su carpeta debe existir.")
     p.add_argument("--model", default="small",
                    help="Nombre de modelo o carpeta CTranslate2 local (por defecto small).")
     p.add_argument("--language", help="Código de idioma, p. ej. es (por defecto, detección automática).")
     p.add_argument("--allow-download", action="store_true",
-                   help="Permite descargar el modelo; sin esta opción solo se usan modelos locales o cacheados.")
-    p.add_argument("--device", default="cpu", choices=("cpu", "cuda", "auto"),
-                   help="Dispositivo de inferencia (por defecto cpu).")
-    p.add_argument("--compute-type", default="int8",
-                   help="Tipo de cálculo de CTranslate2, p. ej. int8 o float16 (por defecto int8).")
+                   help="Permite descargar el modelo; sin esta opción solo se usan modelos locales.")
+    p.add_argument("--device", default="auto", choices=("cpu", "cuda", "auto"),
+                   help="Dispositivo de inferencia; auto prueba CUDA y vuelve a CPU (por defecto auto).")
+    p.add_argument("--dll-dir", action="append", metavar="CARPETA",
+                   help="Carpeta de DLL de CUDA/cuDNN en Windows; repetible.")
+    p.add_argument("--compute-type",
+                   help="Tipo de cálculo de CTranslate2 (por defecto int8 en CPU y float16 en CUDA).")
     p.add_argument("--beam-size", type=positive, default=1, help="Tamaño de haz (por defecto 1).")
-    p.add_argument("--no-vad", action="store_true",
-                   help="Desactiva el filtro VAD (útil para recuperar habla omitida).")
+    p.add_argument("--no-vad", action="store_true", help="Desactiva el filtro VAD en todos los bloques.")
     p.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
                    help=f"Hilos de CPU (por defecto {DEFAULT_THREADS}).")
-    p = sub.add_parser("render", help="Monta resumen.mp4, seleccion.json y resumen.md a partir de un plan.")
-    p.add_argument("video", help="Vídeo local original.")
-    p.add_argument("--plan", required=True, help="seleccion.json con source, audio_stream y segments.")
-    p.add_argument("--out", required=True, help="Carpeta de salida nueva; se crea y no debe existir.")
-    p.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
-                   help=f"Hilos de codificación (por defecto {DEFAULT_THREADS}).")
+    p.add_argument("--block", type=float, default=AUDIO_BLOCK,
+                   help=f"Segundos por bloque (por defecto {AUDIO_BLOCK:.0f}).")
+    p.add_argument("--slack", type=float, default=BLOCK_SLACK,
+                   help=f"Margen para buscar el corte silencioso (por defecto {BLOCK_SLACK:.0f}).")
+    p.add_argument("--budget", type=float,
+                   help="Segundos como máximo por llamada; al agotarse devuelve 3 y se reanuda.")
+    p.add_argument("--subtitles", metavar="RUTA",
+                   help="Normaliza un SRT o WebVTT en vez de transcribir (tarea 7).")
+    p = sub.add_parser("search", help="Busca en la transcripción sin distinguir tildes ni mayúsculas.")
+    p.add_argument("transcription", help="transcripcion.json de la carpeta de trabajo.")
+    p.add_argument("query", help="Texto buscado; se comparan minúsculas y sin tildes.")
+    p.add_argument("--context", type=int, default=1,
+                   help="Segmentos de contexto a cada lado (por defecto 1).")
+    p.add_argument("--max", type=common.positive, default=20,
+                   help="Coincidencias como máximo (por defecto 20).")
+    p.set_defaults(run=search)
+    plan.register(sub)
+    render.register(sub)
+    doc.register(sub)
     return parser
 
 
@@ -567,21 +791,15 @@ def main():
             stream.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args()
     try:
-        if args.command == "check":
-            # Before the version guard, so the report can show python_ok: false.
-            return check(args)
-        if sys.version_info < MIN_PYTHON:
+        # check runs before the version guard, so its report can show python_ok: false.
+        if args.command != "check" and sys.version_info < MIN_PYTHON:
             raise ValueError("Se requiere Python 3.10 o superior.")
-        if args.command in ("probe", "prepare", "frames", "render"):
+        if args.command in ("probe", "prepare", "frames", "transcribe"):
             for executable in ("ffmpeg", "ffprobe"):
                 if not tool(executable):
                     raise ValueError(f"Falta {executable} en PATH (se necesita el ejecutable, "
                                      "no un .cmd/.bat).")
-        if args.command == "probe":
-            print(json.dumps(probe(args.video), ensure_ascii=False, indent=2))
-        else:
-            {"prepare": prepare, "frames": frames, "transcribe": transcribe,
-             "render": render}[args.command](args)
+        return args.run(args) or 0
     except MemoryError:
         print("Error: memoria insuficiente; usa un modelo menor, menos hilos o divide el trabajo.",
               file=sys.stderr)
@@ -589,7 +807,11 @@ def main():
     except KeyboardInterrupt:
         print("Interrumpido; revisa las carpetas de salida incompletas.", file=sys.stderr)
         return 130
-    except (ValueError, OSError, KeyError, RuntimeError) as exc:
+    except Refused as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, OSError, KeyError, RuntimeError, AttributeError, TypeError,
+            IndexError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0

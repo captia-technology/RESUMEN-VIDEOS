@@ -1,7 +1,7 @@
 {
   "name": "resumir-video",
-  "version": "0.1.0",
-  "description": "Resume vídeos técnicos locales en un MP4 con fragmentos originales, analizando voz y pantalla (Python 3.10+ y FFmpeg).",
+  "version": "0.2.0",
+  "description": "Resume grabaciones técnicas locales en un MP4 con fragmentos originales y un documento, analizando voz y pantalla, con revisión previa de los cortes (Python 3.10+ y FFmpeg).",
   "author": {
     "name": "CAPTIA TECHNOLOGY S.L."
   },
@@ -13,7 +13,7 @@
   "interface": {
     "displayName": "Resumir vídeo",
     "shortDescription": "Resume vídeos técnicos conservando audio e imagen",
-    "longDescription": "Analiza la voz y la pantalla de un vídeo local de ingeniería, formación o presentación, selecciona unidades de conocimiento completas y monta un MP4 con los fragmentos originales, su plan de cortes reproducible y un informe. Trabaja en local con Python y FFmpeg; la transcripción con faster-whisper es opcional.",
+    "longDescription": "Analiza la voz y la pantalla de una grabación local de ingeniería, formación o presentación, propone los cortes con su duración estimada y espera tu aprobación antes de montar un MP4 con los fragmentos originales. Entrega también un documento con resumen, ideas clave y preguntas; con entradas de solo audio, el documento es la única entrega. Trabaja en local con Python y FFmpeg; faster-whisper, Pandoc, python-docx y Pillow son opcionales.",
     "developerName": "CAPTIA TECHNOLOGY S.L.",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"],

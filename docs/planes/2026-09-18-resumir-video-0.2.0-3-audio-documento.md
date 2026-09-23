@@ -67,10 +67,16 @@ HDR, de vídeo mudo y de varias pistas de vídeo) que esas tres secciones necesi
     tramos redondeados al milisegundo—, así que este plan solo la descarta dentro de
     `seleccion-vN.json` y `esquema-vN.json`. Los avisos conservan
     `{codigo, mensaje, corte, bloquea}`, y `settings.tolerance` es un número en segundos —la
-    semianchura de la banda del objetivo— o `null` cuando no hay objetivo.
+    semianchura de la banda del objetivo— o `null` cuando no hay objetivo. Estas siete claves
+    son el contrato de `settings` para el esquema de audio (tarea 8), construido a mano; la
+    función compartida `plan.settings_of` (usada por `plan --kind video`, plan 1, ya cerrada)
+    devuelve en realidad ocho claves para el modo vídeo, con `objetivo` además de estas siete.
   - **Registro de subcomandos:** cada módulo expone `register(sub)`, su subparser llama a
     `set_defaults(run=<función>)` y `video.main` despacha con `return args.run(args) or 0`.
-  - **`common.kind` se define en este plan** (tarea 1) y el plan 1 lo consume.
+  - **`common.kind` se define en este plan** (tarea 1), para que otros módulos lo usen.
+    `plan.py` (plan 1, ya cerrado) resuelve hoy el modo con `data.get("kind")` directo y no
+    necesita cambiar para consumirlo, salvo que este plan decida conectarlo explícitamente
+    en la tarea 8.
   - **`metadata.json["timeline"]`** tiene la forma de este plan: `{start, origin, rate, fps, interval,
     sample_rate}`. `common.timeline(data)` (plan 1) devuelve **siempre** esas seis claves, también en
     medios de solo audio —donde `rate`, `fps` e `interval` son `null` y `origin` es `0.0`—, y `prepare`
@@ -144,7 +150,8 @@ Clasifica el medio antes de tocar el disco, rechaza lo que el montaje estándar 
   `timeline(data)`, `new_dir(path)`, `save(path, data)`, `ffmpeg(*args)`,
   `encoders()`, `fingerprint(path)`, `energy(wav_path, cache_path=None)`,
   `warning(code, message, *, cut=None)` y la constante `HDR_TRANSFERS`. Las pruebas nuevas usan
-  `common.…` directamente, así que añade `import common` a la cabecera de `scripts/test_video.py`.
+  `common.…` directamente; confirma que `import common` sigue en la cabecera de `scripts/test_video.py`
+  (ya está desde el plan 1; no hace falta añadirlo).
 - **`common.timeline(data)` es la del plan 1 con la forma acordada**: devuelve **siempre**
   `{start, origin, rate, fps, interval, sample_rate}` —`fps`, nunca `F`—, también en medios de solo
   audio, donde `rate`, `fps` e `interval` son `null` y `origin` es `0.0`. La frecuencia de muestreo es
@@ -591,10 +598,9 @@ Añade `import re` a las importaciones del módulo si aún no está.
     p.set_defaults(run=search)
 ```
 
-No se añade nada al diccionario de despacho de la 0.1.0: por la convención acordada, `main()` termina
-con `return args.run(args) or 0` y cada subparser trae su `set_defaults(run=…)`. Si el plan 1 todavía
-no ha convertido los subcomandos heredados, hazlo aquí: es un `set_defaults` por subparser y una línea
-en `main()`.
+No se añade nada al diccionario de despacho de la 0.1.0: el plan 1 ya convirtió todos los subcomandos
+heredados a este patrón; el nuevo subparser de `search` solo necesita seguirlo
+(`set_defaults(run=search)`), sin nada más que tocar en `main()`.
 
 - [ ] **Paso 5: Ejecutar las dos pruebas y comprobar que pasan**
 
@@ -990,13 +996,17 @@ esta tarea no depende del plan 2.
   {"fotogramas_esperados": 18150, "fotogramas": 18150, "video_s": 726.0, "audio_s": 725.98,
    "desfase_s": 0.021,
    "colocacion": [{"corte": 1, "titulo": "…", "salida_s": [0.0, 6.4],
-                   "imagen": [{"punto": "inicio", "distancia": 0.031}],
-                   "envolvente": [{"punto": "inicio", "desfase_ms": 20, "correlacion": 0.97}]}],
-   "marcas": ["corte 2 (inicio): imagen a 0,1100"], "uniones": [160]}
+                   "imagen": [{"punto": "inicio", "salida_s": 0.0, "origen_s": 10.0,
+                               "distancia": 0.031}],
+                   "envolvente": [{"punto": "inicio", "bloques": 86, "desfase_ms": 20,
+                                   "correlacion": 0.97, "modulacion_db": 20.0}]}],
+   "marcas": ["corte 2 (inicio): imagen a 0,1100"], "uniones": [160],
+   "uniones_hojas": ["union-01.jpg"]}
   ```
   `uniones` es la lista de fotogramas de unión, no un recuento, y `marcas` la lista de ventanas
-  señaladas. Si el archivo falta, `doc` no falla: escribe una frase explícita y añade un aviso al
-  informe.
+  señaladas; `uniones_hojas` añade el nombre de la hoja de contacto de cada unión, presente en el
+  JSON real aunque `doc.py` no la lee. Si el archivo falta, `doc` no falla: escribe una frase
+  explícita y añade un aviso al informe.
 - Produces: `doc.table(rows)`, `doc.percent(part, whole)`, `doc.count(number, singular, plural)`,
   `doc.transcriber(work)`, `doc.ficha(context)`, `doc.indice(context)`, `doc.validacion(context)` y el
   despachador `doc.block` definitivo.
@@ -1042,11 +1052,17 @@ class BlockTest(unittest.TestCase):
                  "desfase_s": 0.021,
                  "colocacion": [{"corte": 1, "titulo": "A", "salida_s": [0.0, 6.4],
                                  "imagen": [{"punto": "inicio", "distancia": 0.031}],
-                                 "envolvente": [{"punto": "inicio", "desfase_ms": 20,
-                                                 "correlacion": 0.97}]},
+                                 # `bloques: 0` is a degenerate window (never measured): its
+                                 # desfase_ms of 500 must not count towards the maximum below —
+                                 # if the `bloques != 0` filter ever reverted to `desfase_ms is
+                                 # not None`, this row alone would push the max well past 40 ms.
+                                 "envolvente": [{"punto": "inicio", "bloques": 86, "desfase_ms": 20,
+                                                 "correlacion": 0.97},
+                                                {"punto": "fin", "bloques": 0, "desfase_ms": 500,
+                                                 "correlacion": None}]},
                                 {"corte": 2, "titulo": "B", "salida_s": [6.4, 9.6],
                                  "imagen": [{"punto": "inicio", "distancia": 0.11}],
-                                 "envolvente": [{"punto": "inicio", "desfase_ms": -40,
+                                 "envolvente": [{"punto": "inicio", "bloques": 100, "desfase_ms": -40,
                                                  "correlacion": None}]}],
                  "marcas": ["corte 2 (inicio): imagen a 0,1100"], "uniones": [160]}),
                 encoding="utf-8")
@@ -1165,7 +1181,7 @@ def validacion(context):
     places = data.get("colocacion") or []
     distances = [row["distancia"] for place in places for row in place.get("imagen") or []]
     lags = [abs(row["desfase_ms"]) for place in places for row in place.get("envolvente") or []
-            if row.get("desfase_ms") is not None]
+            if row.get("bloques", 0) != 0]
     drift = f"{float(data.get('desfase_s', 0)):.3f}".replace(".", ",")
     image = f"{max(distances, default=0.0):.3f}".replace(".", ",")
     return table([["Comprobación", "Resultado"],
@@ -1315,7 +1331,9 @@ def timeline_png(spans, total, path):
         left = 10 + int(span["start"] / total * inner)
         right = 10 + max(int(span["start"] / total * inner) + 1, int(span["end"] / total * inner))
         draw.rectangle([left, 10, min(right, 10 + inner) - 1, 49], fill=(40, 90, 160))
-    image.save(path, "PNG")
+    staged = path.with_name(f"{path.name}.parcial")
+    image.save(staged, "PNG")
+    staged.replace(path)
     return path
 
 
@@ -1370,12 +1388,13 @@ Tres caminos con la misma entrada y el mismo código de salida 0 (spec §10, §1
 - Produces: `doc.engine() -> str | None` (`"pandoc"`, `"python-docx"` o `None`),
   `doc.render_docx(markdown, target, base) -> None` (subconjunto de Markdown) y
   `doc.to_docx(markdown_path, target, base) -> str | None`, que devuelve el motor usado o `None`.
-  `to_docx` escribe siempre en `target.with_suffix(".parcial")` y publica con `Path.replace`, porque
+  `to_docx` escribe siempre en `Path(f"{target}.parcial")` y publica con `Path.replace`, porque
   en Windows un archivo aún abierto no se puede renombrar (comprobado).
 
 - [ ] **Paso 1: Escribir la prueba que falla**
 
-Añade a `test_doc.py` (junto a los imports, `import zipfile` y `from unittest import mock`):
+Añade a `test_doc.py` (junto a los imports, `import struct`, `import zipfile`, `import zlib` y
+`from unittest import mock`):
 
 ````python
 SAMPLE = """# Resumen
@@ -1393,6 +1412,20 @@ Párrafo con **negrita**, *cursiva* y `código`.
 0:00 ▕·····█████▏ 1:36
 ```
 """
+
+
+def png_chunk(kind, data):
+    return (struct.pack(">I", len(data)) + kind + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+
+def minimal_png():
+    """A real, valid 1x1 RGB PNG built from stdlib bytes only: no Pillow dependency needed
+    just to exercise render_docx's IMAGE branch."""
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00\xff\x00\x00")  # filter byte + one red RGB pixel
+    return signature + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", idat) + png_chunk(b"IEND", b"")
 
 
 class DocxTest(unittest.TestCase):
@@ -1432,6 +1465,23 @@ class DocxTest(unittest.TestCase):
             self.assertIn("<w:b/>", xml)
             self.assertIn("<w:i/>", xml)
             self.assertIn("Segunda idea", xml)
+
+    def test_render_docx_embeds_a_referenced_image(self):
+        if not doc.has_python_docx():
+            self.skipTest("python-docx no instalado")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            base = Path(temporary)
+            (base / "captura.png").write_bytes(minimal_png())
+            markdown = "# Resumen\n\n![Captura](captura.png)\n"
+            target = base / "con-imagen.docx"
+            doc.render_docx(markdown, target, base)
+            with zipfile.ZipFile(target) as bundle:
+                names = bundle.namelist()
+                media = [n for n in names
+                         if n.startswith("word/media/image") and n.endswith(".png")]
+                xml = bundle.read("word/document.xml").decode("utf-8")
+            self.assertTrue(media, f"Sin imagen incrustada en {names}")
+            self.assertIn("<w:drawing>", xml)
 ````
 
 - [ ] **Paso 2: Ejecutarla y comprobar que falla**
@@ -1466,12 +1516,17 @@ def to_docx(markdown_path, target, base):
     used = engine()
     if used is None:
         return None
-    if used == "pandoc":
-        common.run([common.tool("pandoc"), "--from=markdown", "--to=docx",
-                    f"--resource-path={Path(base).resolve()}", "--output", str(staged),
-                    str(markdown_path)])
-    else:
-        render_docx(Path(markdown_path).read_text(encoding="utf-8"), staged, Path(base))
+    try:
+        if used == "pandoc":
+            common.run([common.tool("pandoc"), "--from=markdown", "--to=docx",
+                        f"--resource-path={Path(base).resolve()}", "--output", str(staged),
+                        str(markdown_path)])
+        else:
+            render_docx(Path(markdown_path).read_text(encoding="utf-8"), staged, Path(base))
+    except Exception:
+        # A crash mid-write must not leave a <nombre>.docx.parcial orphaned forever.
+        staged.unlink(missing_ok=True)
+        raise
     staged.replace(target)
     return used
 ```
@@ -1746,22 +1801,50 @@ def context_of(work, number, out, metadata, schema=None):
         if key not in plan:
             raise ValueError(f"El plan publicado no tiene «{key}»: {Path(out) / 'seleccion.json'}")
     speed = float(plan["settings"].get("speed", 1.0))
+    corrupt = ValueError("El plan publicado tiene una velocidad o una cadencia no válidas: ¿se ha "
+                         "editado a mano? revisa `settings.speed` y `settings.rate` en el plan.")
+    if speed <= 0:
+        raise corrupt
     # The montage's own F rules; metadata only answers when the plan does not carry it.
     rate = plan["settings"].get("rate")
-    cadence = 1 / common.output_interval(rate) if rate else float(metadata["timeline"]["fps"])
+    try:
+        cadence = 1 / common.output_interval(rate) if rate else float(metadata["timeline"]["fps"])
+    except ZeroDivisionError:
+        cadence = 0.0
+    if cadence <= 0:
+        raise corrupt
     base.update(spans=placements(plan["segments"], speed, cadence), speed=speed,
                 settings=plan["settings"])
     return base
 ```
 
+Una velocidad o una cadencia de cero en un `seleccion.json` editado a mano ya no se cuela como un
+`ZeroDivisionError` crudo hasta el manejador genérico de `video.main()`: ambas se comprueban después de
+calcularse, con el mismo `ValueError` explícito para las dos causas.
+
 - [ ] **Paso 4: Implementar las revisiones y la publicación**
 
 ```python
 def next_revision(out):
-    """First revision is 2: the delivery without suffix is the first one."""
+    """Reserve the next resumen-rM number exclusively: same O_CREAT|O_EXCL principle as
+    common.reserve_version (plan 1), adapted to the rM namespace of an already-published version —
+    it does not reuse reserve_version itself, which reserves vN.json, not resumen-rM.md. This
+    replaces a plain glob()+max(), which left a TOCTOU window where two concurrent `doc --revision`
+    calls on the same vN could compute the same M. First revision is 2: the delivery without suffix
+    is the first one; the reservation is the very `.md.parcial` staging file publish_document goes on
+    to fill, so there is no separate sentinel and no throwaway write."""
     used = [int(p.stem.rsplit("-r", 1)[-1]) for p in Path(out).glob("resumen-r*.md")
             if p.stem.rsplit("-r", 1)[-1].isdigit()]
-    return max(used, default=1) + 1
+    first = max(used, default=1) + 1
+    for number in range(first, first + common.VERSION_ATTEMPTS):
+        staged = Path(out) / f"resumen-r{number}.md.parcial"
+        try:
+            os.close(os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            continue
+        return number
+    raise ValueError(f"No se pudo reservar una revisión tras {common.VERSION_ATTEMPTS} intentos; "
+                     "otra sesión está publicando una revisión en esta misma versión.")
 
 
 def record_revision(out, number, reason, phrase, source):
@@ -1777,6 +1860,7 @@ def record_revision(out, number, reason, phrase, source):
 
 
 def publish_document(text, out, name, base, skip_docx):
+    """Publish the Markdown, then try the DOCX; a converter crash never undoes the Markdown."""
     markdown, staged = Path(out) / f"{name}.md", Path(out) / f"{name}.md.parcial"
     staged.write_text(text, encoding="utf-8")
     try:
@@ -1786,8 +1870,13 @@ def publish_document(text, out, name, base, skip_docx):
         staged.unlink(missing_ok=True)
         raise
     if skip_docx:
-        return markdown, None
-    return markdown, to_docx(markdown, Path(out) / f"{name}.docx", base)
+        return markdown, None, None
+    try:
+        return markdown, to_docx(markdown, Path(out) / f"{name}.docx", base), None
+    except Exception as exc:
+        # The Markdown above is already published and immutable at this name; a Pandoc crash or a
+        # broken python-docx render must not cost the caller its revision record and history event.
+        return markdown, None, f"Fallo al generar el DOCX ({exc}): la entrega es solo Markdown."
 ```
 
 - [ ] **Paso 5: Implementar `document` y el registro del subcomando**
@@ -1810,12 +1899,13 @@ def report_of(args):
     text = expand(source.read_text(encoding="utf-8-sig"), context)
     revision = next_revision(out) if args.revision else None
     name = "resumen" if revision is None else f"resumen-r{revision}"
-    markdown, used = publish_document(text, out, name, out, args.no_docx)
+    markdown, used, docx_error = publish_document(text, out, name, out, args.no_docx)
     if revision is not None:
         record_revision(out, revision, args.revision, args.accept, source)
     if used is None and not args.no_docx:
-        context["avisos"].append("Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala "
-                                 "Pandoc (pandoc.org) o ejecuta `python -m pip install python-docx`.")
+        context["avisos"].append(docx_error or (
+            "Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala Pandoc (pandoc.org) "
+            "o ejecuta `python -m pip install python-docx`."))
     # `doc` on every publication; `deliver` belongs to the final handover, not to this subcommand.
     common.history(work, "doc", {"version": number, "revision": revision, "motor": used,
                                  "archivo": markdown.name, "kind": metadata.get("kind")})
@@ -1909,10 +1999,18 @@ implementación del modo audio de `plan`: el plan 1 crea `plan.py` con la rama d
   toma la rejilla para copiar `rate` y `sample_rate` a los ajustes—,
   `publish_version(work, prefix, body, extra=None)` —que reserva `N`, fija `body["version"]` y
   `body["sha256"]`, escribe el JSON con `common.write_reserved` y publica `propuesta-vN.md`—,
-  `cell(text)`, `dependency_warnings(rows, included)`, `topic_warnings(draft, included)` y el
+  `cell(text)`, `dependency_warnings(rows, included)`, `topic_warnings(draft, rows, included)` y el
   despachador `run(args)`, que ya resuelve `work`, `data`, `total`, `draft`, `kind`, `settings`,
   `segments`, `levels`, `words` y `grid` antes de repartir. En audio, `grid` es la línea temporal que
   `prepare` escribió: la misma forma de seis claves, con `rate`, `fps` e `interval` a `null`.
+- Modifica —código **ya existente** del plan 1, no solo la rama nueva de `audio_plan`— la firma de
+  `check_parent(draft, work)` (`plan.py:124-131`) a `check_parent(draft, work, kind)`: el cuerpo pasa
+  a comprobar `esquema-v{parent}.json` cuando `kind == "audio"` y `seleccion-v{parent}.json` en
+  vídeo, en vez de asumir siempre el prefijo `seleccion` (hoy `check_parent` rechazaría cualquier
+  `parent` de un esquema publicado). Actualiza también su única llamada, en `run` (`plan.py:915`), de
+  `check_parent(draft, work)` a `check_parent(draft, work, kind)` — `run` ya calcula `kind` antes de
+  esa línea (`kind = args.kind or data.get("kind") or "video"`), así que no hace falta adelantar
+  nada, solo pasarlo.
 - Consumes de `common.py`: `clock(value)`, `warning(code, message, *, cut=None)`, `plan_sha256(plan)`,
   `history(work, event, payload)`.
 - Consumes de `test_plan.py` (plan 1): los ayudantes `work_folder(root, …, videos=0)`, `cut(...)`,
@@ -2150,7 +2248,7 @@ def audio_plan(args, work, data, draft, settings, segments, total, levels, words
         raise ValueError("El esquema necesita al menos una idea clave incluida en el borrador.")
     questions = questions_of(draft, total)
     warnings = dependency_warnings([{"segment": item} for item in segments], included)
-    warnings += topic_warnings(draft, included)
+    warnings += topic_warnings(draft, [{"segment": item} for item in segments], included)
     if not words:
         warnings.append(common.warning(
             "sin_marcas_por_palabra", "La transcripción no trae marcas por palabra: los tiempos "
@@ -2175,7 +2273,7 @@ def audio_plan(args, work, data, draft, settings, segments, total, levels, words
         return 2 if blocking else 0
     name = Path(data["source"]["path"]).name
     version, path = publish_version(work, "esquema", body,
-                                    lambda number: audio_proposal(body, total, name, number))
+                                    lambda: audio_proposal(body, total, name, body["version"]))
     common.history(work, "edit" if draft.get("parent") else "init",
                    {"version": version, "ideas": len(ideas), "preguntas": len(questions),
                     "sha256": body["sha256"], "peticion": draft.get("request", "")})
@@ -2234,6 +2332,30 @@ y en `run`, **retira la guarda** que el plan 1 dejó provisionalmente —las dos
 `run` ya calcula `grid` antes (`data.get("timeline") or common.timeline(data)`) y se lo pasa a
 `settings_of(draft, args, total, grid)`, así que las dos ramas reciben la misma rejilla sin volver a
 sondear el medio.
+
+`check_parent` (`plan.py:124-131`) es **código ya existente del plan 1**, no de esta rama nueva, y hoy
+solo sabe comprobar `seleccion-v{parent}.json`; en audio el padre publicado es `esquema-vN.json`, así
+que esta tarea le cambia la firma y el cuerpo:
+
+```python
+def check_parent(draft, work, kind):
+    """`parent` is null or the number of a version this folder has already published."""
+    parent = draft.get("parent")
+    if parent is None:
+        return
+    prefix = "esquema" if kind == "audio" else "seleccion"
+    if type(parent) is not int or parent < 1 or not (work / f"{prefix}-v{parent}.json").is_file():
+        raise ValueError("parent debe ser nulo o el número de una versión ya publicada "
+                         f"({prefix}-vN.json en la carpeta de trabajo); recibido {parent!r}.")
+```
+
+y actualiza su única llamada, en el mismo `run` (`plan.py:915`), de `check_parent(draft, work)` a
+`check_parent(draft, work, kind)`; `kind` ya está calculado ahí arriba (justo antes de la guarda que
+esta tarea retira), así que la llamada solo cambia de aridad, no de lugar. Sin esta corrección,
+`test_a_second_version_records_an_edit` (paso 5) fallaría: su segunda llamada plantea un borrador con
+`parent: 1` sobre un trabajo de audio donde solo existe `esquema-v1.json`, y el `check_parent` de dos
+argumentos de hoy buscaría `seleccion-v1.json` y lo rechazaría con código 2 en vez de publicar
+`esquema-v2.json`.
 
 `publish_version` fija `body["version"]` y `body["sha256"]` **antes** de escribir, calculando el hash
 sobre el cuerpo sin la clave `sha256`: es exactamente lo que recomprueba `doc` en la tarea 9
@@ -2365,7 +2487,7 @@ class AudioDocumentTest(unittest.TestCase):
             self.assertFalse((work / "documento-v1").exists())
 ```
 
-Añade `import common` a los imports de `test_doc.py`.
+`common` ya está importado en `test_doc.py` desde la Tarea 3; no hace falta tocar los imports.
 
 - [ ] **Paso 2: Ejecutarla y comprobar que falla**
 
@@ -2401,6 +2523,7 @@ modo que una marca inválida no deja ninguna carpeta a medias.
 
 ```python
 def report_of(args):
+    """Publish the document of one version and answer what was written; document() prints it."""
     work = Path(args.work).resolve()
     number = args.version
     metadata = read_json(work / "metadata.json")
@@ -2424,12 +2547,13 @@ def report_of(args):
         common.save(out / "esquema.json", schema)
     revision = next_revision(out) if args.revision else None
     name = "resumen" if revision is None else f"resumen-r{revision}"
-    markdown, used = publish_document(text, out, name, out, args.no_docx)
+    markdown, used, docx_error = publish_document(text, out, name, out, args.no_docx)
     if revision is not None:
         record_revision(out, revision, args.revision, args.accept, source)
     if used is None and not args.no_docx:
-        context["avisos"].append("Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala "
-                                 "Pandoc (pandoc.org) o ejecuta `python -m pip install python-docx`.")
+        context["avisos"].append(docx_error or (
+            "Sin Pandoc ni python-docx: la entrega es solo Markdown. Instala Pandoc (pandoc.org) "
+            "o ejecuta `python -m pip install python-docx`."))
     common.history(work, "doc", {"version": number, "revision": revision, "motor": used,
                                  "archivo": markdown.name, "kind": metadata.get("kind"),
                                  "sha256": digest, "frase": args.accept})
@@ -2687,7 +2811,7 @@ y añade su subparser a `register(sub)`:
 python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_doc.py" -v
 ```
 
-Esperado: PASS (32 pruebas).
+Esperado: PASS (38 pruebas).
 
 - [ ] **Paso 6: Dejar redactado el texto de `references/documento.md` para el plan 4**
 
@@ -2805,7 +2929,7 @@ lo adopten sin conflicto:
 | 2 | `metadata.json` con `kind`, `audio_stream`, `source` `{path, size, mtime_ns, sha256}`, `timeline` `{start, origin, rate, fps, interval, sample_rate}` —la que `common.timeline` devuelve siempre, también en solo audio, y que `prepare` escribe en los dos modos— y `avisos` (`fuente_vfr`, `huecos_pts`) | todos |
 | 3 | Convención de subcomandos: cada módulo expone `register(sub)` y cada subparser llama a `set_defaults(run=…)`; `video.main` despacha con `return args.run(args) or 0` | `video.py`, `plan.py`, `render.py`, `doc.py` |
 | 4 | `vN/seleccion.json` con el esquema único acordado; `doc` solo lee `segments[]` (`id`, `numero`, `title`, `start`, `end`, `spans`, `frames`, `samples`) y `settings` (`speed`, `rate`, `remove_pauses`) | lo publica `render` (plan 2) copiando el `seleccion-vN.json` de `plan` (plan 1); lo consume `doc` |
-| 5 | `vN/validacion.json` con `fotogramas_esperados`, `fotogramas`, `video_s`, `audio_s`, `desfase_s`, `colocacion[]` (`imagen[].distancia`, `envolvente[].desfase_ms`), `marcas[]` y `uniones[]` (forma real del plan 2) | lo produce el plan 2, lo consume `doc` |
+| 5 | `vN/validacion.json` con `fotogramas_esperados`, `fotogramas`, `video_s`, `audio_s`, `desfase_s`, `colocacion[]` (`imagen[].distancia`, `imagen[].salida_s`, `imagen[].origen_s`, `envolvente[].desfase_ms`, `envolvente[].bloques`, `envolvente[].modulacion_db`), `marcas[]`, `uniones[]` y la clave de nivel superior `uniones_hojas` (presente pero no leída por `doc`) (forma real del plan 2) | lo produce el plan 2, lo consume `doc` |
 | 6 | `placements`, `output_at`, `stretches_of` y `bounds_of` viven en `doc.py`; `clock` vive en `common.py` y la usan `plan.py` y `doc.py` | `plan.py`, `doc.py` |
 | 7 | `publish_version` (plan 1) rellena la reserva con `common.write_reserved`, nunca con `common.save` (modo exclusivo `x`) | `plan.py` |
 | 8 | `common.tool` se reutiliza para `pandoc`, no solo para FFmpeg | `doc.py` |
@@ -2885,8 +3009,11 @@ Todas en esta máquina (Windows 11, Python 3.11.9, FFmpeg 8.0.1-full_build, Pand
   sondeo de paquetes, unificaron la línea temporal en `common.timeline` y renombraron a `doc` el
   evento que escribe `doc.document`. Repetir el ensayo con los bloques de código de esta versión es
   **(pendiente de evidencia)**: hazlo al ejecutar la tarea 1 y anota el recuento real.
-- Recuento previsto de pruebas, para contrastarlo con lo que salga: `test_video.py` pasa de las 12 que
-  deja la tarea 1 del plan 1 a **18** (+6: 3 rápidas —`kind`, `search` y la eñe— y 3 con FFmpeg —los
-  dos `prepare` y el HDR con huecos—), `test_doc.py` llega a **32** y `test_plan.py` suma **+7** a las
-  del plan 1. Punto de partida medido hoy en el repositorio, antes de cualquier plan: 15 pruebas en
+- Recuento final de pruebas, tal como quedó el repositorio al cerrar este plan (10 tareas más la
+  revisión de rama completa y su ronda de correcciones): `test_video.py` pasa de las 12 que deja la
+  tarea 1 del plan 1 a **18** (+6: 3 rápidas —`kind`, `search` y la eñe— y 3 con FFmpeg —los dos
+  `prepare` y el HDR con huecos—), `test_doc.py` llega a **38**, `test_plan.py` suma **+7** a las del
+  plan 1 (**77** en total) y `tests/` se mantiene en **23**. La suite completa de la skill queda en
+  **254** pruebas (2 se saltan sin `python-docx` en el intérprete principal) y el repositorio en
+  **277**. Punto de partida medido hoy en el repositorio, antes de cualquier plan: 15 pruebas en
   `scripts/test_video.py` y 23 en `tests/`.

@@ -9,11 +9,11 @@ cortes cacheados, respete un presupuesto de tiempo reanudable, ensamble una sola
 publique `vN/` hasta superar una validación bloqueante contra el original.
 
 **Architecture:** `render.py` no decide nada editorial: recibe `seleccion-vN.json` (lo produce
-`plan.py`), exige aceptación literal, descompone cada corte en subcortes de 40 tramos como máximo,
-renderiza cada subcorte con **dos pasadas de FFmpeg** (vídeo H.264 y audio PCM de 24 bits) que se
-remultiplexan sin recodificar en `cortes/<clave>.mkv`, ensambla con dos *concat demuxer* copiando el
-vídeo y codificando AAC una sola vez (invariante D-006), valida el resultado frente al medio original
-por recuento de fotogramas, imagen y envolvente, y solo entonces publica `vN/`. El estado vive en el
+`plan.py`), exige aceptación literal, lee de cada corte los subcortes de 40 tramos como máximo que
+publicó `plan.py`, renderiza cada subcorte con **dos pasadas de FFmpeg** (vídeo H.264 y audio PCM de
+24 bits) que se remultiplexan sin recodificar en `cortes/<clave>.mkv`, ensambla con dos *concat
+demuxer* copiando el vídeo y codificando AAC una sola vez (invariante D-006), valida el resultado
+frente al medio original por recuento de fotogramas, imagen y envolvente, y solo entonces publica `vN/`. El estado vive en el
 sistema de archivos —caché por clave de huella, `historial.jsonl`, cerrojo exclusivo—, de modo que una
 llamada interrumpida o agotada por presupuesto se reanuda sin repetir trabajo. Esa misma caché le
 permite responder, sin montar nada, cuánto costaría el montaje (`render --dry-run`), que es el dato que
@@ -32,11 +32,16 @@ protección) y §12 (códigos de error). El presupuesto, los bordes, los tramos 
 ## Global Constraints
 
 - **Alcance del plan:** `scripts/render.py` y `scripts/test_render.py`, ambos nuevos. De
-  `scripts/video.py` se tocan exclusivamente dos líneas —`import render` y `render.register(sub)`
-  (Tarea 1, paso 9)—. Ningún otro archivo del repositorio: **`scripts/test_video.py` no lo toca este
-  plan**. Lo reordena el Plan 1 en su Tarea 1, al retirar de `video.py` el `render` de la 0.1.0, y es
-  él quien retira las pruebas que se quedan sin sujeto y reescribe las demás para conservar su
-  cobertura de `prepare`, `frames` y `probe` (§13).
+  `scripts/video.py` se tocan exclusivamente dos líneas (Tarea 1, paso 9): `import render`, justo
+  tras `import plan` y por tanto **después** de `sys.dont_write_bytecode = True`, y
+  `render.register(sub)`, tras `plan.register(sub)` y antes de `return parser`. No queda nada de la
+  0.1.0 que borrar en `video.py`. `render.register` tiene un cuerpo real desde la Tarea 1 (crea el
+  subparser con sus opciones definitivas y su `run` solo lanza «render aún no está implementado» al
+  invocarlo), de modo que `video.build_parser()` no rompe ningún subcomando entre commits. Ningún
+  otro archivo del repositorio: **`scripts/test_video.py` no lo toca este plan**. Lo reordena el
+  Plan 1 en su Tarea 1, al retirar de `video.py` el `render` de la 0.1.0, y es él quien retira las
+  pruebas que se quedan sin sujeto y reescribe las demás para conservar su cobertura de `prepare`,
+  `frames` y `probe` (§13).
 - **Sin dependencias fuera de la biblioteca estándar.** Nada de `numpy`, `PIL`, `pydub` ni similares.
 - **FFmpeg siempre con listas de argumentos, nunca por shell.** Se usa `common.ffmpeg(...)`, que ya
   añade `-hide_banner -loglevel error -nostdin -n`.
@@ -59,7 +64,8 @@ protección) y §12 (códigos de error). El presupuesto, los bordes, los tramos 
   24 bits **nunca leído desde Python** (§8).
 - **Umbrales provisionales de la envolvente (§15):** desfase máximo **40 ms** (cuatro bloques de
   10 ms, dentro de los 45 ms que cita §8), guarda de modulación **6 dB** por debajo de la cual la
-  correlación no dice nada, y bloqueo por diferencia media **8 dB**. Se declaran en «Desviaciones y
+  correlación no dice nada, diferencia media de **4 dB** a partir de la cual se marca el punto para
+  escucharlo sin bloquear, y bloqueo por diferencia media **8 dB**. Se declaran en «Desviaciones y
   umbrales declarados»; el Plan 4 los escribe en `docs/requisitos.md`.
 - **La lectura de la entrada no se acota con `-t` ni con `-to`.** Medido hoy: junto a `-copyts` ambas
   se cuentan desde el primer paquete leído, no desde el instante pedido, y dejan la cadena en **cero
@@ -76,11 +82,19 @@ protección) y §12 (códigos de error). El presupuesto, los bordes, los tramos 
 
 ## Contrato con `common.py` (Plan 1) y con `plan.py` (Plan 1)
 
-`render.py` **consume** de `common.py`, sin redefinir nada: `BLOCKING`, `MAX_SPANS`,
-`MEMORY_PATTERNS`, `energy`, `ffmpeg`, `fingerprint`, `frames_for`, `history`, `listing`, `lock`,
-`new_dir`, `output_interval`, `plan_sha256`, `positive`, `probe`, `publish`, `require_encoders`,
-`run`, `samples_for`, `save`, `seconds`, `seek_margin`, `stamp`, `stream_duration`, `streams`,
-`timeline_start`, `video_stream`, `warning`.
+`render.py` **consume** de `common.py`, sin redefinir nada: `BLOCKING`, `DEFAULT_THREADS`,
+`ENERGY_STEP`, `MAX_SPANS`, `MEMORY_PATTERNS`, `energy`, `ffmpeg`, `fingerprint`, `history`,
+`listing`, `lock`, `new_dir`, `output_interval`, `plan_sha256`, `positive`, `probe`, `publish`,
+`require_encoders`, `run`, `save`, `seconds`, `seek_margin`, `stamp`, `stream_duration`, `streams`,
+`timeline_start`, `video_stream`, `warning`. `DEFAULT_THREADS` lo define `common.py` (`min(4,
+os.cpu_count() or 1)`) y `video.py` lo importa de allí; `render.py` hace lo mismo.
+
+Lo único que `render.py` añade a esas constantes es `MEMORY_CODES = (137, 3221225495, -9)`
+(Tarea 5), el complemento numérico de `common.MEMORY_PATTERNS`: §11 enumera cinco casos de memoria
+agotada (tres cadenas y dos códigos de salida) y el Plan 1 fijó solo las tres cadenas. Son los `returncode`
+que `common.run` escribe en su mensaje como `(código N)`: 137 (OOM killer), el NTSTATUS `0xC0000017`
+que Python comunica como 3221225495 en Windows, y −9 (SIGKILL) en POSIX. `render.retryable` compara
+el número, no una subcadena.
 
 No usa `parse_target`, `tolerance`, `silences`, `snap`, `islands`, `adjust_edges`, `reserve_version`,
 `clock` ni `strip_accents`: son de `plan.py` y `doc.py`.
@@ -123,7 +137,7 @@ resto de claves —`parent`, `kind`, `request`, `timeline`, `reserves`, `excluid
 valor en coma flotante; `render` usa la de `settings` y no depende de `timeline`.
 `settings.objetivo` son los segundos del objetivo ya resueltos y **`settings.tolerance` es un número
 en segundos**: la semianchura de la banda `[max(0, T_obj − d), T_obj + d]` de A-5, no un par de
-factores. `render` no lee ninguno de los dos, pero el esquema es el mismo para los cuatro planes y las
+factores (los dos son `null` cuando el plan no tiene objetivo). `render` no lee ninguno de los dos, pero el esquema es el mismo para los cuatro planes y las
 pruebas de este lo copian tal cual.
 
 ---
@@ -134,7 +148,7 @@ pruebas de este lo copian tal cual.
 | --- | --- |
 | `plugins/resumir-video/skills/resumir-video/scripts/render.py` | **Nuevo.** Aceptación, subcortes, claves de caché, filtros, montaje por corte, presupuesto, ensamblado, validación bloqueante, hojas de uniones, informe y estimación del coste (`--dry-run`). |
 | `plugins/resumir-video/skills/resumir-video/scripts/test_render.py` | **Nuevo.** Pruebas rápidas (sin FFmpeg) y de integración (con FFmpeg) sobre una fuente sintética cuya luminancia codifica el instante de origen. |
-| `plugins/resumir-video/skills/resumir-video/scripts/video.py` | **Modificado, dos líneas.** `import render` y `render.register(sub)`; el despacho ya es `return args.run(args) or 0`. |
+| `plugins/resumir-video/skills/resumir-video/scripts/video.py` | **Modificado, dos líneas.** `import render` (tras `import plan`) y `render.register(sub)` (tras `plan.register(sub)`); el despacho ya es `return args.run(args) or 0`. |
 
 Salidas dentro de la carpeta de trabajo (§6): `cortes/<clave>.mkv` y `cortes/<clave>.json` (caché),
 `historial.jsonl` (registro), `vN/resumen.mp4`, `vN/seleccion.json`, `vN/validacion.json`,
@@ -170,6 +184,8 @@ ffmpeg -f lavfi -i "color=c=black:s=320x180:r=25:d=10" \
 | `trim=end_frame=0` y `atrim=end_sample=0` | FFmpeg devuelve **0** y escribe un archivo vacío: hay que comprobar `N ≥ 1` y `M ≥ 1` en Python |
 | Corte que termina en el último fotograma del medio (`[9,10)` de un medio de 10 s) | 25 fotogramas exactos con luminancias `225…249` y 48 000 muestras: no se trunca ni hace falta clonar |
 | Medio desfasado (`format.start_time = 7 s`), corte en `s ∈ [3,4)` | 25 fotogramas con luminancias `75…99` y 48 000 muestras de 0,2999 a 0,3999 de la rampa: la convención `base + s` es correcta sobre un contenedor real desplazado |
+| Cadena de audio de §8 con `aresample=async=1:first_pts=0` al frente, sobre `testsrc` + `sine` de 12 s a 25 fps y 48 kHz, corte de referencia `[2,00–5,08]` + `[5,92–10,00]` a ×1,25 con `-ss 0 -noaccurate_seek -copyts` | **N = 143** fotogramas (cadena de vídeo) y **M = 274 560** muestras exactas (cadena de audio), con y sin `aresample`. Mismo audio byte a byte en cinco casos (fuente AAC, rampa, contenedor desfasado 7 s, `-ss` > 0 y ambos a la vez) y a ±1 LSB de 16 bits con el seno PCM (otra conversión de formato intermedia). El `aresample` no daña nada: se impone tal cual, sin desviación |
+| Coste del `aresample` inicial: audio de 1 h, tramos `[3000,3001)` y `[3003,3004)` con `-ss 2997` | La misma salida; 0,14 s sin él y **1,35 s** con él: `first_pts=0` rellena de silencio desde 0 hasta el primer instante leído, así que el tiempo crece con la posición del corte (≈0,4 ms por segundo de posición) |
 | Ensamblado de dos cortes con dos *concat demuxer* | 70 fotogramas (= Σ N), vídeo 2,800 s, audio 2,800 s según `ffprobe` |
 | Distancia de luminancia 64×64 entre salida y original en el mismo instante | 0,0000; contra un instante ajeno, 0,5720 |
 | Envolvente de 10 ms, ventanas de inicio y fin del corte | diferencia media 0,81 dB y 3,08 dB; contra una ventana desplazada 0,75 s, **54,22 dB** |
@@ -186,15 +202,22 @@ ffmpeg -f lavfi -i "color=c=black:s=320x180:r=25:d=10" \
 - Modify: `plugins/resumir-video/skills/resumir-video/scripts/video.py`
 
 **Interfaces:**
-- Consumes: de `common.py` → `BLOCKING: tuple[str, ...]`, `plan_sha256(plan) -> str`,
-  `fingerprint(path) -> dict` con claves `size`, `mtime_ns`, `sha256`, `warning(code, message, *, cut=None) -> dict`.
+- Consumes: de `common.py` → `BLOCKING: tuple[str, ...]`, `DEFAULT_THREADS: int`,
+  `positive(value) -> int`, `plan_sha256(plan) -> str`, `fingerprint(path) -> dict` con claves
+  `size`, `mtime_ns`, `sha256`, `warning(code, message, *, cut=None) -> dict`.
 - Produces: `render.Refused(ValueError)`, `render.Invalid(ValueError)`, `render.Pending(Exception)` con
   atributo `state: dict` de claves `done`, `total`, `pending` (entero) y `bloques` (lista);
   `render.accepted(plan, accept, directo) -> dict` con claves `frase`, `directo`, `sha256`;
-  `render.sources_agree(plan, video) -> list[dict]`; `render.render(args) -> int`;
-  `render.register(sub) -> None`, que crea el subparser y fija `set_defaults(run=render)`.
+  `render.sources_agree(plan, video) -> list[dict]`;
+  `render.render(args) -> int`, que en esta tarea solo lanza `RuntimeError` («render aún no está
+  implementado») **al invocarlo** y que la Tarea 10 sustituye por el montaje;
+  `render.register(sub) -> None`, que ya crea el subparser `render` con sus opciones definitivas
+  (`video`, `--work`, `--plan`, `--accept`, `--directo`, `--budget`, `--threads`) y fija
+  `set_defaults(run=render)`. Con ese cuerpo real, `video.build_parser()` funciona desde esta tarea
+  y ningún subcomando se rompe entre commits.
 - Requisito previo del Plan 1: `video.py` ya no define `render`, `verify` ni `validate_plan` (los retira
-  su Tarea 1 al repartir el núcleo en `common.py`), ya trae `import common` y su `main()` despacha con
+  su Tarea 1 al repartir el núcleo en `common.py`), ya trae `import common` e `import plan`, su
+  `build_parser()` termina en `plan.register(sub)` y `return parser`, y su `main()` despacha con
   `return args.run(args) or 0`.
 
 - [ ] **Paso 1: Escribe la prueba que falla**
@@ -291,7 +314,7 @@ import json
 from pathlib import Path
 import sys
 
-from common import BLOCKING, fingerprint, plan_sha256, positive
+from common import BLOCKING, DEFAULT_THREADS, fingerprint, plan_sha256, positive
 
 
 class Refused(ValueError):
@@ -316,7 +339,8 @@ def accepted(plan, accept, directo):
     """The plan only renders with a literal acceptance; blocking warnings stop --directo too (§9)."""
     blocking = [item for item in plan.get("warnings", []) if item.get("codigo") in BLOCKING]
     if blocking:
-        detail = "; ".join(f"{item['codigo']}: {item['mensaje']}" for item in blocking)
+        detail = "; ".join(f"{item.get('codigo', '?')}: {item.get('mensaje', '(sin mensaje)')}"
+                           for item in blocking)
         cuts = sorted({str(item["corte"]) for item in blocking if item.get("corte") is not None})
         where = f" Cortes afectados: {', '.join(cuts)}." if cuts else ""
         raise Refused(f"El plan tiene avisos bloqueantes ({detail}).{where} Corrige el plan con "
@@ -325,8 +349,12 @@ def accepted(plan, accept, directo):
         raise Refused('El plan requiere aceptación: repite con --accept "frase literal del usuario" '
                       "o con --directo.")
     return {"frase": accept, "directo": bool(directo), "sha256": plan_sha256(plan)}
+```
 
+`item.get('codigo', '?')` y `item.get('mensaje', '(sin mensaje)')` evitan un `KeyError` sin control
+—código 1 en vez del 2 que exige §12— si el plan trae un aviso bloqueante corrupto sin esas claves.
 
+```python
 def sources_agree(plan, video):
     """Same fingerprint: the plan is valid even if the file moved (§6). A different one is an error."""
     planned = plan.get("source")
@@ -341,11 +369,24 @@ def sources_agree(plan, video):
 
 
 def render(args):
-    raise NotImplementedError
+    """Entry point of the subcommand; the montage itself arrives in Task 10."""
+    raise RuntimeError("render aún no está implementado")
 
 
 def register(sub):
-    raise NotImplementedError
+    """Subcommand registration shared by the four modules: one subparser and its `run`."""
+    parser = sub.add_parser("render", help="Monta vN/ desde un plan aceptado, con caché y validación.")
+    parser.add_argument("video", help="Vídeo local original.")
+    parser.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
+    parser.add_argument("--plan", required=True, help="seleccion-vN.json producido por plan.")
+    parser.add_argument("--accept", help="Frase literal con la que el usuario aceptó la propuesta.")
+    parser.add_argument("--directo", action="store_true",
+                        help="Monta sin revisión previa; no anula los avisos bloqueantes.")
+    parser.add_argument("--budget", type=float,
+                        help="Segundos de montaje por llamada; al agotarse devuelve 3 y se reanuda.")
+    parser.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
+                        help=f"Hilos de codificación (por defecto {DEFAULT_THREADS}).")
+    parser.set_defaults(run=render)
 ```
 
 - [ ] **Paso 4: Ejecuta la prueba y comprueba que pasa**
@@ -395,7 +436,7 @@ En `render.py`, sustituye el `return []` final de `sources_agree` por:
 y añade `warning` a la importación de `common`:
 
 ```python
-from common import BLOCKING, fingerprint, plan_sha256, positive, warning
+from common import BLOCKING, DEFAULT_THREADS, fingerprint, plan_sha256, positive, warning
 ```
 
 - [ ] **Paso 8: Ejecuta las pruebas y comprueba que pasan**
@@ -405,35 +446,55 @@ Esperado: `Ran 4 tests … OK`.
 
 - [ ] **Paso 9: Engancha `render` en `video.py`**
 
-Requisito previo (Tarea 1 del Plan 1): `video.py` ya no define `render`, `verify` ni `validate_plan`,
-ya trae `import common` y su `main()` despacha con `return args.run(args) or 0`. Si alguna de las tres
-funciones sigue ahí, bórrala en este mismo paso: el `import render` chocaría con el nombre de la
-función.
+Requisito previo (Tarea 1 del Plan 1): `video.py` ya no define `render`, `verify` ni `validate_plan`, ni
+conserva ningún resto del subcomando de la 0.1.0 (ni su bloque del analizador ni su entrada de
+despacho): no hay nada que borrar. Ya trae `import common` e `import plan`, y `build_parser()` termina
+en `plan.register(sub)` y `return parser`. El enganche son exactamente dos líneas.
 
-Dentro de `build_parser()`, donde estaba el bloque del subcomando `render` de la 0.1.0 (desde
-`p = sub.add_parser("render", …)` hasta `help=f"Hilos de codificación (por defecto {DEFAULT_THREADS}).")`),
-deja una sola línea, junto a los `register` de los demás módulos hermanos:
+Añade `import render` justo detrás de `import plan`. Va **después** de `sys.dont_write_bytecode =
+True`, que ha de ejecutarse antes de importar cualquier módulo hermano (la skill puede vivir en una
+caché de plugins de solo lectura):
 
 ```python
+import common
+import plan
+import render
+```
+
+Y en `build_parser()`, tras `plan.register(sub)` y antes de `return parser`:
+
+```python
+    plan.register(sub)
     render.register(sub)
+    return parser
 ```
 
 El registro es el convenido para los cuatro módulos: cada uno expone `register(sub)`, crea su
 subparser y fija `parser.set_defaults(run=<función>)`; `video.main()` hace `return args.run(args) or 0`
-y no conoce ningún diccionario de despacho. Si en `main()` queda el diccionario de la 0.1.0, retira de
-él la entrada `"render"`.
+y no conoce ningún diccionario de despacho. Como `render.register` ya tiene su cuerpo completo (Paso
+3), este enganche no deja ningún subcomando roto entre commits.
 
-Añade arriba, junto a las demás importaciones de módulos hermanos:
+- [ ] **Paso 10: Comprueba que el enganche no rompe nada**
 
-```python
-import render
+Ejecuta:
+
+```bash
+python -B plugins/resumir-video/skills/resumir-video/scripts/video.py --help
+python -B plugins/resumir-video/skills/resumir-video/scripts/video.py check
+python -B plugins/resumir-video/skills/resumir-video/scripts/video.py plan --help
+python -B plugins/resumir-video/skills/resumir-video/scripts/video.py render --help
+python -B plugins/resumir-video/skills/resumir-video/scripts/video.py render fuente.mkv --work w --plan p.json
+python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_video.py"
+python -B -m unittest discover -s tests
 ```
 
-- [ ] **Paso 10: Comprueba que la ayuda se genera**
-
-Ejecuta: `python -B plugins/resumir-video/skills/resumir-video/scripts/video.py render --help`
-Esperado: FALLA con `NotImplementedError` procedente de `register`; eso confirma que el enganche
-llega al módulo nuevo. Se completará en la Tarea 10.
+Esperado: la ayuda general lista `render` junto a los demás subcomandos; `check` imprime su informe
+JSON como antes; `plan --help` y `render --help` muestran sus opciones (`render` con `video`,
+`--work`, `--plan`, `--accept`, `--directo`, `--budget` y `--threads`); `test_video.py` sigue en
+`Ran 12 tests … OK` y `tests` en `Ran 23 tests … OK`, los mismos recuentos que antes del enganche; y
+la orden `render` con argumentos termina con código 1 y `Error: render aún no está implementado` por
+la salida de errores (el `RuntimeError` de `render`, que `main()` ya captura). Se completará en la
+Tarea 10.
 
 - [ ] **Paso 11: Confirma los cambios**
 
@@ -455,47 +516,94 @@ git commit -m "feat(render): exige aceptación literal y rechaza avisos bloquean
 
 **Interfaces:**
 - Consumes: `render.Refused`; de `common.py` → `MAX_SPANS: int` (= 40, §8; vive en `common.py` porque
-  `plan.py` reparte los mismos subcortes), `frames_for(length, rate, speed) -> int`,
-  `samples_for(n_frames, rate, sample_rate) -> int`, `output_interval(rate) -> float`,
-  `run(args, cwd=None) -> str`.
+  `plan.py` reparte los mismos subcortes), `output_interval(rate) -> float`,
+  `run(args, cwd=None) -> str`; de `plan.py` (solo en las pruebas) → `split` y `cut_row`, que son
+  quienes publican `segments[].{frames,samples,subcuts}`: `render` los lee y no repite su aritmética.
 - Produces: `render.ENCODER: tuple[str, ...]`;
   `render.cadence_of(plan) -> float`; `render.tempo_factors(speed) -> list[float]`;
-  `render.subcuts(segment, cadence, speed, sample_rate, limit=MAX_SPANS) -> list[dict]` donde cada
-  parte es `{"cut": int, "spans": list[tuple[float, float]], "frames": int, "samples": int,
+  `render.subcuts(segment, limit=MAX_SPANS) -> list[dict]`, que lee `segment["subcuts"]` tal como lo
+  publica `plan.cut_row` y solo valida su coherencia interna; cada parte es
+  `{"cut": int, "spans": list[tuple[float, float]], "frames": int, "samples": int,
   "index": int, "total": int}`; `render.cut_key(plan, part, release) -> str` (32 caracteres
   hexadecimales); `render.ffmpeg_release() -> str`.
 
 - [ ] **Paso 1: Escribe la prueba que falla**
 
-Añade a `test_render.py`:
+Añade `import plan as planner` a las importaciones de `test_render.py`, junto a `import common` (el
+alias evita pisar las variables `plan` de las pruebas), y a continuación:
 
 ```python
+def published(spans, speed=1.25, fps=25.0, sample_rate=48000, ident=1):
+    """One cut as plan.py publishes it: the steps of `plan.measure` and the real `plan.cut_row`."""
+    grid = {"fps": fps, "sample_rate": sample_rate, "interval": 1 / fps, "origin": 0.0}
+    row = {"segment": {"id": ident, "title": "T", "phrase": "p", "reason": "r",
+                       "audio_evidence": "a", "priority": 1},
+           "a": spans[0][0], "b": spans[-1][1], "spans": spans}
+    row["length"] = round(sum(end - start for start, end in spans), 6)
+    row["frames"] = common.frames_for(row["length"], fps, speed)
+    row["samples"] = common.samples_for(row["frames"], fps, sample_rate)
+    row["subcuts"] = planner.split(spans, row["frames"], row["samples"], grid, speed)
+    return planner.cut_row(row, ident, 0.0, grid)
+
+
 class SubcutTest(unittest.TestCase):
     def test_one_pass_keeps_the_whole_cut(self):
-        segment = {"id": 3, "spans": [[1.0, 2.0], [4.0, 5.0]]}
-        parts = render.subcuts(segment, 25.0, 1.25, 48000)
+        segment = published([(1.0, 2.0), (4.0, 5.0)], ident=3)
+        parts = render.subcuts(segment)
         self.assertEqual(len(parts), 1)
         self.assertEqual((parts[0]["frames"], parts[0]["samples"]), (40, 76800))
         self.assertEqual((parts[0]["index"], parts[0]["total"], parts[0]["cut"]), (0, 1, 3))
+        self.assertEqual(parts[0]["spans"], [(1.0, 2.0), (4.0, 5.0)])
 
-    def test_the_split_shares_out_n_and_m_without_losing_a_frame(self):
-        segment = {"id": 1, "spans": [[float(i), i + 0.5] for i in range(85)]}
-        parts = render.subcuts(segment, 25.0, 1.25, 48000)
-        self.assertEqual([len(part["spans"]) for part in parts], [40, 40, 5])
+    def test_the_split_reads_what_plan_published(self):
+        # 95 spans give the passes [40, 40, 15]; the last one takes what is left of N and M.
+        segment = published([(float(i), i + 0.5) for i in range(95)], speed=2.0)
+        parts = render.subcuts(segment)
+        self.assertEqual([len(part["spans"]) for part in parts], [40, 40, 15])
         self.assertEqual([part["total"] for part in parts], [3, 3, 3])
-        whole = common.frames_for(85 * 0.5, 25.0, 1.25)
-        self.assertEqual(sum(part["frames"] for part in parts), whole)
-        self.assertEqual(sum(part["samples"] for part in parts),
-                         common.samples_for(whole, 25.0, 48000))
+        self.assertEqual([(part["frames"], part["samples"]) for part in parts],
+                         [(250, 480000), (250, 480000), (94, 180480)])
+        self.assertEqual(sum(part["frames"] for part in parts), segment["frames"])
+        self.assertEqual(sum(part["samples"] for part in parts), segment["samples"])
 
-    def test_a_cut_that_yields_no_frame_is_refused_before_ffmpeg(self):
+    def test_an_exact_tie_passes_because_render_reads_what_plan_published(self):
+        # 25,92 - 24,76 is 1,1600000000000001 in floating point: adding it up again gives N = 15
+        # and M = 28800, while plan measured the rounded length and published 14 and 26880.
+        segment = published([(24.76, 25.92)], speed=2.0)
+        self.assertEqual((segment["frames"], segment["samples"]), (14, 26880))
+        self.assertEqual(common.frames_for(25.92 - 24.76, 25.0, 2.0), 15)
+        parts = render.subcuts(segment)
+        self.assertEqual((parts[0]["frames"], parts[0]["samples"]), (14, 26880))
+
+    def test_a_cut_without_passes_or_with_an_empty_one_is_refused(self):
+        whole = published([(1.0, 2.0)])
+        for missing in ({"subcuts": []}, {"subcuts": None}, {"id": 9}):
+            with self.subTest(missing=missing):
+                segment = {key: value for key, value in whole.items() if key != "subcuts"}
+                with self.assertRaisesRegex(render.Refused, "corte_vacio"):
+                    render.subcuts(dict(segment, **missing))
         # FFmpeg answers 0 to trim=end_frame=0 and writes an empty file: the guard lives in Python.
-        with self.assertRaisesRegex(render.Refused, "fotogramas"):
-            render.subcuts({"id": 9, "spans": [[1.0, 1.01]]}, 25.0, 1.25, 48000)
+        with self.assertRaisesRegex(render.Refused, "tramos, 0 fotogramas"):
+            render.subcuts(dict(whole, subcuts=[dict(whole["subcuts"][0], frames=0)]))
+        with self.assertRaisesRegex(render.Refused, "fotogramas y 0 muestras"):
+            render.subcuts(dict(whole, subcuts=[dict(whole["subcuts"][0], samples=0)]))
+
+    def test_a_cut_whose_numbers_do_not_add_up_is_refused(self):
+        segment = published([(float(i), i + 0.5) for i in range(85)])
+        with self.assertRaisesRegex(render.Refused, "declara 999 fotogramas"):
+            render.subcuts(dict(segment, frames=999))
+        with self.assertRaisesRegex(render.Refused, "declara .* 77 muestras"):
+            render.subcuts(dict(segment, samples=77))
+        first = segment["subcuts"][0]
+        swapped = dict(first, spans=first["spans"][::-1])
+        with self.assertRaisesRegex(render.Refused, "tramos no son los del corte"):
+            render.subcuts(dict(segment, subcuts=[swapped] + segment["subcuts"][1:]))
+        with self.assertRaisesRegex(render.Refused, "máximo es 30"):
+            render.subcuts(segment, limit=30)
 
     def test_the_fractional_rate_is_exact(self):
-        segment = {"id": 1, "spans": [[4.0, 5.0], [7.0, 8.0]]}
-        parts = render.subcuts(segment, 1 / common.output_interval("30000/1001"), 1.25, 48000)
+        rate = 1 / common.output_interval("30000/1001")
+        parts = render.subcuts(published([(4.0, 5.0), (7.0, 8.0)], fps=rate))
         self.assertEqual((parts[0]["frames"], parts[0]["samples"]), (48, 76877))
 
     def test_tempo_factors_multiply_back_to_the_speed(self):
@@ -510,7 +618,7 @@ class SubcutTest(unittest.TestCase):
 class KeyTest(unittest.TestCase):
     def test_every_ingredient_of_the_key_changes_it(self):
         plan = sample_plan()
-        part = render.subcuts(plan["segments"][0], 25.0, 1.25, 48000)[0]
+        part = render.subcuts(plan["segments"][0])[0]
         base = render.cut_key(plan, part, "8.0.1")
         self.assertEqual(len(base), 32)
         self.assertTrue(all(letter in "0123456789abcdef" for letter in base))
@@ -543,8 +651,8 @@ En `render.py`, amplía la importación y añade las constantes y funciones:
 import hashlib
 import math
 
-from common import (BLOCKING, MAX_SPANS, fingerprint, frames_for, output_interval, plan_sha256,
-                    positive, run, samples_for, warning)
+from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, fingerprint, output_interval, plan_sha256,
+                    positive, run, warning)
 
 ENCODER = ("-bf", "0", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-crf", "18", "-preset", "fast")
 
@@ -568,27 +676,36 @@ def tempo_factors(speed):
     return [speed ** (1 / steps)] * steps
 
 
-def subcuts(segment, cadence, speed, sample_rate, limit=MAX_SPANS):
-    """Passes of at most `limit` spans that share out N and M of the whole cut, §7.5 and §8."""
-    spans = [(float(start), float(end)) for start, end in segment["spans"]]
-    if not spans:
-        raise Refused(f"El corte {segment['id']} no tiene tramos.")
-    total_frames = frames_for(sum(end - start for start, end in spans), cadence, speed)
-    total_samples = samples_for(total_frames, cadence, sample_rate)
-    groups = [spans[i:i + limit] for i in range(0, len(spans), limit)]
-    parts, frames, samples = [], 0, 0
-    for index, group in enumerate(groups):
-        if index == len(groups) - 1:
-            count, length = total_frames - frames, total_samples - samples
-        else:
-            count = frames_for(sum(end - start for start, end in group), cadence, speed)
-            length = samples_for(count, cadence, sample_rate)
-        if count < 1 or length < 1:
-            raise Refused(f"El corte {segment['id']} deja {count} fotogramas y {length} muestras en "
-                          f"el subcorte {index + 1}/{len(groups)}: replanifícalo (aviso corte_vacio).")
-        parts.append({"cut": segment["id"], "spans": group, "frames": count, "samples": length,
-                      "index": index, "total": len(groups)})
-        frames, samples = frames + count, samples + length
+def subcuts(segment, limit=MAX_SPANS):
+    """Passes of one cut exactly as plan.py published them; render adds no arithmetic of its own."""
+    declared = segment.get("subcuts")
+    if not declared:
+        raise Refused(f"El corte {segment['id']} no tiene tramos ni subcortes publicados: "
+                      f"replanifica (aviso corte_vacio).")
+    parts, joined = [], []
+    for index, item in enumerate(declared):
+        if not {"spans", "frames", "samples"} <= item.keys():
+            raise Refused(f"El corte {segment['id']} tiene un subcorte publicado incompleto: "
+                          "replanifica.")
+        spans = [(float(start), float(end)) for start, end in item["spans"]]
+        frames, samples = item["frames"], item["samples"]
+        where = f"El corte {segment['id']} en el subcorte {index + 1}/{len(declared)}"
+        if not spans or frames < 1 or samples < 1:
+            raise Refused(f"{where} deja {len(spans)} tramos, {frames} fotogramas y {samples} "
+                          f"muestras: replanifica (aviso corte_vacio).")
+        if len(spans) > limit:
+            raise Refused(f"{where} lleva {len(spans)} tramos y el máximo es {limit}: replanifica.")
+        parts.append({"cut": segment["id"], "spans": spans, "frames": frames, "samples": samples,
+                      "index": index, "total": len(declared)})
+        joined.extend(spans)
+    frames, samples = sum(part["frames"] for part in parts), sum(part["samples"] for part in parts)
+    if (segment.get("frames"), segment.get("samples")) != (frames, samples):
+        raise Refused(f"El corte {segment['id']} declara {segment.get('frames')} fotogramas y "
+                      f"{segment.get('samples')} muestras, pero sus subcortes suman {frames} y "
+                      f"{samples}; vuelve a ejecutar plan sobre este medio.")
+    if joined != [(float(start), float(end)) for start, end in segment["spans"]]:
+        raise Refused(f"El corte {segment['id']} publica unos subcortes cuyos tramos no son los del "
+                      f"corte; vuelve a ejecutar plan sobre este medio.")
     return parts
 
 
@@ -609,14 +726,14 @@ def cut_key(plan, part, release):
 - [ ] **Paso 4: Ejecuta las pruebas y comprueba que pasan**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py"`
-Esperado: `Ran 10 tests … OK`.
+Esperado: `Ran 12 tests … OK`.
 
 - [ ] **Paso 5: Confirma los cambios**
 
 ```bash
 git add plugins/resumir-video/skills/resumir-video/scripts/render.py \
         plugins/resumir-video/skills/resumir-video/scripts/test_render.py
-git commit -m "feat(render): reparte cada corte en subcortes de 40 tramos con clave de caché por huella" \
+git commit -m "feat(render): lee los subcortes publicados por plan y clave de caché por huella" \
            -m "Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
@@ -632,7 +749,8 @@ git commit -m "feat(render): reparte cada corte en subcortes de 40 tramos con cl
 - Consumes: `render.tempo_factors`, `render.subcuts`; de `common.py` → `seconds(value) -> str`,
   `output_interval(rate) -> float`, `ffmpeg(*args, cwd=None)`, `timeline_start(data) -> float`.
 - Produces: `render.video_filter(spans, base, rate, speed, n_frames) -> str`, que incluye la guarda de
-  lectura `trim=end=<base + fin + 1/F>`; `render.audio_filter(spans, base, speed, m_samples, label="0:a") -> str`.
+  lectura `trim=end=<base + fin + 1/F>`; `render.audio_filter(spans, base, speed, m_samples, label="0:a") -> str`, cuya cadena empieza, como
+  exige §8, por `aresample=async=1:first_pts=0`.
 
 - [ ] **Paso 1: Escribe la prueba rápida que falla**
 
@@ -658,7 +776,8 @@ class FilterTest(unittest.TestCase):
 
     def test_the_audio_filter_forces_the_exact_sample_count(self):
         text = render.audio_filter([(4.0, 5.0), (7.0, 8.0)], 0.0, 1.25, 76800)
-        self.assertTrue(text.startswith("[0:a]asplit=2[s0][s1];"))
+        # §8 opens the audio chain with aresample; it changes neither N nor M (measured).
+        self.assertTrue(text.startswith("[0:a]aresample=async=1:first_pts=0,asplit=2[s0][s1];"))
         self.assertIn("[s0]atrim=start=4.000000:end=5.000000,asetpts=N/SR/TB[t0];", text)
         self.assertIn("[s1]atrim=start=7.000000:end=8.000000,asetpts=N/SR/TB[t1];", text)
         self.assertIn("[t0][t1]concat=n=2:v=0:a=1,atempo=1.250000,", text)
@@ -669,7 +788,7 @@ class FilterTest(unittest.TestCase):
 
     def test_the_chosen_track_replaces_the_default_label(self):
         text = render.audio_filter([(0.0, 1.0)], 0.0, 1.0, 48000, label="0:3")
-        self.assertTrue(text.startswith("[0:3]asplit=1[s0];"))
+        self.assertTrue(text.startswith("[0:3]aresample=async=1:first_pts=0,asplit=1[s0];"))
 ```
 
 - [ ] **Paso 2: Ejecuta las pruebas y comprueba que fallan**
@@ -705,7 +824,12 @@ def audio_filter(spans, base, speed, m_samples, label="0:a"):
     # No reading guard here: the per-span `atrim=start=…:end=…` do end their branches and concat
     # closes the graph (measured: 8.02 s read of a 300 s medium), unlike the video `select`.
     count = len(spans)
-    chain = [f"[{label}]asplit=" + str(count) + "".join(f"[s{i}]" for i in range(count))]
+    # §8 opens the chain with aresample. Measured on FFmpeg 8.0.1: the output is byte for byte the
+    # same as without it (N and M included), because the atrim times are absolute; the only price
+    # is that first_pts=0 pads with silence from 0 to the first instant read, so the pass takes
+    # longer the further into the medium the cut is (1.35 s against 0.14 s at 3000 s).
+    chain = [f"[{label}]aresample=async=1:first_pts=0,asplit={count}"
+             + "".join(f"[s{i}]" for i in range(count))]
     for index, (start, end) in enumerate(spans):
         chain.append(f"[s{index}]atrim=start={seconds(base + start)}:end={seconds(base + end)},"
                      f"asetpts=N/SR/TB[t{index}]")
@@ -723,7 +847,8 @@ Esperado: `Ran 5 tests … OK`.
 
 - [ ] **Paso 5: Escribe la prueba de integración que falla**
 
-Añade a `test_render.py`, antes de `if __name__`:
+Añade `import wave` a la cabecera de `test_render.py` (entre `import unittest` y el bloque de
+módulos propios) y, antes de `if __name__`:
 
 ```python
 def coded(path, length=10, rate=25):
@@ -821,14 +946,48 @@ class FilterOnMediaTest(unittest.TestCase):
                           *render.ENCODER, clip)
             # s = 3.0 of the medium is frame 75: the container offset must not move the content.
             self.assertEqual(luminances(clip), list(range(75, 100)))
+
+    def test_the_reference_cut_keeps_exactly_143_frames_and_274560_samples(self):
+        # Reference cut of the measurements: 7.16 s of source at x1.25 are N = 143 and M = 274560.
+        spans = [(2.0, 5.08), (5.92, 10.0)]
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "fuente.mkv"
+            coded(source)
+            picture = root / "corte.mkv"
+            common.ffmpeg("-ss", "0.000000", "-noaccurate_seek", "-copyts", "-i", source,
+                          "-map", "0:v:0", "-an", "-sn", "-dn",
+                          "-vf", render.video_filter(spans, 0.0, "25/1", 1.25, 143),
+                          *render.ENCODER, picture)
+            self.assertEqual(len(luminances(picture)), 143)
+
+            def samples(chain, name):
+                target = root / name
+                common.ffmpeg("-ss", "0.000000", "-noaccurate_seek", "-copyts", "-i", source,
+                              "-filter_complex", chain, "-map", "[a]", "-vn", "-c:a", "pcm_s16le",
+                              target)
+                with wave.open(str(target)) as stream:
+                    first = int.from_bytes(stream.readframes(1), "little", signed=True)
+                    return stream.getnframes(), first
+
+            chain = render.audio_filter(spans, 0.0, 1.25, 274560)
+            self.assertTrue(chain.startswith("[0:a]aresample=async=1:first_pts=0,"))
+            count, first = samples(chain, "con.wav")
+            self.assertEqual(count, 274560)
+            # The ramp is t/10 of full scale: the first sample is the source at 2.0 s.
+            self.assertLessEqual(abs(first - round(0.2 * 32768)), 4)
+            # aresample at the head neither adds nor removes a sample (measured).
+            plain = chain.replace("aresample=async=1:first_pts=0,", "")
+            self.assertEqual(samples(plain, "sin.wav"), (count, first))
 ```
 
 - [ ] **Paso 6: Ejecuta la prueba de integración y comprueba que pasa**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k FilterOnMedia`
-Esperado: `Ran 3 tests … OK` (unos 15 s). Medido en esta máquina: 40 fotogramas con luminancias
-`100…124` y `175…199`; 70 con el retenido intacto; y 25 con luminancias `75…99` sobre el contenedor
-desplazado 7 s.
+Esperado: `Ran 4 tests … OK` (unos 15 s). Medido en esta máquina: 40 fotogramas con luminancias
+`100…124` y `175…199`; 70 con el retenido intacto; 25 con luminancias `75…99` sobre el contenedor
+desplazado 7 s; y, en el corte de referencia, 143 fotogramas y 274 560 muestras con `aresample` al
+frente de la cadena de audio.
 
 - [ ] **Paso 7: Confirma los cambios**
 
@@ -855,6 +1014,9 @@ git commit -m "feat(render): filtros por corte con fps inicial, guarda de lectur
   `render.counted_samples(path, sample_rate, folder) -> int`;
   `render.render_part(data, plan, part, target, threads) -> None`, **sin acotar la lectura con `-t`
   ni con `-to`** (la guarda va en el filtro, Tarea 3);
+  `render.cut_note(part, release) -> dict`, la nota que acompaña a cada corte cacheado;
+  `render.is_cached(plan, part, cortes, release) -> bool`, **el único criterio** de «ya está en la
+  caché» (lo usan `cached_part`, `build` y, en la Tarea 11, `estimate`);
   `render.cached_part(data, plan, part, cortes, release, threads) -> Path`.
 
 - [ ] **Paso 1: Escribe la prueba que falla**
@@ -917,7 +1079,7 @@ class PartTest(unittest.TestCase):
             plan["settings"]["speed"] = 1.0
             plan["audio_stream"] = 1
             data = common.probe(source)
-            part = render.subcuts(plan["segments"][0], 25.0, 1.0, 48000)[0]
+            part = render.subcuts(plan["segments"][0])[0]
             target = root / "cierre.mkv"
             render.render_part(data, plan, part, target, 1)
             self.assertEqual(render.counted_frames(target), 25)
@@ -930,7 +1092,7 @@ class PartTest(unittest.TestCase):
             root = Path(temporary)
             source, plan = self.prepared(root)
             data = common.probe(source)
-            part = render.subcuts(plan["segments"][0], 25.0, 1.25, 48000)[0]
+            part = render.subcuts(plan["segments"][0])[0]
             target = root / "corte.mkv"
             render.render_part(data, plan, part, target, 1)
             self.assertEqual(render.counted_frames(target), 40)
@@ -944,7 +1106,7 @@ class PartTest(unittest.TestCase):
             data = common.probe(source)
             cortes = root / "cortes"
             cortes.mkdir()
-            part = render.subcuts(plan["segments"][0], 25.0, 1.25, 48000)[0]
+            part = render.subcuts(plan["segments"][0])[0]
             release = render.ffmpeg_release()
             first = render.cached_part(data, plan, part, cortes, release, 1)
             stamp = first.stat().st_mtime_ns
@@ -957,6 +1119,16 @@ class PartTest(unittest.TestCase):
             self.assertTrue(third.with_suffix(".json").is_file())
             note = json.loads(third.with_suffix(".json").read_text(encoding="utf-8"))
             self.assertEqual((note["frames"], note["samples"]), (40, 76800))
+            self.assertFalse(list(cortes.glob("*.parcial")))
+            # A note that disagrees with the part is as bad as none: `is_cached` says so and the
+            # cut is rebuilt, which is what `build` and the estimate of Tarea 11 also rely on.
+            self.assertTrue(render.is_cached(plan, part, cortes, release))
+            note["frames"] = 41
+            third.with_suffix(".json").write_text(json.dumps(note), encoding="utf-8")
+            self.assertFalse(render.is_cached(plan, part, cortes, release))
+            fourth = render.cached_part(data, plan, part, cortes, release, 1)
+            kept = json.loads(fourth.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual((kept["frames"], kept["samples"]), (40, 76800))
             self.assertFalse(list(cortes.glob("*.parcial")))
 ```
 
@@ -980,7 +1152,8 @@ def counted_frames(path):
 
 def counted_samples(path, sample_rate, folder):
     """Samples of the audio track: ffprobe gives none for PCM in Matroska, so it is decoded."""
-    with tempfile.TemporaryDirectory(prefix="muestras-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="muestras-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         # 24-bit PCM is WAVE_FORMAT_EXTENSIBLE and `wave` refuses it: decode to 16 bits first.
         copy = Path(temporary) / "cuenta.wav"
         ffmpeg("-i", path, "-map", "0:a:0", "-ac", "1", "-ar", str(sample_rate),
@@ -1033,8 +1206,8 @@ def render_part(data, plan, part, target, threads):
 Añade `video_stream` a la importación de `common`:
 
 ```python
-from common import (BLOCKING, ffmpeg, fingerprint, frames_for, output_interval, plan_sha256,
-                    positive, publish, run, samples_for, save, seconds, seek_margin,
+from common import (BLOCKING, DEFAULT_THREADS, MAX_SPANS, ffmpeg, fingerprint, output_interval,
+                    plan_sha256, positive, publish, run, save, seconds, seek_margin,
                     timeline_start, video_stream, warning)
 ```
 
@@ -1043,25 +1216,39 @@ from common import (BLOCKING, ffmpeg, fingerprint, frames_for, output_interval, 
 En `render.py`, añade:
 
 ```python
+def cut_note(part, release):
+    """What travels beside a cached cut: its numbers, so a later call can trust the file."""
+    return {"cut": part["cut"], "index": part["index"], "total": part["total"],
+            "spans": [[round(start, 3), round(end, 3)] for start, end in part["spans"]],
+            "frames": part["frames"], "samples": part["samples"], "ffmpeg": release}
+
+
+def is_cached(plan, part, cortes, release):
+    """The one criterion for «already cached»: the cut, and a note whose counts are the part's."""
+    target = cortes / f"{cut_key(plan, part, release)}.mkv"
+    note = target.with_suffix(".json")
+    if not (target.is_file() and note.is_file()):
+        return False
+    try:
+        kept = json.loads(note.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(kept, dict) and (kept.get("frames"), kept.get("samples")) == (
+        part["frames"], part["samples"])
+
+
 def cached_part(data, plan, part, cortes, release, threads):
     """Render the part unless the cache already holds it with the right frame and sample counts."""
     target = cortes / f"{cut_key(plan, part, release)}.mkv"
     note = target.with_suffix(".json")
-    if target.is_file() and note.is_file():
-        try:
-            kept = json.loads(note.read_text(encoding="utf-8"))
-        except ValueError:
-            kept = {}
-        if (kept.get("frames"), kept.get("samples")) == (part["frames"], part["samples"]):
-            return target
+    if is_cached(plan, part, cortes, release):
+        return target
     # A cut without its note, or with a note that disagrees, is not trustworthy: rebuild both.
     for path in (target, note):
         if path.exists():
             path.replace(path.with_suffix(path.suffix + ".parcial"))
     render_part(data, plan, part, target, threads)
-    save(note, {"cut": part["cut"], "index": part["index"], "total": part["total"],
-                "spans": [[round(start, 3), round(end, 3)] for start, end in part["spans"]],
-                "frames": part["frames"], "samples": part["samples"], "ffmpeg": release})
+    save(note, cut_note(part, release))
     for path in (target, note):
         leftover = path.with_suffix(path.suffix + ".parcial")
         if leftover.exists():
@@ -1092,29 +1279,65 @@ git commit -m "feat(render): monta cada subcorte con recuento forzado y caché p
 - Test: `plugins/resumir-video/skills/resumir-video/scripts/test_render.py`
 
 **Interfaces:**
-- Consumes: `render.cached_part`, `render.Pending`, `render.render_part`; de `common.py` →
-  `MEMORY_PATTERNS: tuple[str, ...]`.
-- Produces: `render.MEMORY_CODES: tuple[str, ...]`; `render.retryable(message) -> bool`;
-  `render.part_label(part) -> str`; `render.all_parts(plan, cadence) -> list[dict]`, que además
-  comprueba los `subcuts` publicados por `plan.py`;
-  `render.build(data, plan, cortes, release, threads, budget) -> list[Path]`.
+- Consumes: `render.cached_part`, `render.is_cached`, `render.Pending`, `render.render_part`; de
+  `common.py` → `MEMORY_PATTERNS: tuple[str, ...]`.
+- Produces: `render.MEMORY_CODES: tuple[int, ...]` (137, 3221225495, −9: el complemento numérico de
+  `MEMORY_PATTERNS`, declarado en el contrato de la cabecera); `render.exit_code(message) -> int |
+  None`; `render.retryable(message) -> bool`; `render.part_label(part) -> str`;
+  `render.all_parts(plan) -> list[dict]`, que encadena los `subcuts` publicados por `plan.py` (los
+  comprueba `render.subcuts`); `render.build(data, plan, cortes, release, threads, budget) ->
+  list[Path]`, cuyo progreso («Corte {done}/{total}») va a **stderr**: la stdout de `render` queda
+  para el JSON de estado del código 3. `done` y `total` cuentan solo los cortes que **esta llamada**
+  monta (los que ya estaban en la caché no son ni lo uno ni lo otro), de modo que `pending = total −
+  done` es exactamente lo que falta y una reanudación siempre monta al menos uno antes de lanzar
+  `Pending`.
 
 - [ ] **Paso 1: Escribe la prueba rápida que falla**
 
-Añade a `test_render.py`:
+Añade `import contextlib` e `import io` a la cabecera de `test_render.py` (por orden alfabético,
+antes de `import json`), `import time` tras `import tempfile` y `from unittest import mock` justo
+tras `import unittest`; a continuación,
+al final del archivo:
 
 ```python
+MEMORY_FAILURE = "ffmpeg falló (código 1):\nCannot allocate memory"
+
+
+def cuts_plan(count):
+    """A plan of `count` one-pass cuts of 40 frames, enough for the cache without any FFmpeg."""
+    return sample_plan(segments=[sample_segment(id=n, numero=n, title=f"C{n}", start=2.0 * n,
+                                                end=2.0 * n + 2.0,
+                                                spans=[[2.0 * n, 2.0 * n + 2.0]],
+                                                frames=40, samples=76800)
+                                 for n in range(1, count + 1)])
+
+
+def stub_render(calls, failures=()):
+    """Stands in for `render_part`: records the threads, fails as told, then leaves a cut."""
+    def stub(data, plan, part, target, threads):
+        calls.append(threads)
+        time.sleep(0.03)                # longer than the tick of the monotonic clock on Windows
+        if len(calls) <= len(failures):
+            raise ValueError(failures[len(calls) - 1])
+        target.write_bytes(b"corte")
+    return stub
+
+
 class BudgetTest(unittest.TestCase):
     def test_only_recognised_memory_failures_are_retried(self):
         for text in ("ffmpeg falló (código 1):\nCannot allocate memory",
                      "ffmpeg falló (código 1):\nOut of memory",
                      "ffmpeg falló (código 1):\nav_buffer_alloc() failed",
                      "ffmpeg falló (código 137):\nmatado",
-                     "ffmpeg falló (código 3221225495):\n"):
+                     "ffmpeg falló (código 3221225495):\n",
+                     "ffmpeg falló (código -9):\n"):
             with self.subTest(text=text):
                 self.assertTrue(render.retryable(text))
         for text in ("ffmpeg falló (código 1):\nInvalid data found when processing input",
-                     "ffmpeg falló (código 2):\nNo such file or directory"):
+                     "ffmpeg falló (código 2):\nNo such file or directory",
+                     # The code is read as a number from the head, never as a substring of stderr.
+                     "ffmpeg falló (código 1):\nframe 137 duplicado (código 137)",
+                     "ffmpeg falló (código 1370):\n"):
             with self.subTest(text=text):
                 self.assertFalse(render.retryable(text))
 
@@ -1133,40 +1356,135 @@ class BudgetTest(unittest.TestCase):
                                      sample_segment(id=4, numero=2, title="B", start=5.0, end=9.0,
                                                     spans=[[5.0, 6.0], [8.0, 9.0]],
                                                     frames=40, samples=76800)])
-        parts = render.all_parts(plan, 25.0)
+        parts = render.all_parts(plan)
         self.assertEqual([part["cut"] for part in parts], [1, 4])
         self.assertEqual(sum(part["frames"] for part in parts), 80)
 
     def test_a_plan_whose_estimate_disagrees_is_refused(self):
-        plan = sample_plan(segments=[sample_segment(spans=[[1.0, 3.0]], frames=41, samples=76800)])
+        published = [{"spans": [[1.0, 3.0]], "frames": 40, "samples": 76800}]
+        plan = sample_plan(segments=[sample_segment(spans=[[1.0, 3.0]], frames=41, samples=76800,
+                                                    subcuts=published)])
         with self.assertRaisesRegex(render.Refused, "41"):
-            render.all_parts(plan, 25.0)
-        # The subcuts published by plan.py must match the ones render recomputes from the spans.
+            render.all_parts(plan)
+        # The subcuts must add up to the cut's own spans, not just to its totals.
         moved = sample_plan(segments=[sample_segment(
             spans=[[1.0, 3.0]], frames=40, samples=76800,
             subcuts=[{"spans": [[1.0, 2.0]], "frames": 20, "samples": 38400},
                      {"spans": [[2.0, 3.0]], "frames": 20, "samples": 38400}])])
         with self.assertRaisesRegex(render.Refused, "subcortes"):
-            render.all_parts(moved, 25.0)
+            render.all_parts(moved)
+
+    def test_one_criterion_says_what_is_already_cached(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary)
+            plan = cuts_plan(1)
+            part = render.subcuts(plan["segments"][0])[0]
+            target = cortes / f"{render.cut_key(plan, part, '8.0.1')}.mkv"
+            note = target.with_suffix(".json")
+            self.assertFalse(render.is_cached(plan, part, cortes, "8.0.1"))
+            target.write_bytes(b"corte")
+            self.assertFalse(render.is_cached(plan, part, cortes, "8.0.1"))       # no note
+            common.save(note, render.cut_note(part, "8.0.1"))
+            self.assertTrue(render.is_cached(plan, part, cortes, "8.0.1"))
+            for damaged in (dict(render.cut_note(part, "8.0.1"), frames=41), [], "{"):
+                note.unlink()
+                if isinstance(damaged, str):
+                    note.write_text(damaged, encoding="utf-8")
+                else:
+                    common.save(note, damaged)
+                with self.subTest(note=damaged):
+                    self.assertFalse(render.is_cached(plan, part, cortes, "8.0.1"))
+
+    def test_a_memory_failure_is_retried_once_with_one_thread_and_leaves_no_debris(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary)
+            plan = cuts_plan(2)
+            first = render.subcuts(plan["segments"][0])[0]
+            key = render.cut_key(plan, first, "8.0.1")
+            (cortes / f"{key}.mkv").write_bytes(b"roto")       # damaged: set aside as `.parcial`
+            calls = []
+            with mock.patch.object(render, "render_part", stub_render(calls, [MEMORY_FAILURE])), \
+                    contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                cuts = render.build(None, plan, cortes, "8.0.1", 4, None)
+            # The first pass fails with 4 threads and is repeated once with 1; the second is
+            # mounted normally: the retry does not change the threads of what follows.
+            self.assertEqual(calls, [4, 1, 4])
+            self.assertEqual(len(cuts), 2)
+            self.assertFalse(list(cortes.glob("*.parcial")))
+            note = json.loads((cortes / f"{key}.json").read_text(encoding="utf-8"))
+            note.pop("segundos", None)          # the seconds it cost arrive with Tarea 11
+            self.assertEqual(note, render.cut_note(first, "8.0.1"))
+            # Progress goes to stderr; stdout stays clean for the JSON state of code 3.
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("Corte 2/2", err.getvalue())
+
+    def test_only_memory_failures_get_a_retry_and_only_one(self):
+        cases = (("Invalid argument", ["ffmpeg falló (código 1):\nInvalid argument"], [4]),
+                 ("second memory failure", [MEMORY_FAILURE, MEMORY_FAILURE], [4, 1]))
+        for name, failures, expected in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory(prefix="rv-") as temporary:
+                cortes, calls = Path(temporary), []
+                with mock.patch.object(render, "render_part", stub_render(calls, failures)), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(ValueError):
+                        render.build(None, cuts_plan(1), cortes, "8.0.1", 4, None)
+                self.assertEqual(calls, expected)
+                self.assertFalse(list(cortes.glob("*.parcial")))
+
+    def test_a_resumption_mounts_at_least_one_cut_before_it_stops(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            cortes = Path(temporary)
+            plan = cuts_plan(3)
+            first = render.subcuts(plan["segments"][0])[0]
+            target = cortes / f"{render.cut_key(plan, first, '8.0.1')}.mkv"
+            target.write_bytes(b"corte")                        # the first cut is already cached
+            common.save(target.with_suffix(".json"), render.cut_note(first, "8.0.1"))
+            calls = []
+            with mock.patch.object(render, "render_part", stub_render(calls)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(render.Pending) as caught:
+                    render.build(None, plan, cortes, "8.0.1", 1, 0.01)
+                # `done` and `total` count what this call mounts: the cached cut is neither, so
+                # the resumption advanced by one and one is left.
+                self.assertEqual(calls, [1])
+                self.assertEqual(caught.exception.state,
+                                 {"done": 1, "total": 2, "pending": 1,
+                                  "bloques": ["corte 3 subcorte 1/1"]})
+                self.assertEqual(len(render.build(None, plan, cortes, "8.0.1", 1, None)), 3)
+                self.assertEqual(calls, [1, 1])
 ```
 
 - [ ] **Paso 2: Ejecuta las pruebas y comprueba que fallan**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k BudgetTest`
-Esperado: FALLA con `AttributeError: module 'render' has no attribute 'retryable'`.
+Esperado: FALLA con `AttributeError: module 'render' has no attribute 'retryable'` (la primera y las
+que llaman a `build`, a `is_cached` o a `Pending`, cada una por su nombre).
 
 - [ ] **Paso 3: Escribe la implementación mínima**
 
 En `render.py`, añade `time` a las importaciones, `MEMORY_PATTERNS` a las de `common` y:
 
 ```python
-# Python reports STATUS_NO_MEMORY (0xC0000017) as 3221225495 on Windows and the OOM killer as 137.
-MEMORY_CODES = ("código 137", "código 3221225495")
+# The numeric half of §11's five memory cases; `common.MEMORY_PATTERNS` holds the three strings.
+# Windows reports STATUS_NO_MEMORY (0xC0000017) as 3221225495, the OOM killer gives 137 and, on
+# POSIX, a SIGKILLed child is -9.
+MEMORY_CODES = (137, 3221225495, -9)
+
+
+def exit_code(message):
+    """The returncode that `common.run` writes at the head of its error as «(código N)»."""
+    head, found, tail = message.partition("(código ")
+    try:
+        return int(tail.partition(")")[0]) if found else None
+    except ValueError:
+        return None
 
 
 def retryable(message):
     """Only the memory failures listed in §11 deserve the single retry; an AVERROR does not."""
-    return any(pattern in message for pattern in MEMORY_PATTERNS + MEMORY_CODES)
+    return (any(pattern in message for pattern in MEMORY_PATTERNS)
+            or exit_code(message) in MEMORY_CODES)
 
 
 def part_label(part):
@@ -1174,66 +1492,53 @@ def part_label(part):
     return f"corte {part['cut']} subcorte {part['index'] + 1}/{part['total']}"
 
 
-def all_parts(plan, cadence):
-    """Every pass the plan needs, in order, checking the numbers that plan wrote for each cut."""
-    settings = plan["settings"]
+def all_parts(plan):
+    """Every pass the plan needs, in order; `subcuts` refuses a cut whose numbers do not add up."""
     parts = []
     for segment in plan["segments"]:
-        pieces = subcuts(segment, cadence, float(settings["speed"]), settings["sample_rate"])
-        frames, samples = sum(p["frames"] for p in pieces), sum(p["samples"] for p in pieces)
-        if (segment.get("frames"), segment.get("samples")) != (frames, samples):
-            raise Refused(f"El corte {segment['id']} declara {segment.get('frames')} fotogramas y "
-                          f"{segment.get('samples')} muestras, pero sus tramos dan {frames} y "
-                          f"{samples}; vuelve a ejecutar plan sobre este medio.")
-        declared = segment.get("subcuts")
-        if isinstance(declared, list) and declared:
-            mine = [(len(piece["spans"]), piece["frames"], piece["samples"]) for piece in pieces]
-            theirs = [(len(piece.get("spans") or []), piece.get("frames"), piece.get("samples"))
-                      for piece in declared]
-            if mine != theirs:
-                raise Refused(f"El corte {segment['id']} publica unos subcortes que no cuadran con "
-                              f"sus tramos ({theirs} frente a {mine}); vuelve a ejecutar plan.")
-        parts.extend(pieces)
+        parts.extend(subcuts(segment))
     return parts
 
 
 def build(data, plan, cortes, release, threads, budget):
     """Render every missing part, one retry on memory failures, honouring the time budget (§11)."""
-    parts = all_parts(plan, cadence_of(plan))
-    started, done, cuts = time.monotonic(), 0, []
+    parts = all_parts(plan)
+    fresh = [not is_cached(plan, part, cortes, release) for part in parts]
+    # `done` and `total` count only what this call mounts: what was cached is neither.
+    started, done, total, cuts = time.monotonic(), 0, sum(fresh), []
     for index, part in enumerate(parts):
-        target = cortes / f"{cut_key(plan, part, release)}.mkv"
-        fresh = not (target.is_file() and target.with_suffix(".json").is_file())
-        # `done` guards the first pass: a budget smaller than one cut must still make progress.
-        if fresh and budget and done and time.monotonic() - started >= budget:
-            raise Pending(done, len(parts), [part_label(item) for item in parts[index:]])
+        # `done` guards the first pass: a resumption always mounts one cut before it stops.
+        if fresh[index] and budget and done and time.monotonic() - started >= budget:
+            raise Pending(done, total, [part_label(item) for item, missing
+                                        in zip(parts[index:], fresh[index:]) if missing])
         try:
             cuts.append(cached_part(data, plan, part, cortes, release, threads))
         except ValueError as exc:
             if not retryable(str(exc)):
                 raise
-            print(f"Falta de memoria en el corte {part['cut']}; se repite con un solo hilo.",
-                  flush=True)
-            # The one retry allowed by §11: -threads 1 and -filter_threads 1, never a second one.
-            render_part(data, plan, part, target, 1)
-            save(target.with_suffix(".json"),
-                 {"cut": part["cut"], "index": part["index"], "total": part["total"],
-                  "spans": [[round(a, 3), round(b, 3)] for a, b in part["spans"]],
-                  "frames": part["frames"], "samples": part["samples"], "ffmpeg": release})
-            cuts.append(target)
-        done += 1
-        print(f"Corte {done}/{len(parts)}", flush=True)
+            print(f"Falta de memoria en el {part_label(part)}; se repite con un solo hilo.",
+                  file=sys.stderr, flush=True)
+            # The one retry allowed by §11: -threads 1 and -filter_threads 1. A second failure
+            # propagates. What the failed attempt set aside as `.parcial` goes before the retry.
+            for leftover in cortes.glob(f"{cut_key(plan, part, release)}.*.parcial"):
+                leftover.unlink()
+            cuts.append(cached_part(data, plan, part, cortes, release, 1))
+        if fresh[index]:
+            done += 1
+            # Stderr: stdout carries only the JSON state of code 3 (§12), never progress lines.
+            print(f"Corte {done}/{total}", file=sys.stderr, flush=True)
     return cuts
 ```
 
 `render_part` ya aplica `-threads N -filter_threads N` a sus dos pasadas, así que el reintento solo
-necesita pasar `1`. Comprobado en esta máquina que el audio acepta ambas opciones antes de `-i` y
-sigue dando las 76 800 muestras exactas.
+necesita pasar `1`, y lo hace volviendo a `cached_part`: la nota se construye con `cut_note`, sin
+duplicar el diccionario. Comprobado en esta máquina que el audio acepta ambas opciones antes de
+`-i` y sigue dando las 76 800 muestras exactas.
 
 - [ ] **Paso 4: Ejecuta las pruebas rápidas y comprueba que pasan**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k BudgetTest`
-Esperado: `Ran 4 tests … OK`.
+Esperado: `Ran 8 tests … OK`.
 
 - [ ] **Paso 5: Escribe la prueba de integración de reanudación**
 
@@ -1393,8 +1698,9 @@ git commit -m "feat(render): ensambla con dos concat demuxer y una sola codifica
 - Consumes: `render.counted_frames`, `render.Invalid`; de `common.py` → `ffmpeg`, `probe`, `streams`,
   `stream_duration`.
 - Produces: `render.SYNC = 0.1`; `render.decode_check(path, threads) -> None`;
-  `render.totals_check(path, parts, threads) -> dict` con claves `fotogramas_esperados`,
-  `fotogramas`, `video_s`, `audio_s`, `desfase_s`.
+  `render.totals_check(path, parts) -> dict` con claves `fotogramas_esperados`,
+  `fotogramas`, `video_s`, `audio_s`, `desfase_s` (`threads` no entra: el cuerpo solo decodifica con
+  `probe`/`streams`/`stream_duration`, sin lanzar FFmpeg).
 
 - [ ] **Paso 1: Escribe la prueba que falla**
 
@@ -1428,7 +1734,7 @@ class TotalsTest(unittest.TestCase):
             root = Path(temporary)
             _, plan, _, staged = assembled(root)
             render.decode_check(staged, 1)
-            report = render.totals_check(staged, render.all_parts(plan, 25.0), 1)
+            report = render.totals_check(staged, render.all_parts(plan))
             self.assertEqual(report["fotogramas"], 70)
             self.assertEqual(report["fotogramas_esperados"], 70)
             self.assertLessEqual(report["desfase_s"], render.SYNC)
@@ -1437,10 +1743,10 @@ class TotalsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             _, plan, _, staged = assembled(root)
-            parts = render.all_parts(plan, 25.0)
+            parts = render.all_parts(plan)
             parts[0] = dict(parts[0], frames=parts[0]["frames"] + 5)
             with self.assertRaisesRegex(render.Invalid, "75"):
-                render.totals_check(staged, parts, 1)
+                render.totals_check(staged, parts)
 
     def test_a_truncated_file_fails_the_decoding(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -1476,7 +1782,7 @@ class TotalsTest(unittest.TestCase):
             cuts = render.build(data, plan, cortes, render.ffmpeg_release(), 1, None)
             staged = cortes / "resumen.mp4"
             render.assemble(cortes, cuts, staged, 1)
-            report = render.totals_check(staged, render.all_parts(plan, 25.0), 1)
+            report = render.totals_check(staged, render.all_parts(plan))
             self.assertEqual(report["fotogramas"], 17)
             packets = json.loads(common.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
                                              "-show_packets", "-show_entries",
@@ -1507,7 +1813,7 @@ def decode_check(path, threads):
         raise Invalid(f"El montaje no se decodifica completo: {exc}") from exc
 
 
-def totals_check(path, parts, threads):
+def totals_check(path, parts):
     """Frames equal to Σ N and audio within 0.1 s of the video, both blocking in §8."""
     expected = sum(part["frames"] for part in parts)
     counted = counted_frames(path)
@@ -1550,13 +1856,20 @@ git commit -m "feat(render): validación bloqueante de decodificación, fotogram
 - Test: `plugins/resumir-video/skills/resumir-video/scripts/test_render.py`
 
 **Interfaces:**
-- Consumes: `render.Invalid`; de `common.py` → `ffmpeg`, `seconds`, `seek_margin`, `timeline_start`,
-  `video_stream`.
+- Consumes: de `common.py` → `ffmpeg`, `seconds`, `seek_margin`, `timeline_start`, `video_stream`
+  (ninguna función de esta tarea usa `render.Invalid`: la distancia se limita a devolver el número,
+  es `validate`, en la Tarea 10, quien decide si bloquea).
 - Produces: `render.IMAGE_SIDE = 64`, `render.IMAGE_OK = 0.08`, `render.IMAGE_MARK = 0.15`;
-  `render.gray_frame(path, instant, base, margin, target) -> bytes`;
+  `render.gray_frame(path, instant, base, margin, target, threads, track="0:v:0") -> bytes`, con
+  `threads` para `-threads`/`-filter_threads` (revisión de rama, hallazgo N2: `--threads` debe llegar
+  a toda llamada de FFmpeg de la validación, no solo a `render_part`) y `track` para elegir la pista
+  cuando el vídeo no es la primera de su tipo (§8: la validación compara contra la pista que de verdad
+  se montó, no siempre `common.video_stream(data)`);
   `render.image_distance(left, right) -> float`;
-  `render.image_placement(data, final, spans, out_start, out_end, folder) -> list[dict]` con un
-  registro `{"punto", "salida_s", "origen_s", "distancia"}` por ventana.
+  `render.image_placement(data, final, spans, out_start, out_end, folder, threads) -> list[dict]` con
+  un registro `{"punto", "salida_s", "origen_s", "distancia"}` por ventana; compara siempre el montaje
+  (pista por defecto) contra `common.video_stream(data)["index"]` del original, que excluye la
+  carátula (`attached_pic`) cuando la hay.
 
 - [ ] **Paso 1: Escribe la prueba rápida que falla**
 
@@ -1591,10 +1904,11 @@ IMAGE_SIDE = 64
 IMAGE_OK, IMAGE_MARK = 0.08, 0.15
 
 
-def gray_frame(path, instant, base, margin, target):
+def gray_frame(path, instant, base, margin, target, threads, track="0:v:0"):
     """The frame on screen at `instant`, reduced to IMAGE_SIDE² luminance samples."""
-    ffmpeg("-ss", seconds(max(0.0, instant - margin)), "-noaccurate_seek", "-copyts", "-i", path,
-           "-map", "0:v:0", "-frames:v", "1",
+    ffmpeg("-threads", str(threads), "-filter_threads", str(threads),
+           "-ss", seconds(max(0.0, instant - margin)), "-noaccurate_seek", "-copyts", "-i", path,
+           "-map", track, "-frames:v", "1",
            "-vf", f"fps=1000:start_time={seconds(base + instant)},"
                   f"scale={IMAGE_SIDE}:{IMAGE_SIDE},format=gray",
            "-f", "rawvideo", target)
@@ -1624,7 +1938,7 @@ class ImagePlacementTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             _, _, data, staged = assembled(root)
-            rows = render.image_placement(data, staged, [(1.0, 2.0), (4.0, 5.0)], 0.0, 1.6, root)
+            rows = render.image_placement(data, staged, [(1.0, 2.0), (4.0, 5.0)], 0.0, 1.6, root, 1)
             self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
             self.assertTrue(all(row["distancia"] <= render.IMAGE_OK for row in rows), rows)
 
@@ -1633,7 +1947,7 @@ class ImagePlacementTest(unittest.TestCase):
             root = Path(temporary)
             _, _, data, staged = assembled(root)
             # Same cut, wrong source times: the montage holds seconds 1 and 4, not 6 and 9.
-            rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root)
+            rows = render.image_placement(data, staged, [(6.0, 7.0), (9.0, 9.5)], 0.0, 1.6, root, 1)
             self.assertTrue(any(row["distancia"] > render.IMAGE_MARK for row in rows), rows)
 ```
 
@@ -1642,17 +1956,23 @@ class ImagePlacementTest(unittest.TestCase):
 En `render.py`, añade:
 
 ```python
-def image_placement(data, final, spans, out_start, out_end, folder):
+def image_placement(data, final, spans, out_start, out_end, folder, threads):
     """Compare the first and last frame of the cut against the source it claims to come from."""
     source, base = data["source"]["path"], timeline_start(data)
     margin = seek_margin(data)
+    # `final` always carries a single video stream (assemble maps it to output 0), but the source
+    # may not: pick the same track render_part read, never a stray attached_pic (§8, hallazgo 5).
+    origin_track = f"0:{video_stream(data)['index']}"
     points = (("inicio", out_start, spans[0][0]), ("fin", max(out_start, out_end - 1e-3),
                                                    max(spans[-1][0], spans[-1][1] - 1e-3)))
     rows = []
-    with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="imagen-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         for name, moment, origin in points:
-            produced = gray_frame(final, moment, 0.0, margin, Path(temporary) / f"{name}-s.gray")
-            expected = gray_frame(source, origin, base, margin, Path(temporary) / f"{name}-o.gray")
+            produced = gray_frame(final, moment, 0.0, margin, Path(temporary) / f"{name}-s.gray",
+                                  threads)
+            expected = gray_frame(source, origin, base, margin, Path(temporary) / f"{name}-o.gray",
+                                  threads, origin_track)
             rows.append({"punto": name, "salida_s": round(moment, 3), "origen_s": round(origin, 3),
                          "distancia": round(image_distance(produced, expected), 4)})
     return rows
@@ -1683,21 +2003,34 @@ git commit -m "feat(render): valida por imagen la colocación de cada corte cont
 
 **Interfaces:**
 - Consumes: de `common.py` → `energy(wav_path, cache_path=None) -> array('f')` (RMS en dBFS cada
-  10 ms), `ffmpeg`, `seconds`, `timeline_start`.
-- Produces: `render.LEVEL_BLOCK = 0.010`, `render.LEVEL_RATE = 16000`, `render.WINDOW = 1.0`,
+  10 ms), `ENERGY_STEP = 0.01`, `ffmpeg`, `seconds` (`timeline_start` ya no hace falta aquí: la
+  envolvente no toca `base`, hallazgo 4).
+- Produces: `render.LEVEL_BLOCK = ENERGY_STEP` (0,010, alias de `common.py`), `render.LEVEL_RATE =
+  16000`, `render.WINDOW = 1.0`,
   `render.ENVELOPE_OK = 4.0`, `render.ENVELOPE_MARK = 8.0`, `render.ENVELOPE_LAG = 4`,
   `render.ENVELOPE_SPREAD = 6.0`, `render.ENVELOPE_CORRELATION = 0.9`. El bloque de la envolvente se
   llama `LEVEL_BLOCK` —y la rejilla de las hojas de uniones y sus medidas, `JOIN_SHEET`, `JOIN_WIDTH`
   y `JOIN_GAP` (Tarea 10)— para no chocar con `video.BLOCK` (600 s del barrido) ni con `video.SHEET`,
   que define el plan de evidencia.
-  `ENVELOPE_LAG`, `ENVELOPE_SPREAD` y `ENVELOPE_MARK` son los tres umbrales provisionales que se
-  declaran al final de este plan y que el Plan 4 escribe en `docs/requisitos.md`: 40 ms de desfase,
-  6 dB de guarda de modulación y 8 dB de bloqueo;
-  `render.window_levels(path, start, length, folder, name) -> array('f')`;
+  `ENVELOPE_LAG`, `ENVELOPE_SPREAD`, `ENVELOPE_MARK` y `ENVELOPE_OK` son los cuatro umbrales
+  provisionales que se declaran al final de este plan y que el Plan 4 escribe en
+  `docs/requisitos.md`: 40 ms de desfase, 6 dB de guarda de modulación, 8 dB de bloqueo y 4 dB de
+  guarda antes de exigir correlación;
+  `render.window_levels(path, start, length, folder, name, threads, track="0:a:0") -> array('f')`,
+  con `threads` para `-threads` (sin `-filter_threads`: a diferencia de `gray_frame` y `sheets`, esta
+  llamada no lleva grafo `-vf`/`-af`; revisión de rama, hallazgo N2) y `track` para leer la pista que
+  de verdad se montó (§8, hallazgo de pista: sin `-copyts` el `-ss` de entrada se mide desde el inicio
+  real del contenido, así que aquí nunca se suma `base`);
   `render.stretched(levels, speed, count) -> array('f')`;
   `render.correlation(left, right) -> float`; `render.spread(levels) -> float`;
-  `render.align(produced, reference) -> tuple[float, int, float]` → `(diferencia_db, desfase_bloques, correlación)`;
-  `render.sound_placement(data, final, spans, out_start, out_end, speed, folder) -> list[dict]`.
+  `render.align(produced, reference) -> tuple[float, int, float]` → `(diferencia_db, desfase_bloques,
+  correlación)`, con `desfase_bloques` positivo cuando lo producido llega más tarde que la referencia
+  y negativo cuando llega antes; `validate` solo lee `abs(desfase_bloques)`, así que el signo no
+  cambia qué se acepta;
+  `render.sound_placement(data, final, spans, out_start, out_end, speed, folder, threads,
+  track="0:a:0") -> list[dict]`, con `threads` (N2) y `track` para la pista de origen
+  (`plan["audio_stream"]`; el montaje siempre responde en `"0:a:0"`, que es el valor por defecto para
+  su propia lectura).
 
 - [ ] **Paso 1: Escribe la prueba rápida que falla**
 
@@ -1723,8 +2056,16 @@ class EnvelopeTest(unittest.TestCase):
         self.assertEqual(lag, 0)
         self.assertAlmostEqual(difference, 0.0)
         self.assertAlmostEqual(value, 1.0)
+        # The reference's plateau starts 3 blocks earlier than the produced one's: what was
+        # produced happens later than the reference, and `align` reports that as a positive lag
+        # (measured against the real function: `align(produced, moved)` is `(0.0, 3, 1.0)`).
         moved = array.array("f", shape[3:] + [-60.0] * 3)
         difference, lag, value = render.align(produced, moved)
+        self.assertEqual(lag, 3)
+        self.assertLess(difference, 1.0)
+        # Mirror case: now it is what was produced whose plateau starts 3 blocks earlier, so it is
+        # produced that happens before the reference and the lag flips sign.
+        difference, lag, value = render.align(moved, reference)
         self.assertEqual(lag, -3)
         self.assertLess(difference, 1.0)
 
@@ -1733,6 +2074,26 @@ class EnvelopeTest(unittest.TestCase):
         self.assertLess(render.spread(flat), render.ENVELOPE_SPREAD)
         shaped = array.array("f", [-60.0] * 20 + [-9.0] * 20)
         self.assertGreater(render.spread(shaped), render.ENVELOPE_SPREAD)
+
+    def test_a_scrambled_shape_correlates_below_the_gate(self):
+        # §8 coverage: a modulated envelope (spread above the gate) whose blocks are reordered
+        # correlates poorly even though nothing here is silence or truncated.
+        steady = array.array("f", ([-9.0] * 10 + [-40.0] * 10) * 2)
+        scrambled = array.array("f", ([-40.0] * 10 + [-9.0] * 10) * 2)
+        self.assertGreaterEqual(render.spread(scrambled), render.ENVELOPE_SPREAD)
+        self.assertLess(render.correlation(steady, scrambled), render.ENVELOPE_CORRELATION)
+
+    def test_a_lag_beyond_the_gate_is_reported(self):
+        # §8 coverage: a shift of 5 blocks (50 ms) exceeds both the 40 ms of ENVELOPE_LAG and the
+        # 45 ms of §8; `validate` reads it from `abs(desfase_ms)`, computed the same way here.
+        shape = [-60.0] * 10 + [-10.0] * 30 + [-60.0] * 10
+        produced = array.array("f", shape)
+        reference = array.array("f", shape[5:] + [-60.0] * 5)
+        difference, lag, value = render.align(produced, reference)
+        self.assertEqual(lag, 5)
+        desfase_ms = abs(lag) * round(render.LEVEL_BLOCK * 1000)
+        self.assertGreater(desfase_ms, 45)
+        self.assertGreater(desfase_ms, render.ENVELOPE_LAG * round(render.LEVEL_BLOCK * 1000))
 ```
 
 - [ ] **Paso 2: Ejecuta las pruebas y comprueba que fallan**
@@ -1742,11 +2103,12 @@ Esperado: FALLA con `AttributeError: module 'render' has no attribute 'stretched
 
 - [ ] **Paso 3: Escribe la implementación mínima**
 
-En `render.py`, añade `array` y `energy` a las importaciones y:
+En `render.py`, añade `array`, `energy` y `ENERGY_STEP` a las importaciones y:
 
 ```python
 # Its own name: video.BLOCK is the 600 s block of the sweep and this one is 10 ms of envelope.
-LEVEL_BLOCK = 0.010
+# Alias, no literal: si common.ENERGY_STEP cambia, window_levels y desfase_ms siguen de acuerdo.
+LEVEL_BLOCK = ENERGY_STEP
 LEVEL_RATE = 16000
 WINDOW = 1.0
 # Provisional thresholds of §15, written down in docs/requisitos.md by the packaging plan.
@@ -1756,12 +2118,16 @@ ENVELOPE_SPREAD = 6.0            # dB below which the envelope is flat and corre
 ENVELOPE_CORRELATION = 0.9
 
 
-def window_levels(path, start, length, folder, name):
+def window_levels(path, start, length, folder, name, threads, track="0:a:0"):
     """RMS envelope of a window, always through a temporary mono 16-bit decode (§8)."""
-    # Here -t is legitimate: there is no -copyts, so it is the plain duration after the seek.
+    # Here -t is legitimate: there is no -copyts, so it is the plain duration after the seek, and
+    # `start` is already in the s = pts − format.start_time convention of §3 (never `base + s`):
+    # measured on a 12 s sine remuxed with `-output_ts_offset 7` (start_time = 7.000000), `-ss 1`
+    # without -copyts gives the same wav as the unshifted original, and `-ss 8` a different one.
     copy = Path(folder) / f"{name}.wav"
-    ffmpeg("-ss", seconds(max(0.0, start)), "-t", seconds(length), "-i", path, "-map", "0:a:0",
-           "-ac", "1", "-ar", str(LEVEL_RATE), "-c:a", "pcm_s16le", copy)
+    # No -filter_threads: unlike gray_frame and sheets, this call has no -vf/-af filter graph.
+    ffmpeg("-threads", str(threads), "-ss", seconds(max(0.0, start)), "-t", seconds(length),
+           "-i", path, "-map", track, "-ac", "1", "-ar", str(LEVEL_RATE), "-c:a", "pcm_s16le", copy)
     return energy(copy)
 
 
@@ -1802,7 +2168,12 @@ def spread(levels):
 
 
 def align(produced, reference, span=ENVELOPE_LAG + 2):
-    """Lag that minimises the mean absolute difference in dB, with its correlation."""
+    """Lag that minimises the mean absolute difference in dB, with its correlation.
+
+    `lag` is positive when `produced` happens later than `reference` (produced is delayed) and
+    negative when it happens earlier (produced is advanced); `validate` only reads `abs(lag)`, so
+    the sign never changes which cuts are accepted.
+    """
     best = (999.0, 0, 0.0)
     for lag in range(-span, span + 1):
         left, right = produced[max(0, lag):], reference[max(0, -lag):]
@@ -1818,30 +2189,40 @@ def align(produced, reference, span=ENVELOPE_LAG + 2):
 - [ ] **Paso 4: Ejecuta las pruebas rápidas y comprueba que pasan**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k EnvelopeTest`
-Esperado: `Ran 3 tests … OK`.
+Esperado: `Ran 5 tests … OK`. Medido en esta máquina: la forma desordenada de
+`test_a_scrambled_shape_correlates_below_the_gate` da correlación −1,0 con 15,5 dB de desviación
+típica, y el desplazamiento de `test_a_lag_beyond_the_gate_is_reported` se localiza en 5 bloques
+(50 ms), por encima de los 45 ms de §8 y de los 40 ms de `ENVELOPE_LAG`.
 
 - [ ] **Paso 5: Escribe `sound_placement`**
 
 En `render.py`, añade:
 
 ```python
-def sound_placement(data, final, spans, out_start, out_end, speed, folder):
+def sound_placement(data, final, spans, out_start, out_end, speed, folder, threads,
+                    track="0:a:0"):
     """Compare the envelope at both ends of the cut with the source, rescaled by the speed (§8)."""
-    source, base = data["source"]["path"], timeline_start(data)
+    source = data["source"]["path"]
     first, last = spans[0], spans[-1]
     head = min(WINDOW, (first[1] - first[0]) / speed, out_end - out_start)
     tail = min(WINDOW, (last[1] - last[0]) / speed, out_end - out_start)
-    points = (("inicio", head, out_start, base + first[0]),
-              ("fin", tail, out_end - tail, base + last[1] - tail * speed))
+    # `first[0]` and `last[1] - tail * speed` are already `s` (§3): window_levels seeks with plain
+    # -ss, no -copyts, so they must NOT be shifted by `base` — measured with a source of
+    # start_time = 7 s: adding `base` here reads the wrong window (or none, past the end) even
+    # though the montage is correct.
+    points = (("inicio", head, out_start, first[0]),
+              ("fin", tail, out_end - tail, last[1] - tail * speed))
     rows = []
-    with tempfile.TemporaryDirectory(prefix="envolvente-", dir=folder) as temporary:
+    with tempfile.TemporaryDirectory(prefix="envolvente-", dir=folder,
+                                     ignore_cleanup_errors=True) as temporary:
         for name, window, moment, origin in points:
             if window <= 4 * LEVEL_BLOCK:
                 rows.append({"punto": name, "bloques": 0, "diferencia_db": 0.0, "desfase_ms": 0,
                              "correlacion": None, "modulacion_db": 0.0})
                 continue
-            produced = window_levels(final, moment, window, temporary, f"{name}-salida")
-            original = window_levels(source, origin, window * speed, temporary, f"{name}-origen")
+            produced = window_levels(final, moment, window, temporary, f"{name}-salida", threads)
+            original = window_levels(source, origin, window * speed, temporary, f"{name}-origen",
+                                     threads, track)
             reference = stretched(original, speed, len(produced))
             difference, lag, value = align(produced, reference)
             modulation = spread(reference)
@@ -1852,6 +2233,9 @@ def sound_placement(data, final, spans, out_start, out_end, speed, folder):
                          "modulacion_db": round(modulation, 1)})
     return rows
 ```
+
+`timeline_start` deja de hacer falta en esta función (la envolvente ya no toca `base`); sigue
+importada porque `image_placement` (Tarea 8) la usa.
 
 - [ ] **Paso 6: Escribe la prueba de integración que falla**
 
@@ -1869,15 +2253,32 @@ def spoken(path, length=12):
                   "-c:a", "pcm_s16le", path)
 
 
+def spoken_second_track(path, length=6):
+    """Same tone/silence envelope, but as the SECOND audio stream; the first is silent."""
+    common.ffmpeg("-f", "lavfi", "-i", f"color=c=black:s=320x180:r=25:d={length}",
+                  "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=mono:d={length}",
+                  "-f", "lavfi", "-i", "aevalsrc=exprs='0.5*sin(2*PI*440*t)*"
+                                       r"lt(mod(t\,1.5)\,1.0)':sample_rate=48000:"
+                                       f"duration={length}",
+                  "-map", "0:v", "-map", "1:a", "-map", "2:a",
+                  "-vf", "geq=lum='N':cb=128:cr=128,format=yuv420p",
+                  "-c:v", "libx264", "-crf", "12", "-preset", "ultrafast", "-bf", "0",
+                  "-c:a", "pcm_s16le", path)
+
+
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
 class SoundPlacementTest(unittest.TestCase):
-    def built(self, root):
-        source = root / "voz.mkv"
-        spoken(source)
-        spans = [[0.0, 1.08], [1.42, 2.58], [2.92, 4.08]]
+    # 74 frames / 142 080 samples (spans up to 4.4 s instead of 4.08 s): the previous fixture left
+    # only 0.001 of margin over ENVELOPE_CORRELATION at the end (0.901 measured); this one measures
+    # 0.973 and 1.0, so a codec change would not block a correct montage by accident.
+    def built(self, root, source_path=None):
+        source = source_path or root / "voz.mkv"
+        if source_path is None:
+            spoken(source)
+        spans = [[0.0, 1.08], [1.42, 2.58], [2.92, 4.4]]
         plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
-                           segments=[sample_segment(id=1, numero=1, title="A", start=0.0, end=4.08,
-                                                    spans=spans, frames=68, samples=130560)])
+                           segments=[sample_segment(id=1, numero=1, title="A", start=0.0, end=4.4,
+                                                    spans=spans, frames=74, samples=142080)])
         plan["audio_stream"] = 1
         data = common.probe(source)
         cortes = root / "cortes"
@@ -1891,29 +2292,86 @@ class SoundPlacementTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             data, staged, spans = self.built(root)
-            rows = render.sound_placement(data, staged, spans, 0.0, 68 / 25, 1.25, root)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root, 1)
             self.assertEqual([row["punto"] for row in rows], ["inicio", "fin"])
-            # Measured here: 0.81 dB at the start and 3.08 dB at the end, both inside the gate.
+            # Measured here: 0.81 dB / 0.973 at the start and 0.17 dB / 1.0 at the end, both with
+            # real margin over ENVELOPE_MARK and ENVELOPE_CORRELATION.
             for row in rows:
                 with self.subTest(row=row):
                     self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
                     self.assertLessEqual(abs(row["desfase_ms"]), render.ENVELOPE_LAG * 10, row)
                     self.assertGreater(row["bloques"], 80, row)
+                    self.assertIsNotNone(row["correlacion"], row)
+                    self.assertGreaterEqual(row["correlacion"], render.ENVELOPE_CORRELATION, row)
 
     def test_a_cut_claimed_from_the_wrong_place_is_detected(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
             data, staged, _ = self.built(root)
-            moved = [(0.75, 1.83), (2.17, 3.33), (3.67, 4.83)]
-            rows = render.sound_placement(data, staged, moved, 0.0, 68 / 25, 1.25, root)
+            moved = [(0.75, 1.83), (2.17, 3.33), (3.67, 5.15)]
+            rows = render.sound_placement(data, staged, moved, 0.0, 74 / 25, 1.25, root, 1)
+            # §8 coverage: measured 54.22 / 74.16 dB and correlación −0.131 / −0.498, so both the
+            # difference and the correlation gates would reject this montage.
             self.assertTrue(any(row["diferencia_db"] > render.ENVELOPE_MARK for row in rows), rows)
+            self.assertTrue(any(row["correlacion"] is not None
+                                and row["correlacion"] < render.ENVELOPE_CORRELATION
+                                for row in rows), rows)
+
+    def test_a_shifted_source_is_still_matched_correctly(self):
+        # §13 coverage of hallazgo 4: base contada dos veces. `shifted()` (Tarea 3) remuxes with
+        # -output_ts_offset so format.start_time = 7 s; the numbers must be identical to the
+        # unshifted source above, because window_levels never adds `base`.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            plain = root / "voz-plana.mkv"
+            spoken(plain)
+            moved = root / "voz-desfasada.mkv"
+            shifted(moved, plain, ahead=7)
+            data, staged, spans = self.built(root, source_path=moved)
+            self.assertAlmostEqual(common.timeline_start(data), 7.0, places=3)
+            rows = render.sound_placement(data, staged, spans, 0.0, 74 / 25, 1.25, root, 1)
+            for row in rows:
+                with self.subTest(row=row):
+                    self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
+                    self.assertIsNotNone(row["correlacion"], row)
+                    self.assertGreaterEqual(row["correlacion"], render.ENVELOPE_CORRELATION, row)
+
+    def test_the_chosen_track_is_compared_against_the_source(self):
+        # §8 coverage of hallazgo 5: `plan["audio_stream"]` is not the first audio track. Without
+        # `track`, sound_placement would compare the montage against the silent first track and
+        # reject a correct montage.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source = root / "dos-pistas.mkv"
+            spoken_second_track(source)
+            spans = [[0.5, 1.58], [1.92, 3.08]]
+            plan = sample_plan(source={"path": str(source.resolve()), **common.fingerprint(source)},
+                               segments=[sample_segment(id=1, numero=1, title="A", start=0.5,
+                                                        end=3.08, spans=spans, frames=56,
+                                                        samples=107520)])
+            plan["settings"]["speed"] = 1.0
+            plan["audio_stream"] = 2                    # the second audio stream, absolute index 2
+            data = common.probe(source)
+            cortes = root / "cortes"
+            cortes.mkdir()
+            cuts = render.build(data, plan, cortes, render.ffmpeg_release(), 1, None)
+            staged = cortes / "resumen.mp4"
+            render.assemble(cortes, cuts, staged, 1)
+            spans_t = [(a, b) for a, b in spans]
+            rows = render.sound_placement(data, staged, spans_t, 0.0, 56 / 25, 1.0, root, 1,
+                                          track=f"0:{plan['audio_stream']}")
+            for row in rows:
+                with self.subTest(row=row):
+                    self.assertLessEqual(row["diferencia_db"], render.ENVELOPE_MARK, row)
 ```
 
 - [ ] **Paso 7: Ejecuta las pruebas de integración y comprueba que pasan**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k SoundPlacement`
-Esperado: `Ran 2 tests … OK` (unos 25 s). Medido en esta máquina: 0,81 dB y 3,08 dB en el caso
-correcto, frente a 54,22 dB con la ventana desplazada 0,75 s.
+Esperado: `Ran 4 tests … OK` (unos 60 s). Medido en esta máquina: 0,81 dB (correlación 0,973) y 0,17 dB
+(correlación 1,0) en el caso correcto, idénticos sobre la fuente desfasada 7 s; 54,22 dB y 74,16 dB
+(correlación −0,131 y −0,498) con la ventana desplazada 0,75 s; y, con la pista de audio correcta de
+una fuente de dos pistas, 0,86 dB y 0,04 dB.
 
 - [ ] **Paso 8: Confirma los cambios**
 
@@ -1933,22 +2391,35 @@ git commit -m "feat(render): valida por envolvente la colocación de cada corte,
 - Test: `plugins/resumir-video/skills/resumir-video/scripts/test_render.py`
 
 **Interfaces:**
-- Consumes: todo lo anterior; de `common.py` → `lock(path)` (gestor de contexto, error 1 si está
-  tomado), `history(work, event, payload)` —que recorta los textos largos de forma recursiva y nunca
-  aborta un montaje ya hecho—, `new_dir(path) -> Path`, `publish(staged, final)`,
-  `save(path, data)`, `stamp(value) -> str`, `positive(value) -> int`. El `DEFAULT_THREADS` de
-  `video.py` no se importa: `render.py` define el suyo con la misma fórmula.
+- Consumes: todo lo anterior; de `common.py` → `DEFAULT_THREADS: int` (ya lo define `common.py`
+  —`min(4, os.cpu_count() or 1)`— y `video.py` ya lo importa; `render.py` hace lo mismo, sin
+  redefinirlo), `lock(path)` (gestor de contexto, error 1 si está tomado), `history(work, event,
+  payload)` —que recorta los textos largos de forma recursiva y nunca aborta un montaje ya hecho—,
+  `new_dir(path) -> Path` (ahora solo para la carpeta de evidencia `fallo-v*`; `vN/` se publica con un
+  único `publish`), `publish(staged, final)`, `save(path, data)`, `stamp(value) -> str`,
+  `positive(value) -> int`.
 - Produces: `render.JOIN_SHEET = (5, 2)`, `render.JOIN_WIDTH = 160`, `render.JOIN_GAP = 4`,
-  `render.DEFAULT_THREADS: int`;
-  `render.sheets(final, joins, folder, cadence) -> list[str]`;
+  `render.save_lf(path, data) -> None` (como `common.save`, pero con `newline="\n"`, que `common.save`
+  no admite);
+  `render.sheets(final, joins, folder, cadence, threads) -> list[str]`, con `threads` para
+  `-threads`/`-filter_threads` (revisión de rama, hallazgo N2);
   `render.validate(data, plan, parts, final, folder, threads) -> dict` con claves
   `fotogramas_esperados`, `fotogramas`, `video_s`, `audio_s`, `desfase_s`, `colocacion`, `marcas` y
-  `uniones`; `render.report(plan, checks, avisos, cadence) -> str`;
-  `render.montage(args) -> int`; `render.render(args) -> int`; `render.register(sub) -> None`.
+  `uniones`; propaga `threads` a `image_placement` y `sound_placement` y convierte en `Invalid`
+  cualquier `ValueError`/`OSError` posterior a `decode_check` (N1), no solo el suyo propio; una fila de
+  envolvente con `bloques: 0` (ventana degenerada, un extremo a menos de 40 ms) se añade a `marcas` en
+  vez de colar como un acierto perfecto silencioso (D2);
+  `render.report(plan, checks, avisos, cadence) -> str`;
+  `render.montage(args) -> int`, que rechaza `--budget <= 0` con `Refused` (D3) y que solo publica
+  `sheets(...)` dentro de la misma protección de evidencia que ya cubre `validate` (N1: una hoja de
+  uniones que falla merece el mismo `fallo-vN-*` que un fallo de validación);
+  `render.render(args) -> int`; `render.register(sub) -> None`.
 - **Eventos de `historial.jsonl`** que escribe este plan, de los siete del contrato
   (`init, edit, accept, render, verify, doc, deliver`): `accept` con la frase literal aceptada,
-  `render` con los cortes montados y `verify` con el resultado de la validación. Cada carga es plana
-  —nada de diccionarios anidados—, así que el recorte de `common.history` la deja legible.
+  `render` con el número de cortes del plan (`len(plan["segments"])`, no las pasadas que monta
+  `build`) y `verify` con el resultado de la validación, también cuando falla (`ok: false, codigo:
+  4`). Cada carga es plana —nada de diccionarios anidados—, así que el recorte de `common.history` la
+  deja legible.
 
 - [ ] **Paso 1: Escribe la prueba de las hojas que falla**
 
@@ -1963,7 +2434,7 @@ class SheetTest(unittest.TestCase):
             _, _, _, staged = assembled(root)
             uniones = root / "uniones"
             uniones.mkdir()
-            names = render.sheets(staged, [40], uniones, 25.0)
+            names = render.sheets(staged, [40], uniones, 25.0, 1)
             self.assertEqual(names, ["union-01.jpg"])
             sheet = common.probe(uniones / "union-01.jpg")
             picture = common.video_stream(sheet)
@@ -1979,7 +2450,7 @@ class SheetTest(unittest.TestCase):
             _, _, _, staged = assembled(root)
             uniones = root / "uniones"
             uniones.mkdir()
-            self.assertEqual(render.sheets(staged, [2], uniones, 25.0), ["union-01.jpg"])
+            self.assertEqual(render.sheets(staged, [2], uniones, 25.0, 1), ["union-01.jpg"])
             self.assertTrue((uniones / "union-01.jpg").is_file())
 ```
 
@@ -1998,7 +2469,7 @@ JOIN_WIDTH = 160
 JOIN_GAP = 4
 
 
-def sheets(final, joins, folder, cadence):
+def sheets(final, joins, folder, cadence, threads):
     """One contact sheet per join, half before and half after, for the agent's visual review."""
     columns, rows = JOIN_SHEET
     tiles = columns * rows
@@ -2009,7 +2480,8 @@ def sheets(final, joins, folder, cadence):
         name = f"union-{number:02d}.jpg"
         # Accurate input seeking: without it every join would decode the montage from the start.
         # The tpad clone fills the grid when the montage is shorter than one sheet.
-        ffmpeg("-ss", seconds(first / cadence), "-i", final, "-map", "0:v:0",
+        ffmpeg("-threads", str(threads), "-filter_threads", str(threads),
+               "-ss", seconds(first / cadence), "-i", final, "-map", "0:v:0",
                "-vf", f"trim=end_frame={tiles},setpts=N/({cadence:.6f})/TB,"
                       f"tpad=stop=-1:stop_mode=clone,trim=end_frame={tiles},"
                       f"setpts=N/({cadence:.6f})/TB,scale={JOIN_WIDTH}:-2,"
@@ -2032,47 +2504,63 @@ En `render.py`, añade:
 def validate(data, plan, parts, final, folder, threads):
     """Every blocking check of §8; returns the content of validacion.json."""
     decode_check(final, threads)
-    checks = totals_check(final, parts, threads)
-    cadence, speed = cadence_of(plan), float(plan["settings"]["speed"])
-    placements, joins, elapsed = [], [], 0.0
-    for segment in plan["segments"]:
-        spans = [(float(start), float(end)) for start, end in segment["spans"]]
-        length = segment["frames"] / cadence
-        images = image_placement(data, final, spans, elapsed, elapsed + length, folder)
-        sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder)
-        placements.append({"corte": segment["id"], "titulo": segment["title"],
-                           "salida_s": [round(elapsed, 3), round(elapsed + length, 3)],
-                           "imagen": images, "envolvente": sounds})
-        elapsed += length
-        joins.append(round(elapsed * cadence))
-    checks["colocacion"] = placements
-    failures, marks = [], []
-    for entry in placements:
-        for row in entry["imagen"]:
-            if row["distancia"] > IMAGE_MARK:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
-                                f"{row['distancia']:.4f} del original")
-            elif row["distancia"] > IMAGE_OK:
-                marks.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
-                             f"{row['distancia']:.4f}, revísala en la hoja de uniones")
-        for row in entry["envolvente"]:
-            if ENVELOPE_OK < row["diferencia_db"] <= ENVELOPE_MARK:
-                marks.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
-                             f"{row['diferencia_db']:.2f} dB, escúchala")
-            if row["diferencia_db"] > ENVELOPE_MARK:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
-                                f"{row['diferencia_db']:.2f} dB del original")
-            if abs(row["desfase_ms"]) > ENVELOPE_LAG * round(LEVEL_BLOCK * 1000):
-                failures.append(f"corte {entry['corte']} ({row['punto']}): desfase de "
-                                f"{row['desfase_ms']} ms")
-            if row["correlacion"] is not None and row["correlacion"] < ENVELOPE_CORRELATION:
-                failures.append(f"corte {entry['corte']} ({row['punto']}): correlación "
-                                f"{row['correlacion']:.3f}")
-    if failures:
-        raise Invalid("La colocación no coincide con el original: " + "; ".join(failures) + ".")
-    checks["marcas"] = marks
-    checks["uniones"] = joins[:-1]
-    return checks
+    try:
+        checks = totals_check(final, parts)
+        cadence, speed = cadence_of(plan), float(plan["settings"]["speed"])
+        placements, joins, elapsed = [], [], 0.0
+        for segment in plan["segments"]:
+            spans = [(float(start), float(end)) for start, end in segment["spans"]]
+            length = segment["frames"] / cadence
+            images = image_placement(data, final, spans, elapsed, elapsed + length, folder,
+                                     threads)
+            sounds = sound_placement(data, final, spans, elapsed, elapsed + length, speed, folder,
+                                     threads, f"0:{plan['audio_stream']}")
+            placements.append({"corte": segment["id"], "titulo": segment["title"],
+                               "salida_s": [round(elapsed, 3), round(elapsed + length, 3)],
+                               "imagen": images, "envolvente": sounds})
+            elapsed += length
+            joins.append(round(elapsed * cadence))
+        checks["colocacion"] = placements
+        failures, marks = [], []
+        for entry in placements:
+            for row in entry["imagen"]:
+                if row["distancia"] > IMAGE_MARK:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                                    f"{row['distancia']:.4f} del original")
+                elif row["distancia"] > IMAGE_OK:
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): imagen a "
+                                 f"{row['distancia']:.4f}, revísala en la hoja de uniones")
+            for row in entry["envolvente"]:
+                if row["bloques"] == 0:
+                    # A window this short (an end within 40 ms) was never measured;
+                    # diferencia_db: 0.0 is a placeholder, not a perfect match, so it must not
+                    # pass silently as one.
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): tramo demasiado "
+                                 "corto para verificar la envolvente; revísalo a mano")
+                    continue
+                if ENVELOPE_OK < row["diferencia_db"] <= ENVELOPE_MARK:
+                    marks.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                                 f"{row['diferencia_db']:.2f} dB, escúchala")
+                if row["diferencia_db"] > ENVELOPE_MARK:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): envolvente a "
+                                    f"{row['diferencia_db']:.2f} dB del original")
+                if abs(row["desfase_ms"]) > ENVELOPE_LAG * round(LEVEL_BLOCK * 1000):
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): desfase de "
+                                    f"{row['desfase_ms']} ms")
+                if row["correlacion"] is not None and row["correlacion"] < ENVELOPE_CORRELATION:
+                    failures.append(f"corte {entry['corte']} ({row['punto']}): correlación "
+                                    f"{row['correlacion']:.3f}")
+        if failures:
+            raise Invalid("La colocación no coincide con el original: " + "; ".join(failures) + ".")
+        checks["marcas"] = marks
+        checks["uniones"] = joins[:-1]
+        return checks
+    except Invalid:
+        raise
+    except (ValueError, OSError) as exc:
+        # N1: any failure past decode_check (e.g. image_distance on mismatched frame sizes) must
+        # become Invalid too, so it gets the same evidence handling as a real placement failure.
+        raise Invalid(f"La validación no se pudo completar: {exc}") from exc
 
 
 def report(plan, checks, avisos, cadence):
@@ -2110,9 +2598,97 @@ def report(plan, checks, avisos, cadence):
 
 Añade `stamp` a la importación de `common`.
 
-- [ ] **Paso 6: Escribe la prueba de extremo a extremo que falla**
+- [ ] **Paso 6: Escribe las pruebas de `validate`**
 
-Añade a `test_render.py`:
+Hallazgo 9 del escaneo previo: ninguna prueba llama a `render.validate` directamente.
+`SoundPlacementTest` e `ImagePlacementTest` (Tareas 8 y 9) ejercitan `sound_placement` e
+`image_placement` por separado, y la prueba de extremo a extremo de más abajo (`CommandTest`) solo la
+ejercita indirectamente, a través de `render.montage` —mockeándola, además, en el caso de fallo—.
+Añade a `test_render.py`, entre `SheetTest` y `CommandTest`:
+
+```python
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
+class ValidateTest(unittest.TestCase):
+    def plan_for(self, data, spans, frames=74, samples=142080):
+        """El mismo plan que monta `SoundPlacementTest.built`, reconstruido aquí para `all_parts` y
+        `validate` (`built` devuelve `(data, staged, spans)`, no el plan que usó por dentro)."""
+        source = Path(data["source"]["path"])
+        plan = sample_plan(source={"path": str(source), **common.fingerprint(source)},
+                           segments=[sample_segment(id=1, numero=1, title="A", start=spans[0][0],
+                                                    end=spans[-1][1], spans=spans, frames=frames,
+                                                    samples=samples)])
+        plan["audio_stream"] = 1
+        return plan
+
+    def test_a_correct_montage_passes(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            plan = self.plan_for(data, spans)
+            checks = render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+            self.assertTrue(checks["colocacion"])
+            self.assertIsInstance(checks["marcas"], list)
+
+    def test_a_cut_correlated_below_the_gate_is_invalid(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, _ = SoundPlacementTest().built(root)
+            # El mismo desplazamiento de test_a_cut_claimed_from_the_wrong_place_is_detected: medido
+            # allí en −0,131 / −0,498 de correlación, muy por debajo de ENVELOPE_CORRELATION (0,9).
+            moved = [(0.75, 1.83), (2.17, 3.33), (3.67, 5.15)]
+            plan = self.plan_for(data, moved)
+            with self.assertRaisesRegex(render.Invalid, "correlación"):
+                render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+
+    def test_a_lag_beyond_the_gate_is_invalid_on_its_own(self):
+        # §8 coverage del hallazgo 9: un desplazamiento bastante más pequeño que el de arriba deja la
+        # diferencia media y la correlación muy dentro de sus propias guardas y aun así dispara el
+        # desfase por sí solo. Medido aquí: desplazando cada tramo 0,05 s, el punto «fin» da 0,17 dB
+        # y 1,0 de correlación (ambos con margen real) y 60 ms de desfase, por encima de los 40 ms de
+        # `ENVELOPE_LAG` (45 ms en la especificación).
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            shifted = [(round(a + 0.05, 6), round(b + 0.05, 6)) for a, b in spans]
+            plan = self.plan_for(data, shifted)
+            with self.assertRaisesRegex(render.Invalid, "desfase") as caught:
+                render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+            self.assertNotIn("correlación", str(caught.exception))
+
+    def test_a_mark_between_ok_and_mark_is_reported_without_blocking(self):
+        # El medio real de `built()` no cae de forma natural entre ENVELOPE_OK (4 dB) y
+        # ENVELOPE_MARK (8 dB) sin que el desfase dispare antes (explorado con los desplazamientos de
+        # arriba: cuando la diferencia media llega a esa banda, el desfase ya superó su propia
+        # guarda), así que aquí se parchea `sound_placement` para aislar el camino de las marcas que
+        # `validate` ya tiene escrito.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            data, staged, spans = SoundPlacementTest().built(root)
+            plan = self.plan_for(data, spans)
+            marked = {"punto": "inicio", "bloques": 86, "diferencia_db": 6.0, "desfase_ms": 0,
+                      "correlacion": 0.95, "modulacion_db": 20.0}
+            fine = {"punto": "fin", "bloques": 100, "diferencia_db": 0.17, "desfase_ms": 20,
+                    "correlacion": 1.0, "modulacion_db": 51.2}
+            with mock.patch.object(render, "sound_placement", return_value=[marked, fine]):
+                checks = render.validate(data, plan, render.all_parts(plan), staged, root, 1)
+            self.assertIn("corte 1 (inicio): envolvente a 6.00 dB, escúchala", checks["marcas"])
+```
+
+- [ ] **Paso 7: Ejecuta las pruebas y comprueba que pasan**
+
+Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k ValidateTest`
+Esperado: `Ran 4 tests … OK` (unos 45 s: cuatro montajes completos). Medido en esta máquina: el montaje
+correcto da 0,81 dB / 0,973 de correlación al inicio y 0,17 dB / 1,0 al final (idéntico a
+`SoundPlacementTest`); el desplazamiento de 0,75 s cae a −0,131 / −0,498 de correlación; y el
+desplazamiento de 0,05 s aísla el desfase por sí solo (60 ms en el punto «fin», con 0,17 dB y 1,0 de
+correlación, ambos muy dentro de sus márgenes); la cuarta prueba parchea `sound_placement` porque el
+medio real no cae de forma natural en la banda de marcas sin que el desfase bloquee antes.
+
+- [ ] **Paso 8: Escribe la prueba de extremo a extremo que falla**
+
+Añade `import argparse` a la cabecera de `test_render.py` (por orden alfabético, antes de `import
+contextlib`): la prueba de la publicación atómica de más abajo construye su propio `args` para llamar
+a `render.montage` directamente, sin pasar por la línea de órdenes. Añade a `test_render.py`:
 
 ```python
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg requerido")
@@ -2171,12 +2747,44 @@ class CommandTest(unittest.TestCase):
                              ["accept", "render", "verify"])
             # The acceptance travels with its literal phrase, flat, in the accept event.
             self.assertEqual(json.loads(log[0])["frase"], "vale, móntalo")
+            # "cortes" counts the plan's segments (2), not the passes build() mounted for them.
+            self.assertEqual(json.loads(log[1])["cortes"], 2)
+            self.assertEqual(json.loads(log[2])["ok"], True)
             self.assertTrue(all(len(line.encode("utf-8")) < 4096 for line in log))
+            # `vN/` is published LF-only, like the seleccion-vN.json that plan.py already writes.
+            for name in ("seleccion.json", "validacion.json", "montaje.md"):
+                self.assertNotIn(b"\r\n", (trabajo / "v1" / name).read_bytes())
             repeated = self.invoke("render", source, "--work", trabajo,
                                    "--plan", trabajo / "seleccion-v1.json",
                                    "--accept", "otra vez", ok=False)
             self.assertEqual(repeated.returncode, 1)
             self.assertIn("ya existe", repeated.stderr)
+
+    def test_a_validation_failure_leaves_no_partial_version_and_v1_stays_free(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            source, trabajo, _ = self.work(root)
+            args = argparse.Namespace(video=str(source), work=str(trabajo),
+                                      plan=str(trabajo / "seleccion-v1.json"),
+                                      accept="vale, móntalo", directo=False, budget=None, threads=1)
+            # A `validate` that always fails still lets build() and assemble() run for real: the
+            # failure lands after `vN/` has started being assembled, not before it.
+            with mock.patch.object(render, "validate", side_effect=render.Invalid("mal colocado")):
+                with self.assertRaises(render.Invalid):
+                    render.montage(args)
+            self.assertFalse((trabajo / "v1").exists())
+            self.assertFalse((trabajo / "montaje.lock").exists())
+            fallos = list(trabajo.glob("fallo-v1-*"))
+            self.assertEqual(len(fallos), 1)
+            self.assertTrue((fallos[0] / "resumen.mp4").is_file())
+            log = [json.loads(line) for line in
+                  (trabajo / "historial.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([entry["evento"] for entry in log], ["accept", "render", "verify"])
+            self.assertEqual((log[2]["ok"], log[2]["codigo"]), (False, 4))
+            # v1 stayed free: an unmocked retry publishes it, exactly as if the first call never ran.
+            self.invoke("render", source, "--work", trabajo, "--plan", trabajo / "seleccion-v1.json",
+                        "--accept", "vale, móntalo", "--threads", "1")
+            self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
 
     def test_an_exhausted_budget_answers_with_code_three(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
@@ -2215,7 +2823,7 @@ class CommandTest(unittest.TestCase):
             # Only the new cut is rendered: the key of the untouched one does not change.
             self.assertEqual(len(after), 3)
             self.assertEqual({name: after[name] for name in before}, before)
-            part = render.subcuts(second["segments"][0], 25.0, 1.25, 48000)[0]
+            part = render.subcuts(second["segments"][0])[0]
             reused = f"{render.cut_key(second, part, render.ffmpeg_release())}.mkv"
             self.assertIn(reused, before)
             self.assertTrue((trabajo / "v2" / "resumen.mp4").is_file())
@@ -2240,25 +2848,35 @@ class CommandTest(unittest.TestCase):
             self.assertTrue((trabajo / "v1" / "resumen.mp4").is_file())
 ```
 
-- [ ] **Paso 7: Ejecuta la prueba y comprueba que falla**
+- [ ] **Paso 9: Ejecuta la prueba y comprueba que falla**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k CommandTest`
-Esperado: FALLA con `NotImplementedError` de `register`.
+Esperado: FALLA con `AssertionError: 1 != 2`: el `render` provisional de la Tarea 1 termina con
+código 1 y `Error: render aún no está implementado`.
 
-- [ ] **Paso 8: Escribe `montage`, `render` y `register`**
+- [ ] **Paso 10: Escribe `montage` y `render`**
 
-En `render.py`, sustituye los dos `raise NotImplementedError` por:
+En `render.py`, sustituye el `render` provisional de la Tarea 1 (el que solo lanza `RuntimeError`)
+por lo siguiente. `register` no se toca: ya está completo desde la Tarea 1 (la Tarea 11 solo le añade
+`--dry-run`):
 
 ```python
-DEFAULT_THREADS = min(4, os.cpu_count() or 1)
+def save_lf(path, data):
+    """Like `common.save`, but with `newline="\\n"` (it takes no such parameter): keeps `vN/` free of
+    the CRLF that a plain `open("x", encoding="utf-8")` would write on Windows, matching what
+    `plan.py` already publishes."""
+    with Path(path).open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 def montage(args):
-    """Render, assemble, validate and publish; everything staged and renamed at the end (§11)."""
+    """Render, assemble, validate and publish `vN/` whole; a crash midway leaves nothing (§11)."""
     work = Path(args.work).resolve(strict=True)
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8-sig"))
     if not isinstance(plan, dict) or type(plan.get("version")) is not int:
         raise Refused("El plan debe ser un objeto JSON con version entera.")
+    if args.budget is not None and args.budget <= 0:
+        raise Refused("--budget debe ser mayor que 0 segundos.")
     data = probe(args.video)
     avisos = sources_agree(plan, args.video)
     record = accepted(plan, args.accept, args.directo)
@@ -2276,7 +2894,8 @@ def montage(args):
         history(work, "accept", {"version": plan["version"], "frase": record["frase"],
                                  "directo": record["directo"], "sha256": record["sha256"]})
         cuts = build(data, plan, cortes, release, args.threads, args.budget)
-        history(work, "render", {"version": plan["version"], "cortes": len(cuts),
+        # "cortes" counts the segments of the plan, not the passes `build` mounted for them.
+        history(work, "render", {"version": plan["version"], "cortes": len(plan["segments"]),
                                  "avisos": ", ".join(a["codigo"] for a in avisos)})
         with tempfile.TemporaryDirectory(prefix="montaje-", dir=work,
                                          ignore_cleanup_errors=True) as temporary:
@@ -2288,23 +2907,34 @@ def montage(args):
             uniones = folder / "uniones"
             uniones.mkdir()
             try:
-                checks = validate(data, plan, all_parts(plan, cadence_of(plan)), staged, folder,
-                                  args.threads)
-            except Invalid:
+                checks = validate(data, plan, all_parts(plan), staged, folder, args.threads)
+                try:
+                    # N1: sheets() also runs FFmpeg over the montage, right after validate(); a
+                    # failure here deserves the same evidence handling, not a bare crash.
+                    checks["uniones_hojas"] = sheets(staged, checks["uniones"], uniones,
+                                                     cadence_of(plan), args.threads)
+                except (ValueError, OSError) as exc:
+                    raise Invalid(f"No se pudieron generar las hojas de uniones: {exc}") from exc
+            except Invalid as exc:
                 kept = new_dir(work / f"fallo-v{plan['version']}-{int(time.time())}")
                 staged.replace(kept / "resumen.mp4")
+                # render() only names this folder in its message because it now exists.
+                exc.evidencia = kept
+                history(work, "verify", {"version": plan["version"], "ok": False, "codigo": 4})
                 raise
-            checks["uniones_hojas"] = sheets(staged, checks["uniones"], uniones, cadence_of(plan))
-            save(folder / "validacion.json", checks)
-            save(folder / "seleccion.json", dict(plan, aceptacion=record))
-            (folder / "montaje.md").write_text(report(plan, checks, avisos, cadence_of(plan)),
-                                               encoding="utf-8")
-            target = new_dir(published)
-            publish(uniones, target / "uniones")
-            for name in ("resumen.mp4", "seleccion.json", "validacion.json", "montaje.md"):
-                publish(folder / name, target / name)
-        history(work, "verify", {"version": plan["version"], "fotogramas": checks["fotogramas"],
-                                 "desfase_s": checks["desfase_s"]})
+            # `vN/` is built whole here, still inside the temp folder: `publish` below is the only
+            # write that reaches `work`, so nothing under `work` is ever half-published (§11).
+            version = folder / f"v{plan['version']}"
+            version.mkdir()
+            save_lf(version / "validacion.json", checks)
+            save_lf(version / "seleccion.json", dict(plan, aceptacion=record))
+            (version / "montaje.md").write_text(report(plan, checks, avisos, cadence_of(plan)),
+                                                encoding="utf-8", newline="\n")
+            staged.replace(version / "resumen.mp4")
+            uniones.replace(version / "uniones")
+            publish(version, published)
+        history(work, "verify", {"version": plan["version"], "ok": True, "fotogramas":
+                                 checks["fotogramas"], "desfase_s": checks["desfase_s"]})
     for aviso in avisos:
         print(f"Aviso: {aviso['mensaje']}", file=sys.stderr)
     print(published / "resumen.mp4")
@@ -2320,60 +2950,55 @@ def render(args):
         print("Error: presupuesto agotado; repite la misma orden para continuar.", file=sys.stderr)
         return 3
     except Invalid as exc:
-        print(f"Error: {exc}\nNo se ha publicado nada; la evidencia queda en la carpeta fallo-*.",
-              file=sys.stderr)
+        evidencia = getattr(exc, "evidencia", None)
+        message = f"Error: {exc}\nNo se ha publicado nada."
+        if evidencia is not None:
+            message += f" La evidencia queda en la carpeta {evidencia.name}."
+        print(message, file=sys.stderr)
         return 4
     except Refused as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
-
-
-def register(sub):
-    """Subcommand registration shared by the four modules: one subparser and its `run`."""
-    parser = sub.add_parser("render", help="Monta vN/ desde un plan aceptado, con caché y validación.")
-    parser.set_defaults(run=render)
-    parser.add_argument("video", help="Vídeo local original.")
-    parser.add_argument("--work", required=True, help="Carpeta de trabajo creada por prepare.")
-    parser.add_argument("--plan", required=True, help="seleccion-vN.json producido por plan.")
-    parser.add_argument("--accept", help="Frase literal con la que el usuario aceptó la propuesta.")
-    parser.add_argument("--directo", action="store_true",
-                        help="Monta sin revisión previa; no anula los avisos bloqueantes.")
-    parser.add_argument("--budget", type=float,
-                        help="Segundos de montaje por llamada; al agotarse devuelve 3 y se reanuda.")
-    parser.add_argument("--threads", type=positive, default=DEFAULT_THREADS,
-                        help=f"Hilos de codificación (por defecto {DEFAULT_THREADS}).")
 ```
 
-Añade `os` a las importaciones y `history`, `lock`, `new_dir`, `probe` y `stamp` a las de `common`. La
-cabecera de importaciones queda así:
+La revisión de rama completa del plan añadió aquí dos guardas más: `--budget <= 0` se rechaza con
+`Refused` en vez de comportarse como «sin límite» (D3, traspaso nunca cerrado de la Tarea 5), y la
+llamada a `sheets(...)` se movió dentro del mismo `try` que ya protege `validate(...)` (N1), porque
+también invoca FFmpeg sobre el montaje y un fallo suyo merece la misma carpeta de evidencia
+`fallo-vN-*` y el mismo `codigo: 4`, no un `ValueError` desnudo que saldría con código 1.
+
+Añade `DEFAULT_THREADS`, `history`, `lock`, `new_dir`, `probe` y `stamp` a las importaciones de
+`common`; ninguna importación nueva hace falta fuera de ellas, y `os` deja de usarse en `render.py`
+(era solo para `DEFAULT_THREADS = min(4, os.cpu_count() or 1)`, que `common.py` ya define y `video.py`
+ya importa: se borra la copia, no el módulo de `common`). La cabecera de importaciones queda así:
 
 ```python
 import array
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import sys
 import tempfile
 import time
 import wave
 
-from common import (BLOCKING, MAX_SPANS, MEMORY_PATTERNS, energy, ffmpeg, fingerprint, frames_for,
-                    history, listing, lock, new_dir, output_interval, plan_sha256, positive, probe,
-                    publish, require_encoders, run, samples_for, save, seconds, seek_margin, stamp,
-                    stream_duration, streams, timeline_start, video_stream, warning)
+from common import (BLOCKING, DEFAULT_THREADS, ENERGY_STEP, MAX_SPANS, MEMORY_PATTERNS, energy,
+                    ffmpeg, fingerprint, history, listing, lock, new_dir, output_interval,
+                    plan_sha256, positive, probe, publish, require_encoders, run, save, seconds,
+                    seek_margin, stamp, stream_duration, streams, timeline_start, video_stream,
+                    warning)
 ```
 
 El `import argparse` que la Tarea 1 dejó en la cabecera ya no hace falta: `positive` viene de
 `common` y el subparser lo crea `register`. Bórralo.
 
-- [ ] **Paso 9: Ejecuta la prueba de extremo a extremo y comprueba que pasa**
+- [ ] **Paso 11: Ejecuta la prueba de extremo a extremo y comprueba que pasa**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k CommandTest`
-Esperado: `Ran 4 tests … OK` (unos 150 s: cuatro montajes completos).
+Esperado: `Ran 5 tests … OK` (unos 160 s: cuatro montajes completos y el fallo de validación mockeado).
 
-- [ ] **Paso 10: Ejecuta toda la batería**
+- [ ] **Paso 12: Ejecuta toda la batería**
 
 Ejecuta:
 
@@ -2383,7 +3008,7 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B -m unittest discover -s tests
 ```
 
-Esperado: `Ran 47 tests … OK` en la primera (4 + 6 + 8 + 4 + 5 + 1 + 4 + 4 + 5 + 6 por tareas) y `OK`
+Esperado: `Ran 63 tests … OK` en la primera (4 + 8 + 9 + 4 + 9 + 1 + 4 + 4 + 9 + 11 por tareas) y `OK`
 en la segunda, con las pruebas que el Plan 1 haya dejado en `test_video.py` más las de `common` y las
 de los demás módulos que ya existan. En `tests/` (23 pruebas) puede fallar
 `test_versions_agree_everywhere` mientras `video.py` siga declarando `__version__ = "0.1.0"`: ese
@@ -2392,7 +3017,7 @@ alguna lo hace, es una regresión de esta tarea. Comprueba también que `test_re
 ninguna ruta absoluta —`tests/test_packaging.py` las prohíbe en todo `plugins/`— y que no ha aparecido
 ningún `__pycache__`.
 
-- [ ] **Paso 11: Confirma los cambios**
+- [ ] **Paso 13: Confirma los cambios**
 
 ```bash
 git add plugins/resumir-video/skills/resumir-video/scripts/render.py \
@@ -2414,13 +3039,15 @@ que se montó: lo calcula `render --dry-run`, que no monta nada, y lo cita la pr
 - Test: `plugins/resumir-video/skills/resumir-video/scripts/test_render.py`
 
 **Interfaces:**
-- Consumes: `render.all_parts`, `render.cadence_of`, `render.cut_key`, `render.ffmpeg_release`; de
-  `common.py` → `save`. Modifica `render.cached_part` (Tarea 4), `render.build` (Tarea 5), y
-  `render.montage` y `render.register` (Tarea 10).
+- Consumes: `render.all_parts`, `render.cadence_of`, `render.cut_note` y `render.is_cached`
+  (Tarea 4, que es también el criterio de `build`); de `common.py` → `save`. Modifica
+  `render.cut_note` y `render.cached_part` (Tarea 4), y `render.montage` y `render.register`
+  (Tarea 10).
 - Produces: `render.COST_GUESS = 0.5` y `render.ASSEMBLY_SHARE = 0.25` (ambos provisionales, declarados
-  al final de este plan); `render.cut_note(part, release, seconds=None) -> dict`, la nota que acompaña
-  a cada corte cacheado, ahora con el tiempo que costó; `render.cut_cost(cortes) -> float | None`
-  (segundos de montaje por fotograma medidos sobre esas notas); `render.estimate(plan, cortes, release)
+  al final de este plan); `render.cut_note(part, release, seconds=None) -> dict`, la nota de la
+  Tarea 4 que acompaña a cada corte cacheado, ahora con el tiempo que costó;
+  `render.cut_cost(cortes) -> float | None` (segundos de montaje por fotograma medidos sobre esas
+  notas); `render.estimate(plan, cortes, release)
   -> dict` con **exactamente** las claves `reused`, `new` y `eta_s`; la opción `--dry-run` del
   subparser y la salida temprana de `montage`, **antes de exigir la aceptación**: la propuesta necesita
   el coste justo cuando el usuario todavía no ha aceptado nada.
@@ -2454,7 +3081,7 @@ class CostTest(unittest.TestCase):
                                          sample_segment(id=2, numero=2, title="B", start=5.0,
                                                         end=7.0, spans=[[5.0, 7.0]], frames=40,
                                                         samples=76800)])
-            part = render.subcuts(plan["segments"][0], 25.0, 1.25, 48000)[0]
+            part = render.subcuts(plan["segments"][0])[0]
             key = render.cut_key(plan, part, "8.0.1")
             (cortes / f"{key}.mkv").write_bytes(b"")
             common.save(cortes / f"{key}.json", {"frames": 40, "samples": 76800, "segundos": 10.0})
@@ -2490,6 +3117,7 @@ COST_GUESS = 0.5
 ASSEMBLY_SHARE = 0.25
 
 
+# Replaces the `cut_note` of Tarea 4: same body, plus the seconds the pass cost when known.
 def cut_note(part, release, seconds=None):
     """What travels beside a cached cut: its numbers and, when known, what it cost to render."""
     note = {"cut": part["cut"], "index": part["index"], "total": part["total"],
@@ -2515,22 +3143,18 @@ def cut_cost(cortes):
 
 def estimate(plan, cortes, release):
     """What `render --dry-run` answers: cached passes, new ones and the seconds they will cost."""
-    cadence = cadence_of(plan)
-    parts = all_parts(plan, cadence)
+    cadence, cortes = cadence_of(plan), Path(cortes)
+    parts = all_parts(plan)
     per_frame = cut_cost(cortes) or COST_GUESS / cadence
-    fresh = []
-    for part in parts:
-        target = Path(cortes) / f"{cut_key(plan, part, release)}.mkv"
-        if not (target.is_file() and target.with_suffix(".json").is_file()):
-            fresh.append(part)
+    # The very criterion `build` mounts by: a cut whose note disagrees is counted as new.
+    fresh = [part for part in parts if not is_cached(plan, part, cortes, release)]
     total = sum(part["frames"] for part in parts)
     seconds = sum(part["frames"] for part in fresh) * per_frame + total / cadence * ASSEMBLY_SHARE
     return {"reused": len(parts) - len(fresh), "new": len(fresh), "eta_s": round(seconds, 1)}
 ```
 
-Y sustituye por `cut_note` las dos notas que se escribían a mano, cronometrando lo que tarda cada
-pasada. En `cached_part` (Tarea 4), las líneas `render_part(...)` y `save(note, {...})` —las de justo
-antes del barrido de `*.parcial`— pasan a ser:
+Y en `cached_part` (Tarea 4) cronometra lo que tarda la pasada: la línea `render_part(...)` y la
+`save(note, cut_note(part, release))` —las de justo antes del barrido de `*.parcial`— pasan a ser:
 
 ```python
     started = time.monotonic()
@@ -2538,14 +3162,8 @@ antes del barrido de `*.parcial`— pasan a ser:
     save(note, cut_note(part, release, time.monotonic() - started))
 ```
 
-y en el reintento por memoria de `build` (Tarea 5), las líneas `render_part(...)` y
-`save(target.with_suffix(".json"), {...})`:
-
-```python
-            again = time.monotonic()
-            render_part(data, plan, part, target, 1)
-            save(target.with_suffix(".json"), cut_note(part, release, time.monotonic() - again))
-```
+El reintento por memoria de `build` (Tarea 5) vuelve a `cached_part`, así que hereda el cronometraje
+sin cambio alguno.
 
 La clave de caché no cambia: `segundos` es metadato de la nota, no ingrediente de `cut_key`, y
 `cached_part` sigue validando la entrada solo por `frames` y `samples`, así que las notas ya escritas
@@ -2601,7 +3219,10 @@ En `montage`, entre `avisos = sources_agree(plan, args.video)` y `record = accep
 ```python
     if args.dry_run:
         # Nothing is written, nothing is locked and no acceptance is required: this is what the
-        # proposal of §9 quotes as the montage cost before the user has answered.
+        # proposal of §9 quotes as the montage cost before the user has answered. The warnings still
+        # go out before this returns, exactly as a real montage would print them at the end.
+        for aviso in avisos:
+            print(f"Aviso: {aviso['mensaje']}", file=sys.stderr)
         print(json.dumps(estimate(plan, work / "cortes", ffmpeg_release()), ensure_ascii=False))
         return 0
 ```
@@ -2622,7 +3243,7 @@ cosas distintas —aquel, la retención y el presupuesto de fuente; este, lo que
 - [ ] **Paso 8: Ejecuta las pruebas y comprueba que pasan**
 
 Ejecuta: `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_render.py" -k CommandTest`
-Esperado: `Ran 5 tests … OK` (unos 190 s: la quinta añade un montaje completo y dos estimaciones).
+Esperado: `Ran 6 tests … OK` (unos 190 s: la sexta añade un montaje completo y dos estimaciones).
 
 - [ ] **Paso 9: Ejecuta toda la batería**
 
@@ -2634,9 +3255,18 @@ python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scr
 python -B -m unittest discover -s tests
 ```
 
-Esperado: `Ran 51 tests … OK` en la primera (4 + 6 + 8 + 4 + 5 + 1 + 4 + 4 + 5 + 6 + 4 por tareas) y
+Esperado: `Ran 67 tests … OK` en la primera (4 + 8 + 9 + 4 + 9 + 1 + 4 + 4 + 9 + 11 + 4 por tareas) y
 `OK` en la segunda. En `tests/` sigue valiendo lo dicho en la Tarea 10: solo puede fallar
-`test_versions_agree_everywhere`.
+`test_versions_agree_everywhere`. `test_render.py` cierra las once tareas de este plan con 67 pruebas.
+
+La revisión de rama completa del plan, posterior a las once tareas, encontró 7 hallazgos (propagación
+de `--threads` a `gray_frame`/`image_placement`/`window_levels`/`sound_placement`/`sheets`; `.get()`
+defensivo en `accepted` y `subcuts`; marcas de envolvente con `bloques: 0`; rechazo de `--budget <= 0`;
+`ignore_cleanup_errors=True` uniforme; y `validate`/`sheets` protegidos de extremo a extremo) y los
+corrigió en una única ronda de fixes con 10 pruebas nuevas. El recuento **final** de este plan, tras esa
+ronda, es **77** pruebas en `test_render.py`: sumadas a las 126 de la skill de antes de este plan (44 de
+`test_common.py`, 12 de `test_video.py` y 70 de `test_plan.py`), la skill queda con **203** pruebas
+propias; con las 23 de `tests/` (ajenas a la skill), el repositorio entero suma **226**.
 
 - [ ] **Paso 10: Confirma los cambios**
 
@@ -2682,9 +3312,11 @@ montaje, para no disputarle a `doc.py` el nombre que le asigna §6.
 ## Desviaciones y umbrales declarados
 
 **Tres** puntos en los que el montaje se aparta de la letra de la especificación aprobada y tres
-umbrales que la propia especificación marca como provisionales. El **Plan 4** los registra: las
-**tres** desviaciones en `docs/arquitectura.md` y en la decisión **D-009** —la guarda de lectura es la
-**tercera**—, y los tres umbrales de §15 en `docs/requisitos.md`.
+umbrales que la propia especificación marca como provisionales, más uno que añade este plan
+(`ENVELOPE_OK`, guarda antes de exigir revisión manual: §15 no lo numera, solo fija los otros tres).
+El **Plan 4** los registra: las **tres** desviaciones en `docs/arquitectura.md` y en la decisión
+**D-009** —la guarda de lectura es la **tercera**—, y los cuatro umbrales (los tres de §15 y
+`ENVELOPE_OK`) en `docs/requisitos.md`.
 
 | Desviación | Qué dice la especificación | Qué hace este plan y por qué |
 | --- | --- | --- |
@@ -2696,7 +3328,11 @@ umbrales que la propia especificación marca como provisionales. El **Plan 4** l
 | --- | --- | --- |
 | Desfase máximo de la envolvente | **40 ms** (`ENVELOPE_LAG = 4` bloques de 10 ms), dentro de los 45 ms que cita §8 | Tarea 9 |
 | Guarda de modulación para exigir correlación | **6 dB** (`ENVELOPE_SPREAD`) | Tarea 9 |
+| Marca de revisión manual antes del bloqueo | **4 dB** (`ENVELOPE_OK`; §15 no lo numera, solo fija el bloqueo a 8 dB) | Tareas 9 y 10 |
 | Bloqueo por diferencia media de envolvente | **8 dB** (`ENVELOPE_MARK`) | Tareas 9 y 10 |
+
+`MEMORY_CODES` (Tarea 5) tampoco es una desviación, sino el complemento numérico de
+`common.MEMORY_PATTERNS` que §11 exige (137, NTSTATUS `0xC0000017` y −9 de SIGKILL) y el Plan 1 no fijó.
 
 `COST_GUESS = 0.5` y `ASSEMBLY_SHARE = 0.25` (Tarea 11) **no** son umbrales de validación y no van a
 `docs/requisitos.md`: son el arranque de la estimación de `--dry-run` —segundos de montaje por segundo
@@ -2713,7 +3349,8 @@ con ellos; en cuanto hay un corte montado, la estimación pasa a ser medida.
 3. **Forma de `seleccion-vN.json`.** El esquema del apartado «Contrato» es el único para los cuatro
    planes. `render` lee `version`, `source`, `audio_stream`, `settings.{speed,rate,sample_rate}`,
    `segments[].{id,title,spans,frames,samples,subcuts}` y `warnings`, y rechaza el plan si `frames`,
-   `samples` o los `subcuts` publicados no cuadran con los tramos.
+   `samples` o los `subcuts` publicados no cuadran entre sí ni con los tramos; no recalcula `N` ni
+   `M`, los lee.
 4. **Un `.mkv` por corte con dos pasadas más un remux.** El contrato exige llamada de audio aparte y
    el §6 exige `cortes/<clave>.mkv`. Se concilian con una tercera invocación `-c copy`, que no
    recodifica nada y mantiene el invariante de D-006.
@@ -2727,8 +3364,9 @@ con ellos; en cuanto hay un corte montado, la estimación pasa a ser medida.
    **solo se exige cuando la envolvente de referencia tiene al menos 6 dB de desviación típica**, y el
    desfase se estima minimizando la diferencia media en dB, que además bloquea por encima de 8 dB.
    Los tres valores son los umbrales provisionales declarados más arriba.
-7. **`cortes/` puede existir.** `new_dir` se reserva para `vN/` y para la carpeta de evidencia
-   `fallo-v*`; la caché usa `mkdir(exist_ok=True)`, amparada por la regla de reanudación de §6.
+7. **`cortes/` puede existir.** `new_dir` se reserva para la carpeta de evidencia `fallo-v*` —`vN/`
+   se arma entera dentro de la carpeta temporal del montaje y se publica con un único `publish`, no
+   con `new_dir`—; la caché usa `mkdir(exist_ok=True)`, amparada por la regla de reanudación de §6.
 8. **Copia de los cortes a la carpeta de ensamblado.** El *concat demuxer* resuelve los nombres de la
    lista respecto al `cwd`; para no escribir listas con rutas absolutas los cortes se copian a la
    carpeta temporal. En medios largos conviene sustituir la copia por un enlace duro cuando el
@@ -2744,3 +3382,10 @@ con ellos; en cuanto hay un corte montado, la estimación pasa a ser medida.
 11. **Sin medición sobre material real.** Todas las cifras de este plan proceden de medios sintéticos
     de 320×180 y 10–40 s. La aceptación manual del §13 —grabación 4K larga, memoria máxima por corte,
     calibración de umbrales— sigue pendiente y no la cubre ninguna tarea.
+12. **`render` confía en el plan publicado, que ya es inmutable.** `subcuts` (Tarea 2) no recalcula
+    `N` ni `M`: lee `segment["subcuts"]` tal como lo publicó `plan.split` y solo valida coherencia
+    interna. Es correcto porque `seleccion-vN.json` ya está aceptado y lleva su propio `sha256`
+    (Tareas 1 y 10); si `render` desconfiara del plan y volviera a calcular la regla de reparto por su
+    cuenta, la duplicación podría divergir en los empates de `N = k + 0,5` que solo aparecen a
+    velocidades altas (medido: 2 896 de 20 000 cortes sintéticos a ×2,0), sin que `render` tuviera
+    forma de saber cuál de las dos cuentas es la que hay que montar.

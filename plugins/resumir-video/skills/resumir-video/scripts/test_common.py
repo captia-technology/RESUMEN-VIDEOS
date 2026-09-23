@@ -1,0 +1,582 @@
+"""Fast checks of the shared core; only the ones that need media touch FFmpeg."""
+
+import array
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import tempfile
+import threading
+import time
+import unittest
+import unittest.mock
+import wave
+
+import common
+
+SAMPLES = {}
+
+
+def tone_wav(path, seconds=6.0, rate=16000, pauses=((1.0, 1.5), (3.0, 3.6))):
+    """16 kHz mono PCM with a 440 Hz tone and exact silences; no FFmpeg needed."""
+    key = (seconds, rate, pauses)
+    if key not in SAMPLES:
+        samples = array.array("h")
+        for index in range(int(seconds * rate)):
+            moment = index / rate
+            quiet = any(a <= moment < b for a, b in pauses)
+            samples.append(0 if quiet else int(8000 * math.sin(2 * math.pi * 440 * moment)))
+        SAMPLES[key] = samples.tobytes()
+    with wave.open(str(path), "wb") as sound:
+        sound.setnchannels(1)
+        sound.setsampwidth(2)
+        sound.setframerate(rate)
+        sound.writeframes(SAMPLES[key])
+
+
+class ObjetivoTest(unittest.TestCase):
+    def test_reads_percentages_durations_and_clocks(self):
+        for text, expected in (("10%", 360.0), ("10 %", 360.0), ("10 por ciento", 360.0),
+                               ("720s", 720.0), ("720 s", 720.0), ("12min", 720.0),
+                               ("12 min", 720.0), ("0:12:00", 720.0), ("12:00", 720.0),
+                               ("1,5 min", 90.0), ("0.5h", 1800.0)):
+            with self.subTest(text=text):
+                self.assertAlmostEqual(common.parse_target(text, 3600), expected)
+        for text in (None, "", "   ", "ninguno"):
+            self.assertIsNone(common.parse_target(text, 3600))
+
+    def test_rejects_ambiguous_and_out_of_range_targets(self):
+        for text in ("12", "mucho", "1:2:3", "0%", "100%", "120%", "2h", "3600s", "0:00:00"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                common.parse_target(text, 3600)
+
+    def test_band_never_falls_below_ten_seconds(self):
+        self.assertAlmostEqual(common.tolerance(720), 36.0)
+        self.assertAlmostEqual(common.tolerance(200), 10.0)
+        self.assertAlmostEqual(common.tolerance(100), 10.0)
+        self.assertAlmostEqual(common.tolerance(240), 12.0)
+
+    def test_rounding_to_the_returned_precision_cannot_reach_the_original(self):
+        for text in ("179.9999s", "179.9996s", "2:59.9999"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                common.parse_target(text, 180.0)
+        self.assertAlmostEqual(common.parse_target("179.99s", 180.0), 179.99)
+
+
+class HuellaTest(unittest.TestCase):
+    def test_survives_a_move_and_notices_both_ends(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            big = root / "grande.bin"
+            big.write_bytes(b"A" * (9 * 1024 * 1024) + b"Z" * 16)
+            original = common.fingerprint(big)
+            moved = root / "otro nombre.bin"
+            big.replace(moved)
+            self.assertEqual(common.fingerprint(moved)["sha256"], original["sha256"])
+            self.assertEqual(set(original), {"size", "mtime_ns", "sha256"})
+            with moved.open("r+b") as stream:
+                stream.seek(-4, os.SEEK_END)
+                stream.write(b"QQQQ")
+            self.assertNotEqual(common.fingerprint(moved)["sha256"], original["sha256"])
+
+    def test_small_files_are_hashed_whole_and_only_once(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            small = Path(temporary) / "corto.bin"
+            small.write_bytes(b"hola")
+            self.assertEqual(common.fingerprint(small)["size"], 4)
+            self.assertEqual(common.fingerprint(small)["sha256"],
+                             hashlib.sha256(b"hola").hexdigest())
+
+    def test_files_below_eight_mib_are_hashed_through_the_middle(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            medium = Path(temporary) / "medio.bin"
+            data = b"A" * (6 * 1024 * 1024)
+            medium.write_bytes(data)
+            # Hash must be exactly the complete file, not just the ends.
+            expected = hashlib.sha256(data).hexdigest()
+            self.assertEqual(common.fingerprint(medium)["sha256"], expected)
+            # Byte 5 MiB: past the first 4 MiB, so only reading a 6 MiB file whole notices it.
+            with medium.open("r+b") as stream:
+                stream.seek(5 * 1024 * 1024)
+                stream.write(b"QQQQ")
+            self.assertNotEqual(common.fingerprint(medium)["sha256"], expected)
+
+    def test_large_files_use_only_ends(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            large = Path(temporary) / "grande.bin"
+            data = b"A" * (12 * 1024 * 1024)
+            large.write_bytes(data)
+            # Hash must be exactly the first 4 MiB + last 4 MiB.
+            expected = hashlib.sha256(data[:common.CHUNK] + data[-common.CHUNK:]).hexdigest()
+            self.assertEqual(common.fingerprint(large)["sha256"], expected)
+
+
+class EnergiaTest(unittest.TestCase):
+    def test_levels_silences_and_budget(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "tono.wav"
+            tone_wav(path)
+            levels = common.energy(path)
+            self.assertEqual(len(levels), 600)
+            self.assertAlmostEqual(levels[50], -15.19, delta=0.1)
+            self.assertEqual(levels[120], common.ENERGY_FLOOR)
+            # 1.16 s is 115.999… steps of 10 ms: the window opens at 116, never at 115.
+            self.assertEqual(common.bounds(levels, 1.16, 2.32), (116, 232))
+            self.assertEqual(common.silences(levels, 0, 6), [(1.0, 1.5), (3.0, 3.6)])
+            self.assertEqual(common.silences(levels, 0, 6, min_silence=0.55), [(3.0, 3.6)])
+            self.assertEqual(common.silences(levels, 1.2, 2.0), [(1.2, 1.5)])
+            self.assertEqual(common.silences(levels, 1.25, 2.0), [])
+            # A threshold above the tone's own level turns the whole clip into one silence run,
+            # and both edges must come back as float even when they land exactly on int a/b.
+            wide = common.silences(levels, 0, 6, threshold=-10.0)
+            self.assertEqual(wide, [(0.0, 6.0)])
+            self.assertIsInstance(wide[0][0], float)
+            self.assertIsInstance(wide[0][1], float)
+            self.assertTrue(common.voiced(levels, 0.5, 0.58))
+            self.assertFalse(common.voiced(levels, 1.1, 1.18))
+            long_path = Path(temporary) / "largo.wav"
+            tone_wav(long_path, seconds=120.0, pauses=())
+            started = time.perf_counter()
+            common.energy(long_path)
+            spent = time.perf_counter() - started
+            # Catastrophe alarm only (6x the 30 s/2h budget, scaled to 120 s): sensitive to
+            # machine load and unable to tell implementations apart; the deterministic check
+            # is test_the_table_of_squares_is_built_once, not this wall-clock measurement.
+            self.assertLess(spent, 3.0)
+
+    def test_the_table_of_squares_is_built_once(self):
+        # The squares table is built once and reused: same object, and i*i in its lower half.
+        table = common.squares()
+        self.assertEqual(len(table), 65536)
+        for index in (0, 1, 100, 32767):
+            self.assertEqual(table[index], index * index)
+        self.assertIs(common.squares(), table)
+
+    def test_cache_is_written_once_and_reread(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            root = Path(temporary)
+            tone_wav(root / "tono.wav")
+            cache = root / "energia.f32"
+            with unittest.mock.patch.object(os, "replace", wraps=os.replace) as replace:
+                common.energy(root / "tono.wav", cache)
+            staged = replace.call_args[0][0]
+            self.assertEqual(staged.name, f"energia.f32.{os.getpid()}.parcial")
+            self.assertEqual(cache.stat().st_size, 600 * 4)
+            # Levels no recording gives: reading the cache and recomputing it are told apart.
+            marked = array.array("f", [-7.5] * 600)
+            cache.write_bytes(marked.tobytes())
+            self.assertEqual(list(common.energy(root / "tono.wav", cache)), list(marked))
+            self.assertFalse(list(root.glob("*.parcial")))
+            cache.write_bytes(b"\x00" * 8)
+            recomputed = common.energy(root / "tono.wav", cache)
+            self.assertEqual(len(recomputed), 600)
+            self.assertEqual(recomputed[120], common.ENERGY_FLOOR)
+            # The wrong-size cache is repaired in place, not left corrupt for every future call.
+            self.assertEqual(cache.stat().st_size, 600 * 4)
+            self.assertFalse(list(root.glob("*.parcial")))
+            marked_again = array.array("f", [-3.25] * 600)
+            cache.write_bytes(marked_again.tobytes())
+            self.assertEqual(list(common.energy(root / "tono.wav", cache)), list(marked_again))
+
+    def test_only_the_analysis_format_is_accepted(self):
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "estereo.wav"
+            with wave.open(str(path), "wb") as sound:
+                sound.setnchannels(2)
+                sound.setsampwidth(2)
+                sound.setframerate(16000)
+                sound.writeframes(b"\x00" * 640)
+            with self.assertRaisesRegex(ValueError, "mono PCM de 16 bits"):
+                common.energy(path)
+
+
+class IslasTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        path = Path(self.temporary.name) / "tono.wav"
+        tone_wav(path)
+        self.levels = common.energy(path)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_grid_rounds_to_the_nearest_frame(self):
+        self.assertAlmostEqual(common.snap(1.234, 0.04, 0.0), 1.24)
+        self.assertAlmostEqual(common.snap(1.219, 0.04, 0.0), 1.2)
+        self.assertAlmostEqual(common.snap(1.2, 0.04, 0.032), 1.192)
+        self.assertAlmostEqual(common.snap(1.0, 1001 / 30000, 0.0), 1.001)
+        self.assertAlmostEqual(common.snap(2.0, 1001 / 30000, 0.0), 2.002)
+
+    def test_pauses_leave_islands_on_the_grid(self):
+        self.assertEqual(common.islands(self.levels, 0.5, 4.0, interval=0.04, origin=0.0),
+                         [[0.52, 1.08], [1.44, 3.08], [3.52, 4.0]])
+        self.assertEqual(common.islands(self.levels, 0.5, 4.0, interval=0.04, origin=0.0,
+                                        remove_pauses=False), [[0.52, 4.0]])
+        self.assertEqual(common.islands(self.levels, 0.5, 2.0, interval=0.04, origin=0.032),
+                         [[0.512, 1.072], [1.432, 1.992]])
+
+    def test_a_cut_inside_a_pause_keeps_nothing(self):
+        self.assertEqual(common.islands(self.levels, 1.1, 1.4, interval=0.04, origin=0.0), [])
+
+    def test_short_and_edge_spans_are_dropped(self):
+        self.assertEqual(common.islands(self.levels, 0.95, 3.7, interval=0.04, origin=0.0),
+                         [[1.44, 3.08]])
+
+    def test_a_visual_cut_keeps_its_short_span(self):
+        # §7.4: keeping the pauses means keeping the span too, even below MIN_EDGE_ISLAND.
+        self.assertEqual(common.islands(self.levels, 1.1, 1.2, interval=0.04, origin=0.0,
+                                        remove_pauses=False), [[1.12, 1.2]])
+
+    def test_interior_spans_shorter_than_min_island_are_dropped(self):
+        # Three pauses: the middle one creates a short interior span between longer voiced sections.
+        # Pauses at (1.0, 1.4), (1.5, 1.9), and (4.0, 4.5) leave spans: [0,1.0], [1.4,1.5] (0.1s),
+        # [1.9,4.0], and [4.5,6.0]. The interior span [1.4,1.5] is < MIN_ISLAND and should disappear.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "interior_short.wav"
+            tone_wav(path, seconds=6.0, pauses=((1.0, 1.4), (1.5, 1.9), (4.0, 4.5)))
+            levels = common.energy(path)
+            islands = common.islands(levels, 0, 6.0, interval=0.01, origin=0.0, margin=0.0)
+            # The [1.4,1.5] span (0.1s < MIN_ISLAND) disappears; three spans survive.
+            self.assertEqual(islands, [[0.0, 1.0], [1.9, 4.0], [4.5, 6.0]])
+
+        # Same setup but with a 0.12s interior gap (exactly MIN_ISLAND): [1.4, 1.52].
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "interior_exact.wav"
+            tone_wav(path, seconds=6.0, pauses=((1.0, 1.4), (1.52, 1.9), (4.0, 4.5)))
+            levels = common.energy(path)
+            islands = common.islands(levels, 0, 6.0, interval=0.01, origin=0.0, margin=0.0)
+            # The [1.4, 1.52] span (0.12s == MIN_ISLAND) survives as an interior span.
+            self.assertEqual(islands, [[0.0, 1.0], [1.4, 1.52], [1.9, 4.0], [4.5, 6.0]])
+
+    def test_neighbours_closer_than_a_frame_are_fused(self):
+        # With a large frame interval, snapped boundaries can be closer than one frame apart,
+        # triggering fusion of adjacent island groups. Standard pauses leave three voiced spans;
+        # with interval=1.5, they all fuse into one; with interval=0.04, they stay separate.
+        # With interval=1.5, snap([0,1.0]) = [0, 1.5], snap([1.5,3.0]) = [1.5, 3.0],
+        # snap([3.6,6.0]) = [3.0, 6.0], and gaps become 0.0 and 0.0, triggering fusion.
+        islands_fused = common.islands(self.levels, 0, 6, interval=1.5, origin=0.0, margin=0.0)
+        # All three spans fuse into one large span covering [0, 6].
+        self.assertEqual(islands_fused, [[0.0, 6.0]])
+
+        # With the normal interval, spans stay separate.
+        islands_separate = common.islands(self.levels, 0, 6, interval=0.04, origin=0.0, margin=0.0)
+        # Three spans survive without fusion.
+        self.assertEqual(islands_separate, [[0.0, 1.0], [1.52, 3.0], [3.6, 6.0]])
+
+
+class BordesTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        path = Path(self.temporary.name) / "tono.wav"
+        tone_wav(path)
+        self.levels = common.energy(path)
+        self.words = [{"start": 0.0, "end": 1.0}, {"start": 1.5, "end": 3.0},
+                      {"start": 3.65, "end": 5.9}]
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_both_edges_move_to_the_nearest_silence(self):
+        self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, self.words), (1.5, 3.0, None))
+
+    def test_clean_edges_are_left_alone(self):
+        self.assertEqual(common.adjust_edges(1.2, 1.3, self.levels, self.words), (1.2, 1.3, None))
+
+    def test_without_a_nearby_silence_it_warns(self):
+        start, end, note = common.adjust_edges(4.0, 4.5, self.levels, self.words)
+        self.assertEqual((start, end), (3.6, 4.5))
+        self.assertEqual(note, "borde_en_voz")
+
+    def test_it_never_invades_the_neighbouring_word(self):
+        words = [{"start": 0.0, "end": 1.0}, {"start": 1.48, "end": 2.9}, {"start": 2.95, "end": 5.9}]
+        start, end, _ = common.adjust_edges(2.0, 2.5, self.levels, words)
+        self.assertAlmostEqual(start, 1.5)
+        self.assertAlmostEqual(end, 2.93)
+        # Mirror on the start side: the previous word's end (1.49) sits inside the preceding
+        # silence (1.0, 1.5), 0.01 s short of its far edge, so the raw candidate (1.5) would leave
+        # less than WORD_MARGIN after the word; the start is pushed to 1.49 + 0.02 = 1.51 instead.
+        mirrored = [{"start": 0.0, "end": 1.49}, {"start": 1.5, "end": 3.0}, {"start": 3.65, "end": 5.9}]
+        start, end, _ = common.adjust_edges(2.0, 2.5, self.levels, mirrored)
+        self.assertAlmostEqual(start, 1.51)
+        self.assertAlmostEqual(end, 3.0)
+
+    def test_it_works_without_word_marks(self):
+        self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, []), (1.5, 3.0, None))
+        self.assertEqual(common.adjust_edges(2.0, 2.5, self.levels, None), (1.5, 3.0, None))
+
+    def test_silence_beyond_the_window_is_ignored(self):
+        # Cut end at b=1.0; the leading pause (0.0, 0.2) keeps the start side untouched (voiced
+        # lookback [0.02, 0.1) is silent), isolating the check to EDGE_WINDOW on the end side.
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "justo_fuera.wav"
+            # Pause starts at b + 0.61 s: only 0.7 - 0.61 = 0.09 s show inside the widened search
+            # window, below EDGE_SILENCE (0.10 s), so no candidate qualifies.
+            tone_wav(path, seconds=3.0, pauses=((0.0, 0.2), (1.61, 3.0)))
+            levels = common.energy(path)
+            start, end, note = common.adjust_edges(0.1, 1.0, levels, [])
+            self.assertEqual((start, end), (0.1, 1.0))
+            self.assertEqual(note, "borde_en_voz")
+        with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+            path = Path(temporary) / "justo_dentro.wav"
+            # Pause starts at b + 0.60 s exactly: 0.7 - 0.60 = 0.10 s show, meeting EDGE_SILENCE.
+            tone_wav(path, seconds=3.0, pauses=((0.0, 0.2), (1.60, 3.0)))
+            levels = common.energy(path)
+            start, end, note = common.adjust_edges(0.1, 1.0, levels, [])
+            self.assertEqual((start, end), (0.1, 1.6))
+            self.assertIsNone(note)
+
+
+    def test_a_voice_within_eighty_milliseconds_of_an_edge_counts_as_speech(self):
+        def edges(pauses, a, b):
+            with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
+                path = Path(temporary) / "borde.wav"
+                tone_wav(path, seconds=4.0, pauses=pauses)
+                return common.adjust_edges(a, b, common.energy(path), [])
+
+        # End edge at 2,0 (the start sits inside a leading pause, so it never speaks). Voice back
+        # at 2,05 is inside the 80 ms that §7.3 looks ahead, but the 50 ms of silence before it is
+        # shorter than EDGE_SILENCE: no pause to move to, so the edge is reported.
+        self.assertEqual(edges(((0.0, 0.2), (1.5, 2.05)), 0.1, 2.0), (0.1, 2.0, "borde_en_voz"))
+        # At 2,09 the voice is beyond those 80 ms: the edge is clean and nothing is said.
+        self.assertEqual(edges(((0.0, 0.2), (1.5, 2.09)), 0.1, 2.0), (0.1, 2.0, None))
+        # The same on the start edge at 2,0: the voice ended 50 ms before it, or 90 ms.
+        self.assertEqual(edges(((1.95, 4.0),), 2.0, 3.0), (2.0, 3.0, "borde_en_voz"))
+        self.assertEqual(edges(((1.91, 4.0),), 2.0, 3.0), (2.0, 3.0, None))
+
+    def test_the_upper_bound_of_a_window_never_opens_one_index_too_wide(self):
+        levels = array.array("f", [0.0] * 700)
+        # 0.07 / 0.01 is 7.000000000000001: without the epsilon its ceiling is 8, one window more.
+        self.assertEqual(common.bounds(levels, 0.0, 0.07), (0, 7))
+        # 18 of the first 600 multiples of 10 ms carry that noise upward; every one must close
+        # exactly where it says.
+        noisy = [k for k in range(1, 601) if math.ceil(k / 100 / common.ENERGY_STEP) > k]
+        self.assertEqual(len(noisy), 18)
+        self.assertEqual([k for k in range(1, 601)
+                          if common.bounds(levels, 0.0, k / 100) != (0, k)], [])
+
+
+class ExactitudTest(unittest.TestCase):
+    def test_frames_and_samples_match_the_rendered_cut(self):
+        self.assertEqual(common.frames_for(7.16, 25, 1.25), 143)
+        self.assertEqual(common.samples_for(143, 25, 48000), 274560)
+        self.assertEqual(common.frames_for(10, 25, 1.0), 250)
+        self.assertEqual(common.frames_for(0.5, 25, 1.0), 13)
+        self.assertEqual(common.frames_for(0.0, 25, 1.25), 0)
+        self.assertEqual(common.samples_for(200, 30000 / 1001, 48000), 320320)
+
+    def test_samples_round_half_up_instead_of_truncating(self):
+        rate = 30000 / 1001
+        # 1 / rate * 48000 is 1601,6: int() would give 1601, the rounding of section 7.5 gives 1602.
+        # 2 frames are 3203,2 (rounds down) and 3 frames 4804,8 (up): both sides of the half.
+        for frames, expected in ((1, 1602), (2, 3203), (3, 4805)):
+            with self.subTest(frames=frames):
+                self.assertEqual(common.samples_for(frames, rate, 48000), expected)
+
+    def test_the_digest_ignores_key_order_and_its_own_field(self):
+        one = {"b": 2, "a": [1, {"y": 1, "x": 2}], "sha256": "lo que sea"}
+        other = {"a": [1, {"x": 2, "y": 1}], "b": 2}
+        self.assertEqual(common.plan_sha256(one), common.plan_sha256(other))
+        self.assertNotEqual(common.plan_sha256(one), common.plan_sha256({"a": [1], "b": 2}))
+
+    def test_warnings_carry_their_own_blocking_flag(self):
+        self.assertEqual(common.warning("corte_vacio", "sin tramos", cut=7),
+                         {"codigo": "corte_vacio", "mensaje": "sin tramos", "corte": 7,
+                          "bloquea": True})
+        self.assertEqual(common.warning("corte_breve", "muy corto")["bloquea"], False)
+        self.assertEqual(common.BLOCKING, ("esenciales_superan_objetivo", "dependencia_excluida",
+                                           "tema_sin_cubrir", "corte_vacio"))
+        self.assertIn("av_buffer_alloc() failed", common.MEMORY_PATTERNS)
+        self.assertEqual(common.MAX_SPANS, 40)
+
+    def test_searching_ignores_accents_but_not_the_spanish_n(self):
+        self.assertEqual(common.strip_accents("Año ATEX: ¿Qué diseñó Muñoz?"),
+                         "Año ATEX: ¿Que diseño Muñoz?")
+        self.assertEqual(common.strip_accents("ÑANDÚ ÜÖ"), "ÑANDU UO")
+
+    def test_the_reading_clock_truncates_to_the_second(self):
+        self.assertEqual(common.clock(0), "0:00")
+        self.assertEqual(common.clock(5.72), "0:05")
+        self.assertEqual(common.clock(24.36), "0:24")
+        self.assertEqual(common.clock(1005), "16:45")
+        self.assertEqual(common.clock(3727), "1:02:07")
+
+
+class PublicacionTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="resumir-video-")
+        self.work = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_publishing_never_replaces(self):
+        (self.work / "a.txt").write_text("uno", encoding="utf-8")
+        common.publish(self.work / "a.txt", self.work / "b.txt")
+        self.assertEqual((self.work / "b.txt").read_text(encoding="utf-8"), "uno")
+        self.assertFalse((self.work / "a.txt").exists())
+        (self.work / "a.txt").write_text("dos", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "no se sobrescribe"):
+            common.publish(self.work / "a.txt", self.work / "b.txt")
+        self.assertEqual((self.work / "b.txt").read_text(encoding="utf-8"), "uno")
+
+    def test_the_lock_is_exclusive_and_is_released(self):
+        marker = self.work / "montaje.lock"
+        with common.lock(marker):
+            self.assertTrue(marker.is_file())
+            with self.assertRaisesRegex(ValueError, "Otro proceso"):
+                with common.lock(marker):
+                    pass
+        self.assertFalse(marker.exists())
+
+    def test_history_trims_at_every_depth_and_never_raises(self):
+        common.history(self.work, "init", {"version": 1, "segments": 12})
+        common.history(self.work, "edit", {"version": 2, "peticion": "x" * 500,
+                                           "detalle": {"cambios": ["y" * 500]}})
+        # A record that no trimming can shrink must not abort the work it was only logging.
+        common.history(self.work, "render", {str(n): "z" * 200 for n in range(30)})
+        common.history(Path(self.work) / "no-existe", "verify", {"version": 1})
+        # A payload that is not a mapping writes nothing and, above all, raises nothing.
+        common.history(self.work, "edit", ["ni", "siquiera", "un", "mapeo"])
+        lines = (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line)["evento"] for line in lines],
+                         ["init", "edit", "render"])
+        self.assertEqual(len(json.loads(lines[1])["peticion"]), common.HISTORY_TEXT)
+        self.assertEqual(len(json.loads(lines[1])["detalle"]["cambios"][0]), common.HISTORY_TEXT)
+        self.assertEqual(json.loads(lines[2])["nota"], "registro recortado por exceder 4 KiB")
+        self.assertTrue(all(len(line.encode("utf-8")) < common.HISTORY_LIMIT for line in lines))
+
+    def test_the_history_payload_cannot_rewrite_the_moment_or_the_event(self):
+        common.history(self.work, "edit", {"cuando": "1999-01-01T00:00:00+00:00",
+                                           "evento": "falso", "version": 2,
+                                           "tipo": "seleccion"})
+        record = json.loads((self.work / "historial.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual((record["evento"], record["version"], record["tipo"]),
+                         ("edit", 2, "seleccion"))
+        self.assertNotEqual(record["cuando"], "1999-01-01T00:00:00+00:00")
+        # No letter-colon-slash pair here: the packaging test reads that as a Windows drive path.
+        self.assertRegex(record["cuando"],
+                         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00$")
+
+    def test_the_history_gives_up_on_a_payload_it_cannot_walk_without_raising(self):
+        circular = {}
+        circular["yo"] = circular
+        deep = tip = {}
+        for _ in range(3000):
+            tip["dentro"] = {}
+            tip = tip["dentro"]
+        # A RecursionError here would arrive after the version was published, and the work
+        # already done would be reported as a failure.
+        common.history(self.work, "edit", circular)
+        common.history(self.work, "edit", {"detalle": deep})
+        common.history(self.work, "edit", {1: "clave", "dos": "clave"})
+        self.assertFalse((self.work / "historial.jsonl").exists())
+        common.history(self.work, "init", {"version": 1})
+        lines = (self.work / "historial.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line)["evento"] for line in lines], ["init"])
+
+    def test_a_marker_that_cannot_be_removed_does_not_hide_the_error_of_the_body(self):
+        marker, other = self.work / "montaje.lock", self.work / "otro.lock"
+        with unittest.mock.patch.object(Path, "unlink", side_effect=PermissionError("bloqueado")):
+            with self.assertRaisesRegex(ValueError, "fallo del montaje"):
+                with common.lock(marker):
+                    raise ValueError("fallo del montaje")
+            # Nor does it turn a body that finished into a failure.
+            with common.lock(other):
+                pass
+        # The stale marker is not lost: the next lock reports it with its own message.
+        for stale in (marker, other):
+            with self.subTest(marker=stale.name):
+                with self.assertRaisesRegex(ValueError, "Otro proceso"):
+                    with common.lock(stale):
+                        pass
+
+    def test_published_files_are_written_with_unix_newlines(self):
+        _, path = common.reserve_version(self.work, "seleccion")
+        common.write_reserved(path, '{\n  "version": 1\n}\n')
+        common.history(self.work, "init", {"version": 1})
+        common.history(self.work, "edit", {"version": 2})
+        # Windows would turn every LF into CRLF, which deforms diffs and comparisons of documents.
+        for name in (path.name, "historial.jsonl"):
+            with self.subTest(file=name):
+                data = (self.work / name).read_bytes()
+                self.assertNotIn(b"\r", data)
+                self.assertTrue(data.endswith(b"\n"))
+
+    def test_versions_are_reserved_exclusively(self):
+        first, first_path = common.reserve_version(self.work, "seleccion")
+        second, second_path = common.reserve_version(self.work, "seleccion")
+        self.assertEqual((first, second), (1, 2))
+        self.assertEqual(first_path.name, "seleccion-v1.json")
+        self.assertEqual(first_path.stat().st_size, 0)
+        common.write_reserved(second_path, '{"version": 2}\n')
+        self.assertEqual(second_path.read_text(encoding="utf-8"), '{"version": 2}\n')
+        self.assertFalse(list(self.work.glob("*.parcial")))
+        for number in (3, 4, 5):
+            (self.work / f"seleccion-v{number}.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(common.reserve_version(self.work, "seleccion")[0], 6)
+        self.assertEqual(common.reserve_version(self.work, "borrador")[0], 1)
+
+    def test_two_concurrent_reservations_never_share_a_version(self):
+        # Threads, not processes, but the guarantee is the same: O_EXCL is the file system's.
+        ready, taken = threading.Barrier(2), []
+
+        def reserve():
+            ready.wait()
+            taken.append(common.reserve_version(self.work, "seleccion"))
+
+        workers = [threading.Thread(target=reserve) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(sorted(number for number, _ in taken), [1, 2])
+        self.assertEqual(sorted(path.name for _, path in taken),
+                         ["seleccion-v1.json", "seleccion-v2.json"])
+
+
+def probe_like(rate="25/1", start="0.032000", sample_rate="48000"):
+    return {"format": {"duration": "60.000000", "start_time": "0.000000"},
+            "streams": [{"index": 0, "codec_type": "video", "r_frame_rate": rate,
+                         "avg_frame_rate": rate, "start_time": start},
+                        {"index": 1, "codec_type": "audio", "sample_rate": sample_rate}]}
+
+
+class LineaTest(unittest.TestCase):
+    def test_the_grid_starts_at_the_video_offset(self):
+        grid = common.timeline(probe_like())
+        self.assertEqual(set(grid), {"start", "origin", "rate", "fps", "interval", "sample_rate"})
+        self.assertEqual(grid["rate"], "25/1")
+        self.assertAlmostEqual(grid["interval"], 0.04)
+        self.assertAlmostEqual(grid["fps"], 25.0)
+        self.assertAlmostEqual(grid["origin"], 0.032)
+        self.assertEqual(grid["sample_rate"], 48000)
+        self.assertAlmostEqual(common.timeline(probe_like(rate="30000/1001"))["fps"], 30000 / 1001)
+        self.assertAlmostEqual(common.timeline(probe_like(start="0.000000"))["origin"], 0.0)
+        # offset >= interval: modulo distinguishes from simple subtraction (0.1 mod 0.04 = 0.02)
+        self.assertAlmostEqual(common.timeline(probe_like(start="0.1"))["origin"], 0.02, places=9)
+        # Origin measured from container start, not zero (format.start_time = 1.0, video.start_time = 1.032)
+        offset_from_container = common.timeline(
+            {"format": {"duration": "60.0", "start_time": "1.0"},
+             "streams": [{"index": 0, "codec_type": "video", "r_frame_rate": "25/1",
+                          "avg_frame_rate": "25/1", "start_time": "1.032"},
+                         {"index": 1, "codec_type": "audio", "sample_rate": "48000"}]})
+        self.assertAlmostEqual(offset_from_container["origin"], 0.032, places=9)
+        with self.assertRaisesRegex(ValueError, "pista de audio"):
+            common.timeline({"format": {"duration": "60.0", "start_time": "0.0"},
+                             "streams": [probe_like()["streams"][0]]})
+
+    def test_audio_only_media_keep_the_same_six_keys(self):
+        picture, sound = probe_like()["streams"]
+        only_sound = {"format": {"duration": "60.0", "start_time": "0.0"}, "streams": [sound]}
+        line = common.timeline(only_sound)
+        self.assertEqual(set(line), {"start", "origin", "rate", "fps", "interval", "sample_rate"})
+        self.assertEqual((line["rate"], line["fps"], line["interval"]), (None, None, None))
+        self.assertEqual((line["start"], line["origin"], line["sample_rate"]), (0.0, 0.0, 48000))
+        # Cover art is metadata, not footage: a tagged m4a is still an audio-only medium.
+        cover = dict(picture, index=2, disposition={"attached_pic": 1})
+        self.assertEqual(common.timeline({**only_sound, "streams": [sound, cover]}), line)
+
+
+if __name__ == "__main__":
+    unittest.main()

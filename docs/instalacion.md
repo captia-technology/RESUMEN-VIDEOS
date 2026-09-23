@@ -2,7 +2,7 @@
 
 Guía para instalar la skill `resumir-video` en Claude Code, GitHub Copilot y OpenAI Codex, actualizarla y desinstalarla. Las capacidades se describen en [capacidades.md](capacidades.md).
 
-Estado: versión 0.1.0 (2026-09-17). Las órdenes de catálogo se comprobaron con una copia local del repositorio (por ruta y como copia Git que sustituía a `captia-technology/RESUMEN-VIDEOS`); los clientes, sus versiones y los resultados figuran en [plan.md](plan.md#validación-2026-09-17). La instalación desde GitHub (incluidos VS Code, el bloque de equipo y los instaladores de terceros) está pendiente de evidencia hasta publicar el repositorio. Los sistemas de plugins cambian con frecuencia: si una orden no existe en tu versión, actualiza el cliente o usa la [instalación como skill independiente](#5-skill-independiente-sin-plugins).
+Estado: versión 0.2.0 (2026-09-18). Las órdenes de catálogo se comprobaron con una copia local del repositorio (por ruta y como copia Git que sustituía a `captia-technology/RESUMEN-VIDEOS`); los clientes, sus versiones y los resultados figuran en [plan.md](plan.md#validación-2026-09-17). La instalación desde GitHub (incluidos VS Code, el bloque de equipo y los instaladores de terceros) está pendiente de evidencia hasta publicar el repositorio. Los sistemas de plugins cambian con frecuencia: si una orden no existe en tu versión, actualiza el cliente o usa la [instalación como skill independiente](#5-skill-independiente-sin-plugins).
 
 ## Resumen
 
@@ -27,6 +27,8 @@ Instala cada skill por **un solo canal** en cada entorno. Si el plugin convive c
 | Git (catálogos desde GitHub) | `winget install Git.Git` | `xcode-select --install` | `sudo apt install git` |
 
 Algunas compilaciones de FFmpeg (variantes LGPL, `ffmpeg-free` de Fedora) no incluyen libx264. En Windows, `video.py` necesita los ejecutables `ffmpeg.exe` y `ffprobe.exe` en PATH; un envoltorio `.cmd` o `.bat` no sirve. El agente debe poder inspeccionar imágenes. `faster-whisper` es opcional y se instala solo si hace falta transcribir; véase la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md#transcripción-opcional).
+
+**Opcionales.** Pandoc, `python-docx` y Pillow no son obligatorios; sin ellos la skill se degrada en vez de fallar: sin Pandoc ni `python-docx`, el documento se entrega solo en Markdown (sin DOCX); sin Pillow, el timeline del informe queda solo en texto. `check` informa de cada uno en `degraded`, redactado, pero ninguno de los tres cambia su código de salida. En Windows, si `faster-whisper` no encuentra las DLL de CUDA/cuDNN, pasa su carpeta con `--dll-dir` (repetible) a `transcribe`.
 
 Comprueba el entorno con `video.py check`. La ruta depende de la carpeta desde la que lo ejecutes:
 
@@ -274,4 +276,4 @@ Los usuarios de plugins reciben la versión con las órdenes de actualización d
 | `La carpeta ya existe y no se sobrescribe` | Indica una carpeta nueva (por ejemplo, con el sufijo `-2`); no crees la carpeta antes de `prepare`, `frames` o `render`. |
 | `install.py` indica `desactualizada` | La copia difiere de la del repositorio (versión anterior, cambios locales o metadatos de `gh skill`). `--force` la reemplaza y, con `--uninstall`, la elimina. |
 | `Error: no existe la carpeta del proyecto …` | `--project-dir` debe apuntar a una carpeta existente. |
-| El montaje supera el tiempo máximo de una orden del agente | Ejecuta `render` en segundo plano si el cliente lo permite, o lanza la misma orden en una terminal. Cada llamada genera un `resumen.mp4` independiente, así que no repartas los cortes entre varias llamadas. Si se interrumpe, usa otra carpeta `--out` y repite el montaje. |
+| El montaje supera el tiempo máximo de una orden del agente | Acota cada llamada con `--budget`: cada corte se verifica y se cachea en `cortes/` antes de contar, así que una llamada que se queda a medias devuelve código 3 sin perder lo ya montado. Repite exactamente la misma orden, con el mismo `--work`, para que reutilice los cortes ya verificados en `cortes/`, o ejecuta `render` en segundo plano si el cliente lo permite. |

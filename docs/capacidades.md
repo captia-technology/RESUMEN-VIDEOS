@@ -1,32 +1,40 @@
 # Capacidades
 
-Catálogo de lo que hace la skill `resumir-video` 0.1.0, cómo reparte el trabajo entre el agente y el asistente local, qué entradas admite, qué produce, qué garantiza y cuáles son sus límites. La instalación está en [instalacion.md](instalacion.md); las órdenes exactas y los formatos de archivo, en la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md).
+Catálogo de lo que hace la skill `resumir-video` 0.2.0, cómo reparte el trabajo entre el agente y el asistente local, qué entradas admite, qué produce, qué garantiza y cuáles son sus límites. La instalación está en [instalacion.md](instalacion.md); las órdenes exactas y los formatos de archivo, en la [referencia de operación](../plugins/resumir-video/skills/resumir-video/references/operacion.md).
 
 ## Qué hace
 
-Convierte un vídeo técnico local (formación, ponencia, reunión, demostración) en un **MP4 más corto hecho con fragmentos originales**, sin narración sintética ni música. El agente estudia a la vez lo que se dice y lo que se muestra, decide qué unidades de conocimiento conservar y documenta la evidencia de cada corte. Un asistente en Python con FFmpeg extrae la evidencia y monta el resultado de forma determinista y verificable.
+Convierte un vídeo técnico local (formación, ponencia, reunión, demostración) o una grabación de solo
+audio en un **MP4 más corto hecho con fragmentos originales** (o, en modo audio, un documento), sin
+narración sintética ni música. El agente estudia a la vez lo que se dice y lo que se muestra, decide
+qué unidades de conocimiento conservar y documenta la evidencia de cada corte. Un asistente en Python
+con FFmpeg extrae la evidencia y monta el resultado de forma determinista y verificable. Por defecto
+aplica velocidad ×1,25 y elimina pausas; ambas son configurables y pueden desactivarse
+([D-007](decisiones.md#d-007--compresión-por-defecto-con-objetivo-configurable)).
 
 No hace:
 
 - Resúmenes solo de texto cuando es posible montar el vídeo.
 - Selección automática por silencios, velocidad de voz o palabras clave.
-- Aceleración, eliminación de pausas, transiciones, rótulos o recortes de diapositivas.
+- Transiciones, rótulos o recortes de diapositivas.
 - Cambios en el orden original de los fragmentos.
 - Envío del vídeo a servicios externos.
 
 ```mermaid
 flowchart LR
-    V[Vídeo local] --> C[check / probe]
+    V[Vídeo o audio local] --> C[check / probe]
     C --> P[prepare<br/>metadata.json + audio.wav]
     P --> T[Subtítulos o transcribe<br/>transcripcion.json]
     P --> F[frames por bloques<br/>índice visual y detalle]
     T --> A[Agente: analisis.md<br/>voz + pantalla]
     F --> A
-    A --> S[seleccion.json<br/>cortes + evidencia]
-    S --> R[render]
-    R --> O[resumen.mp4<br/>resumen.md]
+    A --> PL[plan<br/>propuesta-vN.md]
+    PL --> RV[Revisión del usuario<br/>--accept / --directo]
+    RV --> R[render<br/>cortes en caché]
+    R --> O[vN/resumen.mp4]
+    O --> D[doc<br/>documento-vN/resumen.md]
     O --> E[Revisión editorial<br/>uniones y cobertura]
-    E -. ajustes .-> S
+    E -. ajustes .-> RV
 ```
 
 ## Reparto de responsabilidades
@@ -73,8 +81,9 @@ Plataformas: Windows, macOS y Linux con Python 3.10+ y FFmpeg (libx264 y AAC); c
 | Entrada | Soporte |
 | --- | --- |
 | Vídeo | Cualquier archivo local que FFmpeg lea, con exactamente una pista de vídeo (se ignoran carátulas). Admite rutas con espacios, Unicode, apóstrofos o `#`; las carpetas de salida también pueden contener `#` o `?` si el sistema lo permite. |
+| Solo audio | Cualquier archivo que FFmpeg lea sin pista de vídeo. No se monta nada: se entrega solo el documento (`documento-vN/resumen.md`), con DOCX si hay conversor ([D-010](decisiones.md#d-010--modo-audio-y-documento-con-motores-opcionales)). |
 | Audio | Primera pista por defecto o cualquier pista por índice global (`--audio-stream`, `audio_stream`). Obligatorio para `prepare` y `render`. |
-| Subtítulos | SRT/VTT u otros los lee el agente directamente; el asistente no los importa. |
+| Subtítulos | SRT o WebVTT del propio medio: `transcribe --subtitles` los normaliza a `transcripcion.json` (`settings.origen = "subtitulos"`, segmentos sin `words[]` y aviso `sin_marcas_por_palabra`); otros formatos los lee el agente directamente. |
 | Idioma | Cualquiera que admita el transcriptor; detección automática si no se indica. |
 | Duración objetivo | Opcional, como objetivo editorial; puede indicarse tras la ruta al invocar la skill. |
 
@@ -93,15 +102,23 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 ├── .gitignore                 "*": evita versionar material confidencial
 ├── metadata.json              ffprobe + source + audio_stream
 ├── audio.wav                  mono 16 kHz, solo para análisis
-├── transcripcion.json         opcional: segmentos y palabras con tiempos
+├── transcripcion.json         opcional: segmentos y palabras con tiempos (o subtítulos normalizados)
 ├── imagenes-*/ detalle-*/     JPEG + index.json por bloque
 ├── analisis.md                inventario del agente: evidencia, tiempos, hallazgos, decisiones
-├── seleccion.json             plan de cortes con evidencia
+├── propuesta-vN.md            propuesta en lenguaje natural que escribe plan; espera aceptación
+├── seleccion-vN.json          plan publicado por plan (esquema-vN.json en modo audio)
+├── historial.jsonl            diario de eventos: init, edit, accept, render, verify, doc, deliver
 ├── revision/                  opcional: fotogramas de las uniones y extractos de audio revisados
-└── final/                     salida de render (nombre elegido con --out)
-    ├── resumen.mp4            H.264 CRF 18 (yuv420p, frecuencia constante) + AAC 192 kbps
-    ├── seleccion.json         plan usado (mismo contenido, JSON reformateado)
-    └── resumen.md             duraciones, reducción, tabla origen → salida y revisión editorial
+├── vN/                        versión inmutable montada por render; no existe en modo audio
+│   ├── resumen.mp4             H.264 CRF 18 (yuv420p, frecuencia constante) + AAC 192 kbps
+│   ├── seleccion.json          plan aceptado, con la frase de aceptación
+│   ├── validacion.json         comprobaciones bloqueantes de render
+│   ├── uniones/                hojas de contacto de cada unión, para la revisión editorial
+│   ├── cobertura.json          opcional: cobertura de palabras (compare; informativo)
+│   ├── resumen.md               documento de doc: ficha, resumen, ideas clave, preguntas y limitaciones
+│   ├── resumen.docx             opcional: si hay Pandoc o python-docx
+│   └── timeline.*               línea temporal de texto y, con Pillow, timeline.png
+└── documento-vN/                único resultado en modo audio: mismo resumen.md/.docx que en vídeo
 ```
 
 | Archivo | Contenido principal |
@@ -109,8 +126,8 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 | `metadata.json` | Salida completa de `ffprobe`, `source` (`path`, `size`, `mtime_ns`) y `audio_stream`. |
 | `index.json` | `source` y `frames[]` con `time` (s, instante usado tras ajustar al último fotograma) y `file`. |
 | `transcripcion.json` | `language`, `settings` (modelo, dispositivo, tipo de cálculo, haz, VAD) y `segments[]` con `words[]`. |
-| `seleccion.json` | `source`, `audio_stream` y `segments[]` con `start`, `end`, `title`, `reason`, `audio_evidence`, `visual_evidence`. |
-| `resumen.md` | Nombre del origen (sin ruta), duración original y final, reducción, número de cortes, tabla de correspondencias y apartado editorial para completar. |
+| `seleccion-vN.json` / `esquema-vN.json` | `source`, `audio_stream`, `settings` (objetivo, velocidad, eliminación de pausas) y `segments[]` con `start`, `end`, `title`, `reason`, `audio_evidence`, `visual_evidence`, `priority`, `pinned`; detalle en [compresión](../plugins/resumir-video/skills/resumir-video/references/compresion.md). |
+| `resumen.md` | Documento editorial de `doc`: ficha, resumen, ideas clave, preguntas y respuestas de la sesión, y qué se ha dejado fuera; detalle en [documento](../plugins/resumir-video/skills/resumir-video/references/documento.md). |
 
 ## Asistente `video.py`
 
@@ -120,20 +137,24 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 | `probe VIDEO` | Muestra pistas, formato e identidad del archivo en JSON. | Nada |
 | `prepare VIDEO --work DIR` | Crea la carpeta de trabajo (no debe existir) y extrae el audio de análisis. | `.gitignore`, `metadata.json`, `audio.wav` |
 | `frames VIDEO --out DIR` | Extrae hasta 600 fotogramas por llamada en [`--start`, `--end`) cada `--step` s, con `--width` máximo (0 = original); cada imagen es el fotograma en pantalla en ese instante. | JPEG, `index.json` |
-| `transcribe AUDIO --out JSON` | Transcribe con faster-whisper y marcas por palabra (modelo, idioma, dispositivo, tipo de cálculo, haz, VAD, hilos). | `transcripcion.json` |
-| `render VIDEO --plan JSON --out DIR` | Monta los cortes del plan y valida el resultado. | `seleccion.json`, `resumen.mp4`, `resumen.md` |
+| `transcribe AUDIO --out JSON` | Transcribe con faster-whisper y marcas por palabra (modelo, idioma, dispositivo, tipo de cálculo, haz, VAD, hilos), o con `--subtitles RUTA` normaliza un SRT/WebVTT existente en vez de transcribir. | `transcripcion.json` |
+| `search TRANSCRIPCION QUERY` | Busca en la transcripción sin distinguir tildes ni mayúsculas; `--context` añade segmentos alrededor y `--max` limita las coincidencias. | Nada |
+| `plan --work DIR` | Calcula bordes, tramos, estimación, estados y avisos desde un borrador (`--draft`) y escribe la propuesta; detalle en [compresión](../plugins/resumir-video/skills/resumir-video/references/compresion.md). | `propuesta-vN.md`, `seleccion-vN.json`/`esquema-vN.json`, `historial.jsonl` |
+| `render VIDEO --work DIR --plan JSON` | Monta `vN/resumen.mp4` desde un plan aceptado (`--accept`/`--directo`), con caché de cortes y validación bloqueante; detalle en [revisión](../plugins/resumir-video/skills/resumir-video/references/revision.md). | `vN/resumen.mp4`, `vN/seleccion.json`, `vN/validacion.json`, `vN/uniones/` |
+| `doc --work DIR --version N` | Expande las marcas del documento del agente y publica Markdown y DOCX; detalle en [documento](../plugins/resumir-video/skills/resumir-video/references/documento.md). | En vídeo, `vN/resumen.md`(+`.docx`); en audio, `documento-vN/resumen.md`(+`.docx`) |
+| `compare --work DIR --version N` | Mide la cobertura de palabras del resumen frente al original; informativo, nunca bloquea. | `vN/cobertura.json` |
 
 Todas las opciones y sus valores por defecto aparecen con `video.py <subcomando> --help` y en la referencia de operación. `video.py --version` muestra la versión.
 
 ## Garantías y validaciones
 
 - **Sin sobrescritura.** `prepare`, `frames` y `render` exigen una carpeta de salida que no exista y la crean junto con sus carpetas padre; si existe, se detienen con un mensaje que propone otro nombre. `transcribe` exige un JSON que no exista dentro de una carpeta existente. Ningún JSON se reemplaza y el vídeo original nunca se modifica.
-- **Plan ligado a su origen.** `render` exige que `source` coincida exactamente (ruta, tamaño y fecha de modificación) y que `audio_stream` sea un entero que identifique una pista de audio.
+- **Plan ligado a su origen, reasignable por huella.** `render` exige que `source` coincida en huella (tamaño, `mtime_ns` y sha256 de los extremos, o del archivo completo si mide 8 MiB o menos) y que `audio_stream` sea un entero que identifique una pista de audio. Si solo cambia `source.path` pero la huella coincide, `render` lo avisa y actualiza `source` en el plan publicado; una huella distinta sigue siendo un error ([D-011](decisiones.md#d-011--identidad-por-huella-y-reasignación-de-planes)).
 - **Plan coherente.** Cortes con tiempos finitos, en orden cronológico, sin solapes (se admiten contiguos), dentro de la pista de vídeo y con título, motivo y evidencias no vacíos.
 - **Comprobaciones previas.** HDR y ausencia de libx264 o AAC se detectan antes de crear la salida.
 - **Cortes precisos.** Cada corte se recodifica a frecuencia constante y sin fotogramas B, empezando por el fotograma más próximo a su inicio (a lo sumo medio fotograma de diferencia; nunca copia directa entre fotogramas clave), y debe producir al menos su duración menos dos fotogramas.
-- **Sincronía sin deriva.** El audio de cada corte empieza exactamente en su inicio, dura lo mismo que su vídeo renderizado, se extrae como PCM y se codifica una sola vez. El desfase en cada unión es como máximo de medio fotograma y no se acumula. En una medición del 2026-09-17 con 20 uniones, las duraciones del vídeo y del audio decodificado coincidieron (con el montaje de la primera versión diferían unos 90 ms); la prueba automática admite hasta 50 ms.
-- **Validación del resultado.** Duración del vídeo frente a la suma de cortes (±0,25 s), vídeo frente a audio (±0,1 s) y decodificación completa sin errores. `resumen.mp4` solo aparece si pasa estas comprobaciones.
+- **Sincronía sin deriva.** Cada corte se produce en dos pasadas de FFmpeg (vídeo H.264 y audio PCM de 24 bits) que se remultiplexan en el mismo MKV sin recodificar, verificadas por recuento exacto de fotogramas y muestras antes de entrar en la caché de `cortes/`; el audio se codifica una sola vez, en el ensamblado final, así que las uniones no acumulan desfase ([D-006](decisiones.md#d-006--audio-codificado-una-sola-vez-en-el-montaje), [D-009](decisiones.md#d-009--montaje-por-cortes-en-caché-con-recuento-forzado)). El desfase en cada unión es como máximo de medio fotograma. En una medición del 2026-09-17 con 20 uniones, las duraciones del vídeo y del audio decodificado coincidieron (con el montaje de la primera versión diferían unos 90 ms); la prueba automática admite hasta 50 ms.
+- **Validación del resultado.** Recuento exacto de fotogramas del vídeo frente a la suma de cortes, desfase vídeo-audio de como máximo 0,1 s y decodificación completa sin errores. `resumen.mp4` solo aparece si pasa estas comprobaciones.
 - **Salida legible por agentes.** Mensajes en UTF-8, errores como `Error: …` con código 1, errores de argumentos con código 2 e interrupción (Ctrl+C) con código 130. `render` y `transcribe` informan del avance (`Corte i/N`, `Transcrito hasta X s`), y `seleccion.json` se admite en UTF-8 con o sin BOM.
 
 La validación técnica no certifica la calidad editorial: la revisión de uniones y cobertura corresponde al agente.
@@ -155,23 +176,19 @@ La validación técnica no certifica la calidad editorial: la revisión de union
 
 ## Limitaciones conocidas
 
-- `render` no se reanuda; un fallo obliga a repetir el montaje en otra carpeta.
-- `transcribe` procesa el audio en una sola pasada y escribe al final; audios de varias horas pueden agotar la memoria (dividir por bloques es manual).
 - El VAD puede omitir habla real; conviene repetir los huecos con `--no-vad`.
 - El índice de 15 s puede no mostrar una diapositiva breve; hay que ampliar el muestreo donde el audio o los cambios lo indiquen.
-- Mover o copiar el vídeo invalida `seleccion.json` hasta actualizar su `source`.
-- Si el proceso se interrumpe, la carpeta de salida queda incompleta y puede conservar una carpeta `cortes-*`: bórrala y usa otra carpeta.
+- La caché `cortes/` crece con cada corte distinto montado; para repetir un montaje desde cero con otros parámetros de codificación, borra esa carpeta a mano.
 - `resumen.mp4` solo contiene la pista de vídeo y la pista de audio elegida: se descartan los subtítulos incrustados, las demás pistas de audio, los capítulos y los metadatos del contenedor.
 - La imagen se convierte a 8 bits 4:2:0 (yuv420p) y una dimensión impar se rellena con un píxel. En grabaciones de pantalla 4:4:4, revisa la legibilidad del texto fino en color.
 - La calidad del resumen depende de la capacidad multimodal del agente y del tiempo disponible para revisar.
 
 ## Posibles ampliaciones
 
-Sin compromiso de fecha, a partir de la experiencia con grabaciones largas en 4K:
-
-- Barrido secuencial a 1 fps con detección de cambios de diapositiva.
-- Hojas de contacto para revisar fotogramas por bloques.
-- Transcripción por bloques reanudable.
-- Montaje reanudable por lotes.
-- Reasignación de un plan a un vídeo movido.
-- Modo opcional de eliminación de pausas y aceleración, solo bajo petición expresa.
+Los seis puntos que figuraban aquí a partir de la experiencia con grabaciones largas en 4K —barrido
+con índice de cambios y hojas de contacto, transcripción y montaje reanudables por bloques,
+reasignación de un plan a un vídeo movido y aceleración/eliminación de pausas— ya los entrega la
+0.2.0 ([D-007](decisiones.md#d-007--compresión-por-defecto-con-objetivo-configurable),
+[D-009](decisiones.md#d-009--montaje-por-cortes-en-caché-con-recuento-forzado),
+[D-011](decisiones.md#d-011--identidad-por-huella-y-reasignación-de-planes)). No hay ampliaciones
+pendientes de decisión; las prioridades abiertas están en [requisitos.md](requisitos.md#pendiente).
