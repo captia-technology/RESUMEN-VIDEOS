@@ -223,39 +223,64 @@ def clear_partial(folder):
     return None
 
 
+class Refused(ValueError):
+    """Invalid arguments the caller must fix for `frames`: exit code 2, not the generic 1 of a
+    controlled error."""
+
+
 def frames(args):
+    """Sequential sweep by blocks: one FFmpeg process each, resumable and bounded per call."""
     data = probe(args.video)
-    video = video_stream(data)
-    total = duration(data)
+    # common.kind exige audio incluso para clasificar "video" (una grabación muda no pasa); el
+    # barrido no necesita audio, así que aquí basta con comprobar la pista de imagen directamente
+    # (docs/planes/2026-09-18-resumir-video-0.2.0-4-evidencia-empaquetado.md, tabla de dependencias).
+    if not common.pictures(data):
+        raise Refused("El barrido necesita una pista de vídeo; este medio es de solo audio.")
+    stream = video_stream(data)
+    total = min(duration(data), stream_end(data, stream))
     end = total if args.end is None else args.end
-    if not all(math.isfinite(x) for x in (args.start, end, args.step)):
-        raise ValueError("Tiempos no finitos.")
-    if not 0 <= args.start < end <= total or args.step <= 0 or args.width < 0:
-        raise ValueError(f"Intervalo, paso o anchura no válidos (duración: {total:.3f} s).")
-    count = frame_count(args.start, end, args.step)
-    if count > MAX_FRAMES:
-        raise ValueError(f"Extrae como máximo {MAX_FRAMES} imágenes por llamada; "
-                         "divide el análisis en bloques.")
-    # Seeking at or beyond the last frame yields no image; use the last decodable instant.
-    last = round(max(0.0, stream_end(data, video) - frame_interval(video)), 6)
-    base, margin = timeline_start(data), seek_margin(data)
-    out = new_dir(args.out)
-    index = []
-    scale = f",scale=w='min({args.width},iw)':h=-2" if args.width else ""
-    for i in range(count):
-        time = min(round(args.start + i * args.step, 6), last)
-        target = out / f"frame-{i:04d}-{time:.3f}.jpg"
-        # Decoding from before the target and selecting on the container's own timeline yields the
-        # frame on screen at `time`, also when a variable-rate recording holds one frame for seconds
-        # or the demuxer can only seek forward.
-        ffmpeg("-ss", seconds(max(0.0, time - margin)), "-noaccurate_seek", "-copyts",
-               "-i", data["source"]["path"], "-map", f"0:{video['index']}", "-frames:v", "1",
-               "-vf", f"fps=1000:start_time={seconds(base + time)}{scale}", "-q:v", "2", target)
-        if not target.exists():
-            raise ValueError(f"No se obtuvo imagen en {time:.3f} s.")
-        index.append({"time": time, "file": target.name})
-    save(out / "index.json", {"source": data["source"], "frames": index})
-    print(out / "index.json")
+    if not all(math.isfinite(x) for x in (args.start, end, args.step, args.block)):
+        raise Refused("Tiempos no finitos.")
+    if not 0 <= args.start < end <= total or args.step <= 0 or args.width < 0 or args.block <= 0:
+        raise Refused("Intervalo, paso, anchura o bloque no válidos "
+                      f"(la pista de vídeo llega a {total:.3f} s).")
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    plan = sweep_blocks(args.start, end, args.step, length=args.block)
+    todo = [row for row in plan if clear_partial(out / block_name(row[0])) is None]
+    if todo and max(count for _, _, count in todo) > MAX_FRAMES:
+        # El mensaje instruye a corregir --block/--step: es la misma categoría "bloque" que las
+        # demás guardas de argumentos de esta función, así que también da código 2, no el 1 genérico.
+        raise Refused(f"Un bloque supera las {MAX_FRAMES} imágenes por llamada; "
+                      "reduce --block o aumenta --step.")
+    needed = 2 * space_needed(sum(count for _, _, count in todo))
+    free = shutil.disk_usage(out).free
+    if free < needed:
+        raise Refused(f"Espacio insuficiente para el barrido: hacen falta unos {needed / 1e9:.1f} "
+                      f"GB y hay {free / 1e9:.1f} GB libres; reduce el intervalo o trabaja en "
+                      "otra unidad.")
+    done = sum(count for _, _, count in plan) - sum(count for _, _, count in todo)
+    remaining = []
+    for a, b, count in todo:
+        if remaining or done + count > MAX_FRAMES:
+            remaining.append(block_name(a))
+            continue
+        folder = new_dir(out / block_name(a))
+        save(folder / "index.json",
+             sweep_block(data, stream, folder, a, b, args.step, args.width, threads=args.threads))
+        done += count
+        print(f"Bloque {block_name(a)} ({a:.3f}-{b:.3f} s): {count} imágenes", flush=True)
+    if remaining:
+        # `pending` cuenta; `bloques` nombra. La forma del código 3 es la misma en toda la skill.
+        # A diferencia del código 3 de `render` (que cuenta solo lo que esa llamada monta), aquí
+        # `done`/`total` son acumulados de todo el intervalo pedido: es el criterio natural para
+        # un barrido reanudable sobre un rango fijo.
+        print(json.dumps({"done": done, "total": sum(count for _, _, count in plan),
+                          "pending": len(remaining), "bloques": remaining}, ensure_ascii=False))
+        print("Error: presupuesto agotado; repite la misma orden para continuar.", file=sys.stderr)
+        return 3
+    print(out)
+    return 0
 
 
 def transcribe(args):
@@ -369,15 +394,23 @@ def build_parser():
     p.add_argument("--audio-stream", type=int,
                    help="Índice global de la pista de voz según probe (por defecto, la primera de audio).")
     p.set_defaults(run=prepare)
-    p = sub.add_parser("frames", help="Extrae fotogramas JPEG en [start, end) cada step segundos, con index.json.")
+    p = sub.add_parser("frames", help="Barre [start, end) por bloques: vistas JPEG, índice gris y "
+                                      "hojas de contacto; reanudable.")
+    p.set_defaults(run=frames)
     p.add_argument("video", help="Vídeo local.")
-    p.add_argument("--out", required=True, help="Carpeta de salida nueva; se crea y no debe existir.")
+    p.add_argument("--out", required=True,
+                   help="Carpeta de fotogramas (normalmente TRABAJO/fotogramas); se crea si falta y "
+                        "se reutiliza para reanudar.")
     p.add_argument("--start", type=float, default=0, help="Inicio en segundos (por defecto 0).")
-    p.add_argument("--end", type=float, help="Fin en segundos, excluido (por defecto, la duración).")
+    p.add_argument("--end", type=float,
+                   help="Fin en segundos, excluido (por defecto, el final de la pista de vídeo).")
     p.add_argument("--step", type=float, default=15, help="Paso en segundos (por defecto 15).")
     p.add_argument("--width", type=int, default=1280,
-                   help="Anchura máxima en píxeles; 0 conserva la resolución original (por defecto 1280).")
-    p.set_defaults(run=frames)
+                   help="Anchura máxima en píxeles; 0 conserva la resolución (por defecto 1280).")
+    p.add_argument("--block", type=float, default=BLOCK,
+                   help=f"Segundos por bloque, un proceso cada uno (por defecto {BLOCK:.0f}).")
+    p.add_argument("--threads", type=positive, default=1,
+                   help="Hilos de decodificación por bloque (por defecto 1).")
     p = sub.add_parser("transcribe", help="Transcribe con faster-whisper y marcas por palabra (opcional).")
     p.add_argument("audio", help="Audio local, normalmente audio.wav de prepare.")
     p.add_argument("--out", required=True, help="JSON de salida nuevo; su carpeta debe existir.")
@@ -420,7 +453,7 @@ def main():
         # check runs before the version guard, so its report can show python_ok: false.
         if args.command != "check" and sys.version_info < MIN_PYTHON:
             raise ValueError("Se requiere Python 3.10 o superior.")
-        if args.command in ("probe", "prepare", "frames"):
+        if args.command in ("probe", "prepare", "frames", "transcribe"):
             for executable in ("ffmpeg", "ffprobe"):
                 if not tool(executable):
                     raise ValueError(f"Falta {executable} en PATH (se necesita el ejecutable, "
@@ -433,6 +466,9 @@ def main():
     except KeyboardInterrupt:
         print("Interrumpido; revisa las carpetas de salida incompletas.", file=sys.stderr)
         return 130
+    except Refused as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     except (ValueError, OSError, KeyError, RuntimeError, AttributeError, TypeError,
             IndexError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
