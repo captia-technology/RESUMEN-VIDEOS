@@ -83,7 +83,7 @@ Plataformas: Windows, macOS y Linux con Python 3.10+ y FFmpeg (libx264 y AAC); c
 | Vídeo | Cualquier archivo local que FFmpeg lea, con exactamente una pista de vídeo (se ignoran carátulas). Admite rutas con espacios, Unicode, apóstrofos o `#`; las carpetas de salida también pueden contener `#` o `?` si el sistema lo permite. |
 | Solo audio | Cualquier archivo que FFmpeg lea sin pista de vídeo. No se monta nada: se entrega solo el documento (`documento-vN/resumen.md`), con DOCX si hay conversor ([D-010](decisiones.md#d-010--modo-audio-y-documento-con-motores-opcionales)). |
 | Audio | Primera pista por defecto o cualquier pista por índice global (`--audio-stream`, `audio_stream`). Obligatorio para `prepare` y `render`. |
-| Subtítulos | SRT/VTT u otros los lee el agente directamente; el asistente no los importa. |
+| Subtítulos | SRT o WebVTT del propio medio: `transcribe --subtitles` los normaliza a `transcripcion.json` (`settings.origen = "subtitulos"`, segmentos sin `words[]` y aviso `sin_marcas_por_palabra`); otros formatos los lee el agente directamente. |
 | Idioma | Cualquiera que admita el transcriptor; detección automática si no se indica. |
 | Duración objetivo | Opcional, como objetivo editorial; puede indicarse tras la ruta al invocar la skill. |
 
@@ -102,17 +102,23 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 ├── .gitignore                 "*": evita versionar material confidencial
 ├── metadata.json              ffprobe + source + audio_stream
 ├── audio.wav                  mono 16 kHz, solo para análisis
-├── transcripcion.json         opcional: segmentos y palabras con tiempos
+├── transcripcion.json         opcional: segmentos y palabras con tiempos (o subtítulos normalizados)
 ├── imagenes-*/ detalle-*/     JPEG + index.json por bloque
 ├── analisis.md                inventario del agente: evidencia, tiempos, hallazgos, decisiones
-├── seleccion.json             plan de cortes con evidencia
+├── propuesta-vN.md            propuesta en lenguaje natural que escribe plan; espera aceptación
+├── seleccion-vN.json          plan publicado por plan (esquema-vN.json en modo audio)
+├── historial.jsonl            diario de eventos: init, edit, accept, render, verify, doc, deliver
 ├── revision/                  opcional: fotogramas de las uniones y extractos de audio revisados
-├── vN/                        versión inmutable aceptada (nombre elegido con --out; no existe en modo audio)
-│   ├── resumen.mp4            H.264 CRF 18 (yuv420p, frecuencia constante) + AAC 192 kbps
-│   └── seleccion.json         plan aceptado (mismo contenido, JSON reformateado)
-└── documento-vN/              versión inmutable del documento (acompaña al MP4; único resultado en audio)
-    ├── resumen.md              duraciones, reducción, tabla origen → salida y revisión editorial
-    └── resumen.docx            opcional: si hay Pandoc o python-docx
+├── vN/                        versión inmutable montada por render; no existe en modo audio
+│   ├── resumen.mp4             H.264 CRF 18 (yuv420p, frecuencia constante) + AAC 192 kbps
+│   ├── seleccion.json          plan aceptado, con la frase de aceptación
+│   ├── validacion.json         comprobaciones bloqueantes de render
+│   ├── uniones/                hojas de contacto de cada unión, para la revisión editorial
+│   ├── cobertura.json          opcional: cobertura de palabras (compare; informativo)
+│   ├── resumen.md               documento de doc: ficha, resumen, ideas clave, preguntas y limitaciones
+│   ├── resumen.docx             opcional: si hay Pandoc o python-docx
+│   └── timeline.*               línea temporal de texto y, con Pillow, timeline.png
+└── documento-vN/                único resultado en modo audio: mismo resumen.md/.docx que en vídeo
 ```
 
 | Archivo | Contenido principal |
@@ -120,8 +126,8 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 | `metadata.json` | Salida completa de `ffprobe`, `source` (`path`, `size`, `mtime_ns`) y `audio_stream`. |
 | `index.json` | `source` y `frames[]` con `time` (s, instante usado tras ajustar al último fotograma) y `file`. |
 | `transcripcion.json` | `language`, `settings` (modelo, dispositivo, tipo de cálculo, haz, VAD) y `segments[]` con `words[]`. |
-| `seleccion.json` | `source`, `audio_stream` y `segments[]` con `start`, `end`, `title`, `reason`, `audio_evidence`, `visual_evidence`. |
-| `resumen.md` | Nombre del origen (sin ruta), duración original y final, reducción, número de cortes, tabla de correspondencias y apartado editorial para completar. |
+| `seleccion-vN.json` / `esquema-vN.json` | `source`, `audio_stream`, `settings` (objetivo, velocidad, eliminación de pausas) y `segments[]` con `start`, `end`, `title`, `reason`, `audio_evidence`, `visual_evidence`, `priority`, `pinned`; detalle en [compresión](../plugins/resumir-video/skills/resumir-video/references/compresion.md). |
+| `resumen.md` | Documento editorial de `doc`: ficha, resumen, ideas clave, preguntas y respuestas de la sesión, y qué se ha dejado fuera; detalle en [documento](../plugins/resumir-video/skills/resumir-video/references/documento.md). |
 
 ## Asistente `video.py`
 
@@ -131,8 +137,12 @@ resumenes/<nombre>/            carpeta de trabajo (la indica el usuario; la crea
 | `probe VIDEO` | Muestra pistas, formato e identidad del archivo en JSON. | Nada |
 | `prepare VIDEO --work DIR` | Crea la carpeta de trabajo (no debe existir) y extrae el audio de análisis. | `.gitignore`, `metadata.json`, `audio.wav` |
 | `frames VIDEO --out DIR` | Extrae hasta 600 fotogramas por llamada en [`--start`, `--end`) cada `--step` s, con `--width` máximo (0 = original); cada imagen es el fotograma en pantalla en ese instante. | JPEG, `index.json` |
-| `transcribe AUDIO --out JSON` | Transcribe con faster-whisper y marcas por palabra (modelo, idioma, dispositivo, tipo de cálculo, haz, VAD, hilos). | `transcripcion.json` |
-| `render VIDEO --plan JSON --out DIR` | Monta los cortes del plan y valida el resultado. | `seleccion.json`, `resumen.mp4`, `resumen.md` |
+| `transcribe AUDIO --out JSON` | Transcribe con faster-whisper y marcas por palabra (modelo, idioma, dispositivo, tipo de cálculo, haz, VAD, hilos), o con `--subtitles RUTA` normaliza un SRT/WebVTT existente en vez de transcribir. | `transcripcion.json` |
+| `search TRANSCRIPCION QUERY` | Busca en la transcripción sin distinguir tildes ni mayúsculas; `--context` añade segmentos alrededor y `--max` limita las coincidencias. | Nada |
+| `plan --work DIR` | Calcula bordes, tramos, estimación, estados y avisos desde un borrador (`--draft`) y escribe la propuesta; detalle en [compresión](../plugins/resumir-video/skills/resumir-video/references/compresion.md). | `propuesta-vN.md`, `seleccion-vN.json`/`esquema-vN.json`, `historial.jsonl` |
+| `render VIDEO --work DIR --plan JSON` | Monta `vN/resumen.mp4` desde un plan aceptado (`--accept`/`--directo`), con caché de cortes y validación bloqueante; detalle en [revisión](../plugins/resumir-video/skills/resumir-video/references/revision.md). | `vN/resumen.mp4`, `vN/seleccion.json`, `vN/validacion.json`, `vN/uniones/` |
+| `doc --work DIR --version N` | Expande las marcas del documento del agente y publica Markdown y DOCX; detalle en [documento](../plugins/resumir-video/skills/resumir-video/references/documento.md). | En vídeo, `vN/resumen.md`(+`.docx`); en audio, `documento-vN/resumen.md`(+`.docx`) |
+| `compare --work DIR --version N` | Mide la cobertura de palabras del resumen frente al original; informativo, nunca bloquea. | `vN/cobertura.json` |
 
 Todas las opciones y sus valores por defecto aparecen con `video.py <subcomando> --help` y en la referencia de operación. `video.py --version` muestra la versión.
 
