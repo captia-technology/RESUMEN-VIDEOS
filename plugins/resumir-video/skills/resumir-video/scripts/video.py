@@ -450,8 +450,14 @@ def subtitles(text):
             continue
         start, end = cue_time(*found.groups()[:4]), cue_time(*found.groups()[4:])
         body = []
-        for following in lines[number + 1:]:
+        for offset, following in enumerate(lines[number + 1:]):
+            index = number + 1 + offset
             if not following.strip() or CUE.search(following):
+                break
+            # A missing blank separator leaves the next cue's identifier line glued to this
+            # cue's text; if the line right after `following` is itself a cue timing line,
+            # `following` is that identifier, not this cue's text.
+            if index + 1 < len(lines) and CUE.search(lines[index + 1]):
                 break
             body.append(TAG.sub("", following).strip())
         said = " ".join(part for part in body if part).strip()

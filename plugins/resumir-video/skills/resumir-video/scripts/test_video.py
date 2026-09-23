@@ -755,6 +755,21 @@ class SubtitleTest(unittest.TestCase):
         self.assertEqual([s["text"] for s in vtt], ["Hola", "Sin horas", "Texto"])
         self.assertEqual(video.subtitles("sin ningún tiempo"), [])
 
+    def test_a_cue_without_a_blank_separator_does_not_swallow_the_next_identifier(self):
+        # Algunas herramientas de recorte/reexportación omiten la línea en blanco entre cues; el
+        # identificador numérico del cue siguiente no debe colarse como texto del anterior. De
+        # paso, un cue de duración cero y otro con los tiempos invertidos, intercalados sin
+        # separador entre cues válidos, se descartan sin contaminar a sus vecinos.
+        run_together = ("1\n00:00:01,000 --> 00:00:02,000\nUno\n"
+                        "2\n00:00:02,000 --> 00:00:02,000\nCero\n"
+                        "3\n00:00:04,000 --> 00:00:03,000\nInvertido\n"
+                        "4\n00:00:02,000 --> 00:00:03,000\nDos\n"
+                        "5\n00:00:03,000 --> 00:00:04,000\nTres\n")
+        segments = video.subtitles(run_together)
+        self.assertEqual([s["text"] for s in segments], ["Uno", "Dos", "Tres"])
+        self.assertEqual([(s["start"], s["end"]) for s in segments],
+                         [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0)])
+
     def test_the_subtitle_branch_publishes_a_transcription_with_its_warning(self):
         with tempfile.TemporaryDirectory(prefix="resumir-video-") as temporary:
             root = Path(temporary)
