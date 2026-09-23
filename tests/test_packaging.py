@@ -148,8 +148,20 @@ class SkillTest(unittest.TestCase):
         text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         for target in re.findall(r"\]\(([^)#]+)\)", text):
             self.assertTrue((SKILL / target).is_file(), target)
-        for relative in ("scripts/video.py", "scripts/test_video.py", "agents/openai.yaml"):
+        for relative in ("scripts/common.py", "scripts/video.py", "scripts/plan.py",
+                         "scripts/render.py", "scripts/doc.py", "scripts/test_video.py",
+                         "references/operacion.md", "references/compresion.md",
+                         "references/revision.md", "references/documento.md",
+                         "agents/openai.yaml"):
             self.assertTrue((SKILL / relative).is_file(), relative)
+
+    def test_the_references_describe_the_0_2_0_behaviour(self):
+        operation = (SKILL / "references" / "operacion.md").read_text(encoding="utf-8")
+        for gone in ("El montaje no se reanuda", "Cada imagen es una búsqueda independiente"):
+            self.assertNotIn(gone, operation)
+        for present in ("bSSSSS", "indice.gray", "hoja-", "--budget", "--dll-dir",
+                        "missing_filters", "degraded", "bloques"):
+            self.assertIn(present, operation)
 
     def test_repository_has_a_single_copy_of_the_skill(self):
         # A project copy would shadow the plugin in Copilot and duplicate it in Codex.

@@ -11,7 +11,8 @@ Usa rutas absolutas entre comillas simples: en Bash y PowerShell, las comillas d
 
 ## Reglas comunes
 
-- Ningún subcomando sobrescribe. `prepare --work`, `frames --out` y `render --out` reciben una carpeta que **no debe existir**: el subcomando la crea junto con las carpetas padre que falten, así que no la crees antes. Si ya existe, se detiene con `La carpeta ya existe y no se sobrescribe; indica una carpeta nueva (p. ej., con el sufijo -2): <ruta>`.
+- Nada publicado se sobrescribe. Solo `prepare --work` exige una carpeta **nueva**: si ya existe, se detiene con `La carpeta ya existe y no se sobrescribe; indica una carpeta nueva (p. ej., con el sufijo -2): <ruta>`. Dentro de ella, `frames`, `transcribe` y `render` **reanudan**: saltan lo terminado, apartan lo incompleto con el sufijo `.parcial` y publican por renombrado atómico. Las carpetas `vN/` y `documento-vN/` y los JSON publicados son inmutables.
+- Un trabajo que se queda a medias por presupuesto termina con código 3 e imprime `{"done", "total", "pending", "bloques"}`, con `pending` entero y `bloques` con los nombres que faltan: repite la misma orden para continuar.
 - En `transcribe`, `--out` es un archivo JSON que no debe existir, dentro de una carpeta que ya exista. Ningún JSON se reemplaza.
 - Tras un fallo, conserva la evidencia, corrige el motivo y usa una carpeta nueva. Si falla `transcribe`, no se escribe ningún archivo.
 - Los errores controlados se imprimen como `Error: …` en stderr con código de salida 1; los errores de argumentos devuelven 2. Una interrupción (Ctrl+C) imprime `Interrumpido; revisa las carpetas de salida incompletas.` y devuelve 130: la carpeta de salida queda incompleta y no debe reutilizarse. La salida se emite siempre en UTF-8.
@@ -30,21 +31,24 @@ Imprime siempre un JSON, también con Python 3.7–3.9 o con FFmpeg ausente o av
 | `version`, `python`, `python_ok`, `platform` | Versión de la skill, versión de Python, si es 3.10 o posterior, y plataforma. |
 | `ffmpeg`, `ffprobe` | Ruta del ejecutable encontrado, o `null`. |
 | `ffmpeg_version`, `libx264`, `aac` | Primera línea de `ffmpeg -version` y disponibilidad de cada codificador. |
+| `filters_ok`, `missing_filters` | Si están los diecinueve filtros que usan el barrido y el montaje, y la lista de los que falten. |
 | `faster_whisper` | Si **el intérprete que ejecuta `check`** puede importar `faster_whisper.WhisperModel`. |
+| `pandoc`, `python_docx`, `docx_engine` | Conversores encontrados y cuál se usará (`pandoc`, `python-docx` o `null`). |
+| `pillow` | Si hay Pillow para el PNG del timeline. |
 | `transcription_venv` | Carpeta recomendada para el entorno de transcripción (`VENV`). |
 | `disk_free_gb` | Espacio libre, en GB, de la unidad del directorio actual (o `null`). |
+| `memory_free_gb` | Memoria disponible, en GB, o `null` donde no puede leerse sin dependencias. |
+| `degraded` | Qué se pierde por cada opcional que falta, redactado. |
 | `error` | `null`, o el diagnóstico de FFmpeg si falla al ejecutarse. |
-| `ok` | `true` si Python 3.10+, `ffmpeg`, `ffprobe`, libx264 y AAC están disponibles y no hay `error`. |
+| `ok` | `true` si Python 3.10+, `ffmpeg`, `ffprobe`, libx264, AAC y los filtros obligatorios están disponibles y no hay `error`. |
 
-Termina con código 0 solo si `ok` es `true`; `faster-whisper` es opcional. Para saber si `faster-whisper` está instalado en `VENV`, ejecuta `check` con el Python de ese entorno. Si la carpeta de trabajo está en otra unidad, comprueba allí el espacio libre (`df -h` o `Get-PSDrive`). Como orden de magnitud, reserva 115 MB por hora de audio de análisis, entre 0,1 y 1 MB por fotograma extraído y, para el montaje, unas tres veces el tamaño previsto del resumen (cortes intermedios, PCM y MP4 final).
+Termina con código 0 solo si `ok` es `true`, y en `ok` solo entran Python, FFmpeg, `ffprobe`, los codificadores y los filtros obligatorios: **ningún opcional cambia el código de salida**. Lee `degraded` antes de empezar el inventario y anuncia lo que se degrada (sin conversor, la entrega es solo Markdown; sin Pillow, el timeline solo en texto; sin faster-whisper, hacen falta subtítulos del medio; con poca memoria, monta con un solo hilo). Para saber si `faster-whisper` está instalado en `VENV`, ejecuta `check` con el Python de ese entorno. Si la carpeta de trabajo está en otra unidad, comprueba allí el espacio libre (`df -h` o `Get-PSDrive`). Como orden de magnitud, reserva 115 MB por hora de audio de análisis, entre 0,1 y 1 MB por fotograma extraído y, para el montaje, unas tres veces el tamaño previsto del resumen (cortes intermedios, PCM y MP4 final).
 
 ## Preparar evidencia
 
 ```text
 python3 'SKILL_DIR/scripts/video.py' probe 'video.mp4'
 python3 'SKILL_DIR/scripts/video.py' prepare 'video.mp4' --work 'TRABAJO'
-python3 'SKILL_DIR/scripts/video.py' frames 'video.mp4' --out 'TRABAJO/imagenes-0000' --start 0 --end 600 --step 15
-python3 'SKILL_DIR/scripts/video.py' frames 'video.mp4' --out 'TRABAJO/detalle-0120' --start 120 --end 135 --step 1 --width 0
 ```
 
 `probe` muestra la salida completa de `ffprobe` (formato y todas las pistas) y la identidad del archivo (`source`: ruta absoluta, tamaño y `mtime_ns`). No resume nada ni escribe archivos.
@@ -66,16 +70,27 @@ Una clave ausente suele significar que no aplica (por ejemplo, sin `side_data_li
 
 `prepare` crea `TRABAJO` (y sus carpetas padre) con `.gitignore` (`*`), `metadata.json` (salida de `probe` más `audio_stream`) y `audio.wav` mono a 16 kHz sin eliminar silencios. Por defecto usa la primera pista de audio; `--audio-stream N` elige el índice **global** mostrado por `probe`. El WAV solo sirve para análisis: el montaje utiliza el audio original. Un vídeo sin audio produce un error explícito antes de crear la carpeta; puede estudiarse con `frames`, pero no satisface por sí solo el análisis del ponente.
 
-`frames` muestrea el intervalo semiabierto [`--start`, `--end`) cada `--step` segundos:
+```text
+python3 'SKILL_DIR/scripts/video.py' frames 'video.mp4' --out 'TRABAJO/fotogramas' --step 15
+python3 'SKILL_DIR/scripts/video.py' frames 'video.mp4' --out 'TRABAJO/fotogramas' --start 120 --end 135 --step 1 --width 0
+```
 
-- Un instante igual a `--end` nunca se incluye, así que los bloques consecutivos no repiten imágenes. Si omites `--end`, se usa la duración exacta, lo más seguro en el último bloque; un valor redondeado por encima de la duración se rechaza.
-- Valida `0 ≤ start < end ≤ duración` (la del contenedor), `step > 0` y `width ≥ 0`, y extrae como máximo 600 imágenes por llamada.
-- Escribe JPEG `frame-NNNN-T.jpg` (`NNNN`: orden; `T`: instante en segundos con tres decimales) y un `index.json` con `source` y, para cada imagen, `time` (segundos desde el inicio, redondeados a seis decimales) y `file`.
-- Cada imagen es el fotograma **en pantalla** en ese instante, también en grabaciones de pantalla de frecuencia variable que mantienen un fotograma durante segundos y en contenedores sin índice (MPEG-TS). Los tiempos se cuentan desde el inicio del contenedor: si su pista de vídeo empieza más tarde, la imagen puede corresponder al fotograma inmediatamente anterior.
-- Un instante posterior al último fotograma de vídeo se ajusta a ese fotograma. `time` y `T` registran el instante usado, no el solicitado; si el audio dura más que el vídeo, varias imágenes pueden repetir el último fotograma.
-- `--width 0` conserva la resolución; el valor por defecto 1280 es un máximo que solo afecta a las vistas de análisis.
+`frames` barre el intervalo semiabierto [`--start`, `--end`) por **bloques** de `--block` segundos
+(600 por defecto), con un proceso de FFmpeg por bloque:
 
-Cada imagen es una búsqueda independiente: no decodifica horas completas ni carga el vídeo en memoria. En fuentes con fotogramas clave muy espaciados (grabaciones 4K de pantalla, por ejemplo) cada búsqueda puede tardar decenas de segundos; usa pasos amplios por bloques, amplía solo donde haga falta y no extraigas cientos de imágenes a resolución completa sin necesidad. Reutiliza los bloques ya inspeccionados.
+- Cada bloque produce su carpeta `bSSSSS/` (los segundos de su inicio) con `frame-NNNN.jpg`,
+  `indice.gray`, `hoja-NNN.jpg` e `index.json`. `indice.gray` es el índice de cambios: 64×64 píxeles
+  en gris por imagen, sin cabecera, `N × 4096` bytes. Las hojas de contacto agrupan 25 vistas cada una.
+- `index.json` lleva `start`, `end`, `step` y, por imagen, `time` (segundos desde el inicio del
+  contenedor) y `file`. Cada imagen es el fotograma **en pantalla** en ese instante, también en
+  grabaciones de frecuencia variable que mantienen un fotograma durante segundos.
+- Se reanuda: los bloques con `index.json` se saltan y los incompletos pasan a `bSSSSS.parcial`
+  (no se borra nada). Repite la misma orden hasta que no queden pendientes.
+- Como máximo 600 imágenes por llamada. Al agotarse, imprime `{"done", "total", "pending", "bloques"}`
+  y devuelve 3. Antes de empezar comprueba el espacio libre: reserva unos 2 MB por vista.
+- `--width 0` conserva la resolución original; el valor por defecto 1280 es un máximo. Para el
+  detalle, repite el barrido sobre un intervalo corto con `--step` de 1–3 s y `--width 0`.
+- Un medio de solo audio se rechaza con un mensaje explícito.
 
 ## Registro del análisis
 
@@ -106,11 +121,32 @@ Usa después `VENV/Scripts/python.exe` en Windows o `VENV/bin/python` en macOS/L
 
 Sin `--allow-download`, un modelo que no está en caché termina con un error que pide repetir la orden con esa opción o indicar en `--model` una carpeta CTranslate2 local, y no se crea la salida. Si `faster-whisper` no puede importarse, por cualquier motivo, el error es `Falta faster-whisper…`.
 
-Opciones: `--model` (nombre o carpeta CTranslate2 local; por defecto `small`), `--language` (se detecta si se omite), `--allow-download` (sin ella solo se usan modelos locales o en caché), `--device cpu|cuda|auto` (por defecto `cpu`), `--compute-type` (por defecto `int8`; `float16` es habitual en GPU), `--beam-size` (por defecto 1), `--no-vad` y `--threads`. La carpeta de `--out` debe existir; se comprueba antes de cargar el modelo. No se distribuyen pesos con la skill.
-
 La salida es `{"language", "settings", "segments": [{"start", "end", "text", "words": [{"start", "end", "text"}]}]}`; `settings` registra modelo, dispositivo, tipo de cálculo, haz y VAD. Las marcas no garantizan límites fonéticos exactos. Usa `base` si los recursos son muy limitados y la revisión confirma precisión suficiente; usa un modelo mayor solo si los errores técnicos lo justifican. El VAD puede omitir habla real: repite con `--no-vad` los huecos que la detección de silencios muestra con sonido (véase [Sincronización y huecos sin escuchar](#sincronización-y-huecos-sin-escuchar)) y suma el desplazamiento del extracto.
 
-La transcripción se hace en una sola pasada y el resultado se escribe al final. En audios de varias horas puede agotarse la memoria: usa un modelo menor o divide el WAV con FFmpeg por bloques cortados en silencios, transcribe cada bloque y suma el desplazamiento de cada uno a sus tiempos.
+```text
+<python-del-entorno> 'SKILL_DIR/scripts/video.py' transcribe 'TRABAJO/audio.wav' --out 'TRABAJO/transcripcion.json' --model small --language es --allow-download
+<python-del-entorno> 'SKILL_DIR/scripts/video.py' transcribe 'TRABAJO/audio.wav' --out 'TRABAJO/transcripcion.json' --subtitles 'clase.srt' --language es
+```
+
+La transcripción se hace por **bloques** de `--block` segundos (600 por defecto), cortados en la
+ventana más silenciosa que hay dentro de `--slack` segundos (60 por defecto) del corte teórico. Cada
+bloque se guarda en `transcripcion.parcial/bloque-NNN.json` nada más terminar, así que una llamada
+interrumpida no pierde trabajo: repite la misma orden. El modelo se carga una vez por llamada y el
+idioma queda fijado con el primer bloque. Al final, los tramos que tienen sonido y ninguna palabra se
+vuelven a transcribir sin VAD y se publican marcados con `"recuperado": true`; los segmentos dudosos
+se marcan con `"dudoso": true`, no se descartan. `transcripcion.json` se publica por renombrado
+atómico y la carpeta parcial desaparece.
+
+Opciones: `--model`, `--language`, `--allow-download`, `--device cpu|cuda|auto` (por defecto `auto`:
+prueba CUDA y avisa antes de volver a CPU), `--dll-dir` (carpeta de DLL de CUDA/cuDNN en Windows,
+repetible), `--compute-type` (por defecto `int8` en CPU y `float16` en CUDA), `--beam-size`,
+`--no-vad`, `--threads`, `--block`, `--slack`, `--budget` (segundos como máximo por llamada: al
+agotarse devuelve 3) y `--subtitles`.
+
+Con `--subtitles` no se carga ningún modelo: se normaliza un SRT o WebVTT del propio medio a
+`transcripcion.json`, con `settings.origen = "subtitulos"`, segmentos sin `words[]` y el aviso
+`sin_marcas_por_palabra`. Comprueba antes su sincronía con el método de
+[Sincronización y huecos sin escuchar](#sincronización-y-huecos-sin-escuchar).
 
 El asistente no importa SRT/VTT: el agente puede leerlos directamente y usarlos para decidir los cortes. No vuelvas a transcribir sin necesidad. La transcripción es evidencia del audio, nunca evidencia visual.
 
@@ -185,7 +221,8 @@ Con contenedores sin índice (MPEG-TS, M2TS) la búsqueda solo avanza: el asiste
 
 No utiliza copia directa para cortar: los límites entre fotogramas clave no serían precisos. Los intermedios se guardan en una carpeta temporal `cortes-*` dentro de la carpeta de `--out` y se eliminan al terminar o fallar; tras una interrupción puede quedar y debe borrarse a mano. No se borra el vídeo ni el material de análisis. `--threads` limita los hilos de codificación (por defecto, el mínimo entre 4 y los núcleos disponibles); redúcelo si falta memoria con fuentes 4K. Prevé espacio para los cortes intermedios y el MP4 final. CRF 18 puede producir un archivo con más bitrate que una grabación de pantalla muy comprimida.
 
-El montaje no se reanuda: un fallo obliga a repetirlo en otra carpeta. En vídeos largos con muchos cortes, ejecútalo en segundo plano si el cliente lo permite. Las fuentes con varias pistas de vídeo se rechazan: normalízalas antes. Las discontinuidades de tiempo y los desfases de inicio inusuales entre pistas requieren revisión específica; no garantices fidelidad con la ruta estándar si los metadatos los indican. En fuentes de 10 bits o 4:4:4, revisa la legibilidad del texto fino tras la conversión; en fuentes de frecuencia variable, revisa con especial atención las uniones.
+El montaje se reanuda: cada corte verificado queda en `cortes/<clave>.mkv` y `--budget` limita el tiempo por llamada, que devuelve 3 con lo que falta. Un cerrojo exclusivo impide dos montajes a la vez sobre el mismo trabajo.
+Órdenes de `render`: `--accept 'frase literal del usuario'` o `--directo` autorizan el montaje, `--budget` lo acota por llamada y `--dry-run` estima el coste imprimiendo `{reused, new, eta_s}` —cortes reutilizables, cortes nuevos y segundos— sin montar nada. No lo confundas con `plan --dry-run`: `plan --dry-run` muestra el plan propuesto sin escribirlo; `render --dry-run` estima el coste del montaje sin renderizar. En vídeos largos con muchos cortes, ejecútalo en segundo plano si el cliente lo permite. Las fuentes con varias pistas de vídeo se rechazan: normalízalas antes. Las discontinuidades de tiempo y los desfases de inicio inusuales entre pistas requieren revisión específica; no garantices fidelidad con la ruta estándar si los metadatos los indican. En fuentes de 10 bits o 4:4:4, revisa la legibilidad del texto fino tras la conversión; en fuentes de frecuencia variable, revisa con especial atención las uniones.
 
 ## Revisión del resultado
 
