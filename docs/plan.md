@@ -50,14 +50,53 @@ No verificado (pendiente de evidencia):
 
 Aceptación manual de la versión 0.2.0 sobre una grabación real, con los umbrales provisionales de
 [requisitos.md](requisitos.md#umbrales-provisionales) recorridos al menos una vez. Pendiente de
-completar en la tarea 13.
+completar antes de publicar.
 
 | Fecha | Grabación | Objetivo pedido | Frase de aceptación | Resultado |
 | --- | --- | --- | --- | --- |
 | | | | | |
 
+Comprobaciones exigidas por la especificación §13 antes de publicar, sobre la grabación larga en 4K:
+
+| Comprobación | Cómo | Resultado |
+| --- | --- | --- |
+| Memoria máxima por corte | Corte de 40 tramos montado con `--threads 4`, `2` y `1`, midiendo el pico del proceso de FFmpeg | (pendiente de evidencia) |
+| Tiempo por fase | Segundos de `prepare`, `frames` completo, `transcribe` completo, `plan` y `render` sobre la grabación de 4K | (pendiente de evidencia) |
+| Cobertura de palabras | `vN/cobertura.json`: media y mínimo por corte | (pendiente de evidencia) |
+| Calibración de umbrales | Silencio, `sin_pausas_detectadas`, recuperación de huecos y umbrales de imagen, contrastados con el material real | (pendiente de evidencia) |
+| Barrido de 2 h | Espacio ocupado por `fotogramas/` y tiempo por bloque | (pendiente de evidencia) |
+| Revisión en lenguaje natural | Las diez peticiones de la tabla de `revision.md`, una por una | (pendiente de evidencia) |
+| Modo audio | Una grabación de solo audio de extremo a extremo, con y sin Pandoc | (pendiente de evidencia) |
+
+Ejecutado en esta entrega (tarea 13), sin la grabación real anterior: Windows 11 (build 26200),
+Python 3.11.9, FFmpeg 8.0.1 (compilación completa con libx264 y AAC), Claude Code 2.1.280 y Codex
+CLI 0.104.0 (solo para los validadores independientes de más abajo; esa versión no tiene órdenes de
+plugin, como ya registra la validación del 2026-09-17).
+
+- `python -B -m unittest discover -s tests`: 27 pruebas, correcto.
+- `python -B -m unittest discover -s plugins/resumir-video/skills/resumir-video/scripts -p "test_*.py"`:
+  278 pruebas, correcto (2 omitidas: sin CUDA y sin `faster-whisper` en esta máquina).
+- `claude plugin validate plugins/resumir-video --strict` y `claude plugin validate . --strict`:
+  correcto en los dos.
+- `validate_plugin.py` (`skills/.system/plugin-creator`) y `quick_validate.py`
+  (`skills/.system/skill-creator`) de Codex: correcto en los dos.
+- `scripts/install.py --dry-run`, `--agent codex` y `--uninstall` contra el `HOME` real: instalación
+  y desinstalación limpias; `video.py check` de la copia instalada devuelve `"version": "0.2.0"` y
+  los cinco módulos se importan desde ella; sin `__pycache__` en la copia.
+- `claude plugin tag plugins/resumir-video --dry-run`: simulación correcta (etiqueta
+  `resumir-video--v0.2.0`, sin crearla). No se ha ejecutado `--push` ni se ha creado la etiqueta real:
+  la tabla de aceptación manual sigue con filas «(pendiente de evidencia)».
+
+Omitido en esta entrega: la aceptación manual con la grabación larga en 4K (las dos tablas
+anteriores) y las diez peticiones de `revision.md`. La regla del repositorio prohíbe inventar esos
+datos, así que quedan marcados y no se ha publicado ninguna versión.
+
 ## Siguiente paso
 
+- Completar la aceptación manual de las dos tablas anteriores con una grabación real en 4K,
+  incluidas las diez peticiones de `revision.md`.
+- Publicar la versión 0.2.0 (`claude plugin tag plugins/resumir-video --push`) solo cuando esas
+  tablas queden sin filas «(pendiente de evidencia)».
 - Comprobar el flujo de instalación desde la interfaz de VS Code y la invocación dentro de una sesión en Claude Code, Copilot y Codex.
 - Comprobar macOS: `video.py check`, las pruebas automáticas y las órdenes de `brew` de la guía.
 - Evaluar la versión empaquetada con nuevos vídeos técnicos: cobertura, precisión, legibilidad, uniones y consumo.

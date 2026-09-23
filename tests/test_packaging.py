@@ -180,6 +180,21 @@ class SkillTest(unittest.TestCase):
         for gone in ("No impongas un porcentaje fijo", "No acelera ni recorta la imagen"):
             self.assertNotIn(gone, text)
 
+    def test_every_script_has_its_tests_and_the_skill_stays_self_contained(self):
+        scripts = sorted(p.name for p in (SKILL / "scripts").glob("*.py")
+                         if not p.name.startswith("test_"))
+        self.assertEqual(scripts, ["common.py", "doc.py", "plan.py", "render.py", "video.py"])
+        for name in scripts:
+            if name != "common.py":
+                self.assertTrue((SKILL / "scripts" / f"test_{name}").is_file(), name)
+        self.assertFalse(list(SKILL.rglob("__pycache__")))
+        entry = (SKILL / "scripts" / "video.py").read_text(encoding="utf-8")
+        self.assertIn("sys.dont_write_bytecode = True", entry)
+        # La skill no puede depender de la documentación del repositorio.
+        for path in SKILL.rglob("*.md"):
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotIn("](../../../../docs/", path.read_text(encoding="utf-8"))
+
     def test_the_repository_documents_the_0_2_0_decisions(self):
         decisions = (ROOT / "docs" / "decisiones.md").read_text(encoding="utf-8")
         for identifier in ("D-007", "D-008", "D-009", "D-010", "D-011"):
